@@ -1,17 +1,4 @@
-import logging
-from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler,
-    CallbackContext,
-    JobQueue,
-)
-
+pip install python-telegram-bot
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
