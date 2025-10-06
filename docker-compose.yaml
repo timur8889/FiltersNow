@@ -1,0 +1,8 @@
+ervices:
+
+    app:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        environment:
+            TOKEN: MY_TOKEN
