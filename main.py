@@ -4,12 +4,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import sqlite3
 from datetime import datetime
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-
 # Токен бота (замените на свой)
 TOKEN = "8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM"
 
