@@ -1,7 +1,6 @@
 import logging
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from datetime import datetime, timedelta
 
 # Настройка логирования
 logging.basicConfig(
