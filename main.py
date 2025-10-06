@@ -393,7 +393,7 @@ def main():
     init_excel()
     
     # Создание приложения
-    application = Application.builder().token("8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM").build()
+    application = Application.builder().token("").build()
     
     # Обработчики команд
     application.add_handler(CommandHandler("start", start))
