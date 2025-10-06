@@ -231,7 +231,7 @@ def main():
     init_db()
     
     # Создание приложения
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM).build()
     
     # Обработчики команд
     application.add_handler(CommandHandler("start", start))
