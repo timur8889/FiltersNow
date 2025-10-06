@@ -148,7 +148,7 @@ def main():
     init_db()
     
     # Создание приложения
-    application = Application.builder().token "8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM".build()
+    application = Application.builder().token ("8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM").build()
     
     # Обработчик диалога
     conv_handler = ConversationHandler(
