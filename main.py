@@ -121,7 +121,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     
-    application = Application.builder().token 8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM.build()
+    application = Application.builder().token ("8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM").build()
 
     # Проверка замен каждый день
     job_queue = application.job_queue
