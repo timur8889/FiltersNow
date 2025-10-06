@@ -130,17 +130,6 @@ async def cmd_check(message: types.Message):
             )
         await message.answer(response)
 
-async def check_expired_periodically():
-    """Фоновая задача для проверки просроченных фильтров"""
-    while True:
-        await asyncio.sleep(86400)  Проверка раз в сутки
-        today = datetime.date.today()
-        for filter_data in filters_db:
-            if filter_data['expiry_date'] == today:
-                await bot.send_message(
-                    filter_data['user_id'],
-                    f"⚠️ Срок действия фильтра '{filter_data['name']}' истекает сегодня!"
-                )
 
 if __name__ == '__main__':
     from aiogram import executor
