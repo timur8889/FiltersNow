@@ -11,7 +11,7 @@ logging.basicConfig(
 )
 
 # Токен бота (замените на свой)
-TOKEN = 8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM
+TOKEN = "8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM"
 
 
 # Этапы разговора
