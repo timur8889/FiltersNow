@@ -1,138 +1,91 @@
-import asyncio
-import datetime
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from datetime import datetime, timedelta
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-# Замените на ваш токен бота
-API_TOKEN = '8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM'
+# Словарь для хранения данных пользователей (временное хранилище)
+user_data = {}
 
-bot = Bot(token=API_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
-
-# Временное хранилище данных (в реальном проекте используйте БД)
-filters_db = []
-
-class FilterForm(StatesGroup):
-    name = State()
-    install_date = State()
-    expiry_date = State()
-
-@dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "Добро пожаловать в менеджер фильтров!\n"
-        "Доступные команды:\n"
-        "/add - добавить новый фильтр\n"
-        "/list - показать все фильтры\n"
-        "/check - проверить просроченные фильтры"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [['Установить фильтр', 'Статус фильтра'], ['Помощь']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        'Добро пожаловать! Я помогу отслеживать замену фильтров для воды.\n'
+        'Выберите действие:',
+        reply_markup=reply_markup
     )
 
-@dp.message_handler(commands=['add'])
-async def cmd_add(message: types.Message):
-    await FilterForm.name.set()
-    await message.answer("Введите название фильтра:")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
 
-@dp.message_handler(state=FilterForm.name)
-async def process_name(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['name'] = message.text
+    if text == 'Установить фильтр':
+        await set_filter(update, context)
+    elif text == 'Статус фильтра':
+        await check_status(update, context)
+    elif text == 'Помощь':
+        await show_help(update, context)
 
-    await FilterForm.next()
-    await message.answer("Введите дату установки (ДД.ММ.ГГГГ):")
+async def set_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data[user_id] = {
+        'install_date': datetime.now(),
+        'replace_after': 6  # месяцев по умолчанию
+    }
+    
+    await update.message.reply_text(
+        f'Фильтр установлен! Дата установки: {datetime.now().strftime("%d.%m.%Y")}\n'
+        'Рекомендуемая замена через 6 месяцев.'
+    )
 
-@dp.message_handler(state=FilterForm.install_date)
-async def process_install_date(message: types.Message, state: FSMContext):
-    try:
-        install_date = datetime.datetime.strptime(message.text, '%d.%m.%Y').date()
-    except ValueError:
-        await message.answer("Неверный формат даты! Используйте ДД.ММ.ГГГГ")
+async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_data:
+        await update.message.reply_text('У вас нет активного фильтра. Используйте "Установить фильтр"')
         return
 
-    async with state.proxy() as data:
-        data['install_date'] = install_date
+    data = user_data[user_id]
+    replace_date = data['install_date'] + timedelta(days=30*data['replace_after'])
+    days_left = (replace_date - datetime.now()).days
 
-    await FilterForm.next()
-    await message.answer("Введите срок годности (в днях) или дату окончания (ДД.ММ.ГГГГ):")
-
-@dp.message_handler(state=FilterForm.expiry_date)
-async def process_expiry(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        try:
-            # Попытка интерпретировать ввод как количество дней
-            expiry_days = int(message.text)
-            expiry_date = data['install_date'] + datetime.timedelta(days=expiry_days)
-        except ValueError:
-            # Если не число, пробуем как дату
-            try:
-                expiry_date = datetime.datetime.strptime(message.text, '%d.%m.%Y').date()
-            except ValueError:
-                await message.answer("Неверный формат! Используйте число (дни) или ДД.ММ.ГГГГ")
-                return
-
-        filter_data = {
-            'name': data['name'],
-            'install_date': data['install_date'],
-            'expiry_date': expiry_date,
-            'user_id': message.from_user.id
-        }
-
-        filters_db.append(filter_data)
-        await message.answer(
-            f"Фильтр добавлен!\n"
-            f"Название: {data['name']}\n"
-            f"Дата установки: {data['install_date'].strftime('%d.%m.%Y')}\n"
-            f"Срок годности до: {expiry_date.strftime('%d.%m.%Y')}"
+    if days_left > 0:
+        await update.message.reply_text(
+            f'Ваш фильтр установлен {data["install_date"].strftime("%d.%m.%Y")}\n'
+            f'До замены осталось: {days_left} дней'
         )
-
-    await state.finish()
-
-@dp.message_handler(commands=['list'])
-async def cmd_list(message: types.Message):
-    if not filters_db:
-        await message.answer("Список фильтров пуст")
-        return
-
-    response = "Список фильтров:\n\n"
-    for idx, filter_data in enumerate(filters_db, 1):
-        status = "🔴 Просрочен" if filter_data['expiry_date'] < datetime.date.today() else "✅ Активен"
-        response += (
-            f"{idx}. {filter_data['name']}\n"
-            f"Установлен: {filter_data['install_date'].strftime('%d.%m.%Y')}\n"
-            f"Годен до: {filter_data['expiry_date'].strftime('%d.%m.%Y')}\n"
-            f"Статус: {status}\n\n"
-        )
-
-    await message.answer(response)
-
-@dp.message_handler(commands=['check'])
-async def cmd_check(message: types.Message):
-    today = datetime.date.today()
-    expired_filters = [
-        f for f in filters_db
-        if f['expiry_date'] < today
-    ]
-
-    if not expired_filters:
-        await message.answer("Нет просроченных фильтров")
     else:
-        response = "Просроченные фильтры:\n\n"
-        for filter_data in expired_filters:
-            response += (
-                f"🔴 {filter_data['name']}\n"
-                f"Просрочен с: {filter_data['expiry_date'].strftime('%d.%m.%Y')}\n\n"
-            )
-        await message.answer(response)
+        await update.message.reply_text(
+            '❌ Время заменить фильтр!\n'
+            f'Последняя замена: {data["install_date"].strftime("%d.%m.%Y")}'
+        )
 
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        '📋 Доступные команды:\n'
+        '• Установить фильтр - начать отсчёт времени работы фильтра\n'
+        '• Статус фильтра - проверить оставшееся время\n'
+        '• Помощь - показать это сообщение\n\n'
+        'Стандартный срок службы картриджа - 6 месяцев'
+    )
+    await update.message.reply_text(help_text)
+
+def main():
+    # Замените 'YOUR_TOKEN' на реальный токен бота
+    application = Application.builder().token(8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM).build()
+
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Запуск бота
+    application.run_polling()
 
 if __name__ == '__main__':
-    from aiogram import executor
-    loop = asyncio.get_event_loop()
-    loop.create_task(check_expired_periodically())
-    executor.start_polling(dp, skip_updates=True)
+    main()
