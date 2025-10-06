@@ -11,8 +11,7 @@ logging.basicConfig(
 )
 
 # Токен бота (замените на свой)
-TOKEN = "
-8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM"
+TOKEN = "8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM"
 
 # Этапы разговора
 SELECTING_ACTION, ADDING_FILTER, SELECTING_FILTER = range(3)
