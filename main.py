@@ -2,7 +2,6 @@ import os
 import logging
 from datetime import datetime, timedelta
 import sqlite3
-import pandas as pd
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import openpyxl
