@@ -8,13 +8,13 @@ from telegram import (
     InlineKeyboardButton
 )
 from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
+    updater,
+    commandHandler,
+    messageHandler,
     filters,
-    ConversationHandler,
-    CallbackContext,
-    CallbackQueryHandler
+    conversationHandler,
+    callbackContext,
+    callbackQueryHandler
 )
 import sqlite3
 import pytz
