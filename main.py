@@ -130,7 +130,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Получение списка администраторов
 def get_admins():
-    return ["5024165375", "ADMIN_USER_ID_2"]  # Замените на реальные ID
+    return ["5024165375"]  # Замените на реальные ID
 
 # Начало создания заявки
 async def create_ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
