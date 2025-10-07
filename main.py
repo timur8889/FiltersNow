@@ -1,308 +1,131 @@
 import logging
-from datetime import datetime, timedelta
 from telegram import (
-    Update,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
+    Update,
+    KeyboardButton
 )
 from telegram.ext import (
-    updater,
-    commandHandler,
-    messageHandler,
-    filters,
-    conversationHandler,
-    callbackContext,
-    callbackQueryHandler
+    Updater,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    ConversationHandler,
+    CallbackContext,
 )
-import sqlite3
-import pytz
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Состояния разговора
-FIO, POSITION, PHONE, PRIORITY, CATEGORY, PROBLEM = range(6)
 
 # Настройки
-ADMIN_IDS = [5024165375]  # Замените на ID администраторов
-TIMEZONE = pytz.timezone('Europe/Moscow')
-WORK_START = 9  # 9:00
-WORK_END = 17   # 17:00
+ADMIN_CHAT_ID = 5024165375  # Замените на реальный ID администратора
+BOT_TOKEN = "8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM"
 
-# Инициализация базы данных
-def init_db():
-    conn = sqlite3.connect('tickets.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS tickets
-                 (id INTEGER PRIMARY KEY,
-                  user_id INTEGER,
-                  fio TEXT,
-                  position TEXT,
-                  phone TEXT,
-                  priority TEXT,
-                  category TEXT,
-                  problem TEXT,
-                  created DATETIME,
-                  deadline DATETIME,
-                  status TEXT DEFAULT 'new',
-                  admin_comment TEXT)''')
-    conn.commit()
-    conn.close()
-
-# Проверка рабочего времени
-def is_working_hours():
-    now = datetime.now(TIMEZONE)
-    if now.weekday() >= 5:  # Суббота и воскресенье
-        return False
-    current_hour = now.hour
-    return WORK_START <= current_hour < WORK_END
-
-# Расчет дедлайна
-def calculate_deadline():
-    now = datetime.now(TIMEZONE)
-    hours_added = 0
-    
-    while hours_added < 48:
-        now += timedelta(hours=1)
-        if now.weekday() < 5 and WORK_START <= now.hour < WORK_END:
-            hours_added += 1
-            
-    return now
+# Состояния разговора
+FIO, PHONE, PROBLEM, PRIORITY, DESCRIPTION = range(5)
 
 # Клавиатуры
-def main_keyboard():
-    return ReplyKeyboardMarkup([
-        ['📝 Создать заявку'],
-        ['📊 Статус заявок']
-    ], resize_keyboard=True)
+main_keyboard = [['Подать заявку']]
+problem_keyboard = [
+    ['Интернет', 'Телефония'],
+    ['Видеонаблюдение', 'Домофон'],
+    ['Другая проблема']
+]
+priority_keyboard = [['Низкий', 'Средний'], ['Высокий', 'Критический']]
 
-def priority_keyboard():
-    return ReplyKeyboardMarkup([
-        ['🔴 Высокий', '🟡 Средний'],
-        ['🟢 Низкий', '🔵 Обычный']
-    ], resize_keyboard=True)
-
-def category_keyboard():
-    return ReplyKeyboardMarkup([
-        ['💻 Техника', '📊 Программы'],
-        ['🌐 Сеть', '🔐 Безопасность'],
-        ['📝 Документы', '❓ Другое']
-    ], resize_keyboard=True)
-
-# Команда start
-def start(update: Update, context: CallbackContext):
-    user = update.message.from_user
+def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
-        f"Добро пожаловать, {user.first_name}!\n"
-        "Я бот для управления заявками.\n\n"
-        "Рабочее время: Пн-Пт 9:00-17:00\n"
-        "Время выполнения заявки: 48 часов\n\n"
-        "Выберите действие:",
-        reply_markup=main_keyboard()
+        'Добро пожаловать! Для подачи заявки нажмите кнопку:',
+        reply_markup=ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
     )
 
-# Начало создания заявки
-def create_ticket_start(update: Update, context: CallbackContext):
-    if not is_working_hours():
-        update.message.reply_text(
-            "Сейчас нерабочее время. Ваша заявка будет создана "
-            "в следующем рабочем дне.",
-            reply_markup=main_keyboard()
-        )
-    
+def start_application(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
-        "Введите ваше ФИО:",
+        'Введите ваше ФИО:',
         reply_markup=ReplyKeyboardRemove()
     )
     return FIO
 
-# Обработка ФИО
-def fio_received(update: Update, context: CallbackContext):
+def fio_received(update: Update, context: CallbackContext) -> int:
     context.user_data['fio'] = update.message.text
-    update.message.reply_text("Введите вашу должность:")
-    return POSITION
-
-# Обработка должности
-def position_received(update: Update, context: CallbackContext):
-    context.user_data['position'] = update.message.text
-    update.message.reply_text("Введите ваш телефон:")
+    update.message.reply_text('Введите ваш номер телефона:')
     return PHONE
 
-# Обработка телефона
-def phone_received(update: Update, context: CallbackContext):
+def phone_received(update: Update, context: CallbackContext) -> int:
     context.user_data['phone'] = update.message.text
     update.message.reply_text(
-        "Выберите приоритет:",
-        reply_markup=priority_keyboard()
-    )
-    return PRIORITY
-
-# Обработка приоритета
-def priority_received(update: Update, context: CallbackContext):
-    context.user_data['priority'] = update.message.text
-    update.message.reply_text(
-        "Выберите категорию проблемы:",
-        reply_markup=category_keyboard()
-    )
-    return CATEGORY
-
-# Обработка категории
-def category_received(update: Update, context: CallbackContext):
-    context.user_data['category'] = update.message.text
-    update.message.reply_text(
-        "Опишите проблему подробно:",
-        reply_markup=ReplyKeyboardRemove()
+        'Выберите тип проблемы:',
+        reply_markup=ReplyKeyboardMarkup(problem_keyboard, resize_keyboard=True)
     )
     return PROBLEM
 
-# Создание заявки
-def problem_received(update: Update, context: CallbackContext):
+def problem_received(update: Update, context: CallbackContext) -> int:
     context.user_data['problem'] = update.message.text
-    user_data = context.user_data
-    
-    # Сохранение в БД
-    conn = sqlite3.connect('tickets.db')
-    c = conn.cursor()
-    
-    created = datetime.now(TIMEZONE)
-    deadline = calculate_deadline()
-    
-    c.execute('''INSERT INTO tickets 
-                 (user_id, fio, position, phone, priority, category, problem, created, deadline)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (update.message.from_user.id,
-               user_data['fio'],
-               user_data['position'],
-               user_data['phone'],
-               user_data['priority'],
-               user_data['category'],
-               user_data['problem'],
-               created,
-               deadline))
-    
-    ticket_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    
-    # Уведомление администраторов
-    for admin_id in ADMIN_IDS:
-        try:
-            context.bot.send_message(
-                admin_id,
-                f"🎫 Новая заявка #{ticket_id}\n"
-                f"👤 {user_data['fio']}\n"
-                f"💼 {user_data['position']}\n"
-                f"📞 {user_data['phone']}\n"
-                f"🚩 {user_data['priority']}\n"
-                f"📁 {user_data['category']}\n"
-                f"📝 {user_data['problem']}\n"
-                f"⏰ Дедлайн: {deadline.strftime('%d.%m.%Y %H:%M')}"
-            )
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления администратору {admin_id}: {e}")
-    
     update.message.reply_text(
-        f"✅ Заявка #{ticket_id} создана!\n"
-        f"Дедлайн: {deadline.strftime('%d.%m.%Y %H:%M')}",
-        reply_markup=main_keyboard()
+        'Выберите приоритет:',
+        reply_markup=ReplyKeyboardMarkup(priority_keyboard, resize_keyboard=True)
+    )
+    return PRIORITY
+
+def priority_received(update: Update, context: CallbackContext) -> int:
+    context.user_data['priority'] = update.message.text
+    update.message.reply_text(
+        'Опишите проблему подробнее:',
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return DESCRIPTION
+
+def description_received(update: Update, context: CallbackContext) -> int:
+    context.user_data['description'] = update.message.text
+    
+    # Формируем заявку
+    application = (
+        "🎛 *Новая заявка*\n"
+        f"👤 *ФИО:* {context.user_data['fio']}\n"
+        f"📞 *Телефон:* {context.user_data['phone']}\n"
+        f"🔧 *Проблема:* {context.user_data['problem']}\n"
+        f"🚨 *Приоритет:* {context.user_data['priority']}\n"
+        f"📝 *Описание:* {context.user_data['description']}"
     )
     
-    # Очистка временных данных
-    context.user_data.clear()
+    # Отправляем администратору
+    context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=application,
+        parse_mode='Markdown'
+    )
+    
+    # Подтверждение пользователю
+    update.message.reply_text(
+        '✅ Ваша заявка принята! Мы свяжемся с вами в ближайшее время.',
+        reply_markup=ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
+    )
     
     return ConversationHandler.END
 
-# Отмена разговора
-def cancel(update: Update, context: CallbackContext):
+def cancel(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
-        'Создание заявки отменено.',
-        reply_markup=main_keyboard()
+        'Заявка отменена.',
+        reply_markup=ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
     )
     return ConversationHandler.END
 
-# Проверка статуса заявок
-def check_status(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    conn = sqlite3.connect('tickets.db')
-    c = conn.cursor()
-    
-    c.execute('''SELECT id, created, deadline, status, admin_comment 
-                 FROM tickets WHERE user_id = ? ORDER BY created DESC LIMIT 5''',
-              (user_id,))
-    
-    tickets = c.fetchall()
-    conn.close()
-    
-    if not tickets:
-        update.message.reply_text("У вас нет созданных заявок.")
-        return
-    
-    response = "📊 Ваши последние заявки:\n\n"
-    for ticket in tickets:
-        status_icons = {'new': '🆕', 'in_progress': '🔄', 'done': '✅', 'overdue': '❌'}
-        status_icon = status_icons.get(ticket[3], '📄')
-        
-        response += (f"{status_icon} Заявка #{ticket[0]}\n"
-                    f"📅 Создана: {ticket[1][:16]}\n"
-                    f"⏰ Дедлайн: {ticket[2][:16]}\n"
-                    f"📋 Статус: {ticket[3]}\n")
-        
-        if ticket[4]:
-            response += f"💬 Комментарий: {ticket[4]}\n"
-        response += "\n"
-    
-    update.message.reply_text(response)
+def main() -> None:
+    updater = Updater(BOT_TOKEN)
+    dispatcher = updater.dispatcher
 
-# Обработка ошибок
-def error_handler(update: Update, context: CallbackContext):
-    logger.error(msg="Исключение при обработке сообщения:", exc_info=context.error)
-    
-    try:
-        update.message.reply_text(
-            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=main_keyboard()
-        )
-    except:
-        pass
-
-def main():
-    # Инициализация БД
-    init_db()
-    
-    # Создание updater и dispatcher
-    updater = Updater("8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME", use_context=True)  # Замените на ваш токен
-    dp = updater.dispatcher
-
-    # Обработчики команд
-    dp.add_handler(CommandHandler("start", start))
-    
-    # Обработчик создания заявки
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(Filters.regex('^(📝 Создать заявку)$'), create_ticket_start)],
+        entry_points=[MessageHandler(Filters.regex('^Подать заявку$'), start_application)],
         states={
             FIO: [MessageHandler(Filters.text & ~Filters.command, fio_received)],
-            POSITION: [MessageHandler(Filters.text & ~Filters.command, position_received)],
             PHONE: [MessageHandler(Filters.text & ~Filters.command, phone_received)],
-            PRIORITY: [MessageHandler(Filters.text & ~Filters.command, priority_received)],
-            CATEGORY: [MessageHandler(Filters.text & ~Filters.command, category_received)],
-            PROBLEM: [MessageHandler(Filters.text & ~Filters.command, problem_received)],
+            PROBLEM: [MessageHandler(Filters.regex('^(Интернет|Телефония|Видеонаблюдение|Домофон|Другая проблема)$'), problem_received)],
+            PRIORITY: [MessageHandler(Filters.regex('^(Низкий|Средний|Высокий|Критический)$'), priority_received)],
+            DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, description_received)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', cancel)],
     )
-    
-    dp.add_handler(conv_handler)
-    dp.add_handler(MessageHandler(Filters.regex('^(📊 Статус заявок)$'), check_status))
-    
-    # Обработчик ошибок
-    dp.add_error_handler(error_handler)
 
-    # Запуск бота
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(conv_handler)
+
     updater.start_polling()
     updater.idle()
 
