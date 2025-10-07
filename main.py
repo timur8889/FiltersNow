@@ -77,8 +77,8 @@ def is_work_time():
 def calculate_due_date(create_time):
     create_dt = create_time.astimezone(TIMEZONE)
     
-    # Если заявка создана после 17:00, переносим на следующий день 9:00
-    if create_dt.time() > time(17, 0):
+    # Если заявка создана после 22:00, переносим на следующий день 9:00
+    if create_dt.time() > time(22, 0):
         create_dt = create_dt.replace(hour=9, minute=0, second=0) + timedelta(days=1)
     
     # Пропускаем выходные
