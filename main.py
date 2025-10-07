@@ -1,117 +1,175 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, Filters, 
-    CallbackContext, ConversationHandler
-)
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import sqlite3
-from datetime import datetime, time
-import pytz
-import re
-
-# Настройки
-TOKEN = "8278600298:AAFA-R0ql-dibAoBruxgwitHTx_LLx61OdM"
-ADMIN_ID = "@merik_202"  # Ваш ID в Telegram
-TIMEZONE = pytz.timezone('Europe/Moscow')
-DB_NAME = "applications.db"
-
-# Состояния разговора
-NAME, PHONE, CONFIRM = range(3)
+from datetime import datetime, timedelta
+import asyncio
 
 # Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Инициализация базы данных
+# Состояния для ConversationHandler
+CHOOSING, TYPING_REPLY = range(2)
+
+# База данных
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            name TEXT,
-            phone TEXT,
-            status TEXT DEFAULT 'new',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    conn = sqlite3.connect('filters.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS filters
+                 (id INTEGER PRIMARY KEY, 
+                  filter_type TEXT, 
+                  install_date TEXT,
+                  replacement_period INTEGER,
+                  chat_id INTEGER)''')
     conn.commit()
     conn.close()
 
-# Проверка рабочего времени
-def is_working_time():
-    now = datetime.now(TIMEZONE)
-    if now.weekday() >= 5:  # Суббота и воскресенье
-        return False
+def add_filter(filter_type, install_date, replacement_period, chat_id):
+    conn = sqlite3.connect('filters.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO filters (filter_type, install_date, replacement_period, chat_id) VALUES (?, ?, ?, ?)",
+              (filter_type, install_date, replacement_period, chat_id))
+    conn.commit()
+    conn.close()
+
+def get_filters(chat_id):
+    conn = sqlite3.connect('filters.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM filters WHERE chat_id = ?", (chat_id,))
+    filters = c.fetchall()
+    conn.close()
+    return filters
+
+def get_due_filters():
+    conn = sqlite3.connect('filters.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM filters WHERE date(install_date) <= date('now', '-' || replacement_period || ' days')")
+    due_filters = c.fetchall()
+    conn.close()
+    return due_filters
+
+# Команды бота
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [['Добавить фильтр', 'Мои фильтры'], ['Проверить замену']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
-    start_time = time(9, 0)
-    end_time = time(17, 30)
-    return start_time <= now.time() <= end_time
-
-# Проверка номера телефона
-def is_valid_phone(phone):
-    pattern = r'^(\+7|8)?[\s\-]?\(?[489][0-9]{2}\)?[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}$'
-    return re.match(pattern, phone) is not None
-
-# Уведомление администратора
-def notify_admin(context: CallbackContext, application_data):
-    message = (
-        "🆕 НОВАЯ ЗАЯВКА!\n"
-        f"👤 Имя: {application_data['name']}\n"
-        f"📞 Телефон: {application_data['phone']}\n"
-        f"👤 Пользователь: @{application_data['username']}\n"
-        f"🆔 User ID: {application_data['user_id']}\n"
-        f"⏰ Время: {datetime.now(TIMEZONE).strftime('%d.%m.%Y %H:%M')}"
+    await update.message.reply_text(
+        '🤖 Бот для отслеживания замены фильтров\n\n'
+        'Выберите действие:',
+        reply_markup=reply_markup
     )
-    
-    context.bot.send_message(chat_id=ADMIN_ID, text=message)
+    return CHOOSING
 
-# Команда /start
-def start(update: Update, context: CallbackContext):
-    if not is_working_time():
-        update.message.reply_text(
-            "❌ Прием заявок осуществляется только с 9:00 до 17:30 в рабочие дни.\n"
-            "Пожалуйста, вернитесь в рабочее время."
+async def add_filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        'Введите данные фильтра в формате:\n'
+        'Тип фильтра | Дата установки (ГГГГ-ММ-ДД) | Период замены (в днях)\n\n'
+        'Пример: Водяной фильтр | 2024-01-15 | 180'
+    )
+    return TYPING_REPLY
+
+async def received_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = update.message.text
+        parts = [part.strip() for part in text.split('|')]
+        
+        if len(parts) != 3:
+            await update.message.reply_text('Неверный формат. Попробуйте снова.')
+            return TYPING_REPLY
+        
+        filter_type, install_date, period = parts
+        replacement_period = int(period)
+        chat_id = update.message.chat_id
+        
+        add_filter(filter_type, install_date, replacement_period, chat_id)
+        
+        next_replacement = datetime.strptime(install_date, '%Y-%m-%d') + timedelta(days=replacement_period)
+        
+        await update.message.reply_text(
+            f'✅ Фильтр добавлен!\n'
+            f'Тип: {filter_type}\n'
+            f'Дата установки: {install_date}\n'
+            f'Следующая замена: {next_replacement.strftime("%Y-%m-%d")}'
         )
-        return ConversationHandler.END
+        
+    except ValueError as e:
+        await update.message.reply_text('Ошибка в данных. Проверьте формат даты и периода.')
     
-    update.message.reply_text(
-        "👋 Добро пожаловать! Я помогу вам оставить заявку.\n"
-        "Для начала введите ваше имя:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return NAME
+    return CHOOSING
 
-# Получение имени
-def get_name(update: Update, context: CallbackContext):
-    name = update.message.text.strip()
-    if len(name) < 2:
-        update.message.reply_text("❌ Имя должно содержать минимум 2 символа. Попробуйте еще раз:")
-        return NAME
+async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    filters = get_filters(chat_id)
     
-    context.user_data['name'] = name
-    context.user_data['user_id'] = update.effective_user.id
-    context.user_data['username'] = update.effective_user.username or "Не указан"
+    if not filters:
+        await update.message.reply_text('У вас нет добавленных фильтров.')
+        return CHOOSING
     
-    update.message.reply_text(
-        "📞 Теперь введите ваш номер телефона:\n"
-        "Например: +7 999 123-45-67 или 89991234567"
-    )
-    return PHONE
+    message = "📋 Ваши фильтры:\n\n"
+    for filter_item in filters:
+        filter_id, filter_type, install_date, replacement_period, _ = filter_item
+        install_dt = datetime.strptime(install_date, '%Y-%m-%d')
+        next_replacement = install_dt + timedelta(days=replacement_period)
+        days_left = (next_replacement - datetime.now()).days
+        
+        status = "✅" if days_left > 7 else "⚠️" if days_left > 0 else "🔴"
+        
+        message += f"{status} {filter_type}\n"
+        message += f"   Установлен: {install_date}\n"
+        message += f"   Замена через: {days_left} дней\n\n"
+    
+    await update.message.reply_text(message)
+    return CHOOSING
 
-# Получение телефона
-def get_phone(update: Update, context: CallbackContext):
-    phone = update.message.text.strip()
+async def check_replacement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    due_filters = get_due_filters()
     
-    if not is_valid_phone(phone):
-        update.message.reply_text(
-            "❌ Неверный формат номера телефона.\n"
-            "Пожалуйста, введите номер в формате:\n"
-            "+7 999 123-45-67 или 89991234567\n"
-            "Попробуйте еще раз:"
-        )
-        return
+    if not due_filters:
+        await update.message.reply_text('✅ Все фильтры в порядке!')
+        return CHOOSING
+    
+    message = "🔔 Требуется замена фильтров:\n\n"
+    for filter_item in due_filters:
+        _, filter_type, install_date, replacement_period, _ = filter_item
+        message += f"🔴 {filter_type}\n"
+        message += f"   Установлен: {install_date}\n"
+        message += f"   Период замены: {replacement_period} дней\n\n"
+    
+    await update.message.reply_text(message)
+    return CHOOSING
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('До свидания!')
+    return ConversationHandler.END
+
+def main():
+    # Инициализация базы данных
+    init_db()
+    
+    # Создание приложения
+    application = Application.builder().token("8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME").build()
+    
+    # Обработчик диалога
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            CHOOSING: [
+                MessageHandler(filters.Regex('^Добавить фильтр$'), add_filter_command),
+                MessageHandler(filters.Regex('^Мои фильтры$'), show_filters),
+                MessageHandler(filters.Regex('^Проверить замену$'), check_replacement),
+            ],
+            TYPING_REPLY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, received_info)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    application.add_handler(conv_handler)
+    
+    # Запуск бота
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
