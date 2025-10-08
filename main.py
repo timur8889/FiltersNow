@@ -1,137 +1,112 @@
 import logging
-from telegram import (
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    Update,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    ConversationHandler,
-    ContextTypes,
-)
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from datetime import datetime, timedelta
 
-# Настройки
-ADMIN_CHAT_ID = 5024165375 # Замените на реальный ID администратора
-BOT_TOKEN = "8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME"
-
-# Состояния разговора
-FIO, PHONE, PROBLEM, PRIORITY, DESCRIPTION = range(5)
-
-# Клавиатуры
-main_keyboard = [['Подать заявку']]
-problem_keyboard = [
-    ['Интернет', 'Телефония'],
-    ['Видеонаблюдение', 'Домофон'],
-    ['Другая проблема']
-]
-priority_keyboard = [['Низкий', 'Средний'], ['Высокий', 'Критический']]
-
-# Включим логирование
+# Настройка логирования
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# Словарь для хранения данных пользователей
+user_data = {}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [['Добавить фильтр', 'Список фильтров'], ['Удалить фильтр']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        'Добро пожаловать! Для подачи заявки нажмите кнопку:',
-        reply_markup=ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
+        'Добро пожаловать в бот для отслеживания замены фильтров воды!',
+        reply_markup=reply_markup
     )
 
-async def start_application(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        'Введите ваше ФИО:',
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return FIO
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
 
-async def fio_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['fio'] = update.message.text
-    await update.message.reply_text('Введите ваш номер телефона:')
-    return PHONE
-
-async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['phone'] = update.message.text
-    await update.message.reply_text(
-        'Выберите тип проблемы:',
-        reply_markup=ReplyKeyboardMarkup(problem_keyboard, resize_keyboard=True)
-    )
-    return PROBLEM
-
-async def problem_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['problem'] = update.message.text
-    await update.message.reply_text(
-        'Выберите приоритет:',
-        reply_markup=ReplyKeyboardMarkup(priority_keyboard, resize_keyboard=True)
-    )
-    return PRIORITY
-
-async def priority_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['priority'] = update.message.text
-    await update.message.reply_text(
-        'Опишите проблему подробнее:',
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return DESCRIPTION
-
-async def description_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['description'] = update.message.text
+    if text == 'Добавить фильтр':
+        await update.message.reply_text(
+            'Введите название фильтра и срок службы в днях через запятую:\n'
+            'Пример: "Картридж Pre-Clear, 180"'
+        )
+        context.user_data['awaiting_input'] = 'add'
     
-    # Формируем заявку
-    application = (
-        "🎛 *Новая заявка*\n"
-        f"👤 *ФИО:* {context.user_data['fio']}\n"
-        f"📞 *Телефон:* {context.user_data['phone']}\n"
-        f"🔧 *Проблема:* {context.user_data['problem']}\n"
-        f"🚨 *Приоритет:* {context.user_data['priority']}\n"
-        f"📝 *Описание:* {context.user_data['description']}\n"
-        f"🆔 *ID пользователя:* {update.effective_user.id}"
-    )
+    elif text == 'Список фильтров':
+        await show_filters(update, user_id)
     
-    # Отправляем администратору
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=application,
-        parse_mode='Markdown'
-    )
+    elif text == 'Удалить фильтр':
+        await update.message.reply_text('Введите название фильтра для удаления:')
+        context.user_data['awaiting_input'] = 'delete'
+
+    elif context.user_data.get('awaiting_input') == 'add':
+        try:
+            name, days = map(str.strip, text.split(','))
+            install_date = datetime.now()
+            replace_date = install_date + timedelta(days=int(days))
+            
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            
+            user_data[user_id][name] = {
+                'install_date': install_date,
+                'replace_date': replace_date
+            }
+            
+            await update.message.reply_text(
+                f'Фильтр "{name}" добавлен!\n'
+                f'Дата установки: {install_date.strftime("%d.%m.%Y")}\n'
+                f'Рекомендуемая замена: {replace_date.strftime("%d.%m.%Y")}'
+            )
+            context.user_data['awaiting_input'] = None
+        
+        except:
+            await update.message.reply_text('Ошибка формата! Используйте: "Название, количество_дней"')
     
-    # Подтверждение пользователю
-    await update.message.reply_text(
-        '✅ Ваша заявка принята! Мы свяжемся с вами в ближайшее время.',
-        reply_markup=ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
-    )
+    elif context.user_data.get('awaiting_input') == 'delete':
+        if user_id in user_data and text in user_data[user_id]:
+            del user_data[user_id][text]
+            await update.message.reply_text(f'Фильтр "{text}" удален!')
+        else:
+            await update.message.reply_text('Фильтр не найден!')
+        context.user_data['awaiting_input'] = None
+
+async def show_filters(update: Update, user_id: int):
+    if user_id not in user_data or not user_data[user_id]:
+        await update.message.reply_text('У вас нет добавленных фильтров!')
+        return
     
-    return ConversationHandler.END
+    text = "Ваши фильтры:\n\n"
+    for name, data in user_data[user_id].items():
+        status = "🔴 Требуется замена!" if datetime.now() > data['replace_date'] else "🟢 Активен"
+        text += (
+            f"{name}\n"
+            f"Установлен: {data['install_date'].strftime('%d.%m.%Y')}\n"
+            f"Замена до: {data['replace_date'].strftime('%d.%m.%Y')}\n"
+            f"Статус: {status}\n\n"
+        )
+    
+    await update.message.reply_text(text)
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        'Заявка отменена.',
-        reply_markup=ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
-    )
-    return ConversationHandler.END
+async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+    for user_id, filters in user_data.items():
+        for name, data in filters.items():
+            if now >= data['replace_date'] - timedelta(days=3):  Напоминание за 3 дня
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"Напоминание: фильтр {name} требует замены до {data['replace_date'].strftime('%d.%m.%Y')}!"
+                )
 
-def main() -> None:
-    # Создаем Application
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^Подать заявку$'), start_application)],
-        states={
-            FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, fio_received)],
-            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone_received)],
-            PROBLEM: [MessageHandler(filters.Regex('^(Интернет|Телефония|Видеонаблюдение|Домофон|Другая проблема)$'), problem_received)],
-            PRIORITY: [MessageHandler(filters.Regex('^(Низкий|Средний|Высокий|Критический)$'), priority_received)],
-            DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_received)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-
+def main():
+    application = Application.builder().token("8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME").build()
+    
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(conv_handler)
-
-    # Запускаем бота
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Проверка напоминаний каждые 24 часа
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_reminders, interval=86400, first=10)
+    
     application.run_polling()
 
 if __name__ == '__main__':
