@@ -87,16 +87,6 @@ async def show_filters(update: Update, user_id: int):
     
     await update.message.reply_text(text)
 
-async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-    for user_id, filters in user_data.items():
-        for name, data in filters.items():
-            if now >= data['replace_date'] - timedelta(days=3):  Напоминание за 3 дня
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"Напоминание: фильтр {name} требует замены до {data['replace_date'].strftime('%d.%m.%Y')}!"
-                )
-
 def main():
     application = Application.builder().token("8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME").build()
     
