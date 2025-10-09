@@ -34,31 +34,105 @@ class FilterStates(StatesGroup):
     waiting_filter_type = State()
     waiting_change_date = State()
 
+# Клавиатуры
+def get_main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("📋 Список фильтров"))
+    keyboard.add(types.KeyboardButton("➕ Добавить фильтр"))
+    keyboard.add(types.KeyboardButton("🗑️ Удалить фильтр"))
+    return keyboard
+
+def get_cancel_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("❌ Отмена"))
+    return keyboard
+
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     await message.answer(
         "🤖 Бот для учета замены фильтров\n\n"
-        "Доступные команды:\n"
-        "/add - Добавить фильтр\n"
-        "/list - Показать все фильтры\n"
-        "/delete - Удалить фильтр"
+        "Используйте кнопки ниже для управления фильтрами:",
+        reply_markup=get_main_keyboard()
     )
 
-# Добавление фильтра
+# Обработка текстовых команд через кнопки
+@dp.message_handler(lambda message: message.text == "📋 Список фильтров")
+@dp.message_handler(commands=['list'])
+async def cmd_list(message: types.Message):
+    conn = sqlite3.connect('filters.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, filter_type, last_change FROM filters WHERE user_id = ?", 
+                (message.from_user.id,))
+    filters = cur.fetchall()
+    conn.close()
+
+    if not filters:
+        await message.answer("📭 Список фильтров пуст", reply_markup=get_main_keyboard())
+        return
+
+    response = "📋 Ваши фильтры:\n\n"
+    for f in filters:
+        # Рассчитаем, сколько дней прошло с замены
+        days_passed = (datetime.now().date() - datetime.strptime(str(f[2]), '%Y-%m-%d').date()).days
+        response += f"🆔 {f[0]}\n📊 Тип: {f[1]}\n📅 Заменен: {f[2]}\n⏰ Прошло дней: {days_passed}\n\n"
+
+    await message.answer(response, reply_markup=get_main_keyboard())
+
+@dp.message_handler(lambda message: message.text == "➕ Добавить фильтр")
 @dp.message_handler(commands=['add'])
 async def cmd_add(message: types.Message):
     await FilterStates.waiting_filter_type.set()
-    await message.answer("Введите тип фильтра:")
+    await message.answer(
+        "Введите тип фильтра (например: 'Фильтр грубой очистки', 'Угольный фильтр' и т.д.):",
+        reply_markup=get_cancel_keyboard()
+    )
 
+@dp.message_handler(lambda message: message.text == "🗑️ Удалить фильтр")
+@dp.message_handler(commands=['delete'])
+async def cmd_delete(message: types.Message):
+    conn = sqlite3.connect('filters.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, filter_type, last_change FROM filters WHERE user_id = ?", 
+                (message.from_user.id,))
+    filters = cur.fetchall()
+    conn.close()
+
+    if not filters:
+        await message.answer("❌ Нет фильтров для удаления", reply_markup=get_main_keyboard())
+        return
+
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    for f in filters:
+        days_passed = (datetime.now().date() - datetime.strptime(str(f[2]), '%Y-%m-%d').date()).days
+        keyboard.add(types.InlineKeyboardButton(
+            f"🗑️ {f[1]} (заменен {f[2]}, {days_passed} дн.)",
+            callback_data=f"delete_{f[0]}"
+        ))
+    
+    keyboard.add(types.InlineKeyboardButton("❌ Отменить", callback_data="cancel_delete"))
+
+    await message.answer("Выберите фильтр для удаления:", reply_markup=keyboard)
+
+# Обработка отмены
+@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    await state.finish()
+    await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
+
+# Добавление фильтра - обработка типа
 @dp.message_handler(state=FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['filter_type'] = message.text
 
     await FilterStates.next()
-    await message.answer("Введите дату последней замены (ГГГГ-ММ-ДД):")
+    await message.answer(
+        "Введите дату последней замены в формате ГГГГ-ММ-ДД (например: 2024-01-15):",
+        reply_markup=get_cancel_keyboard()
+    )
 
+# Добавление фильтра - обработка даты
 @dp.message_handler(state=FilterStates.waiting_change_date)
 async def process_date(message: types.Message, state: FSMContext):
     try:
@@ -74,73 +148,58 @@ async def process_date(message: types.Message, state: FSMContext):
         conn.commit()
         conn.close()
 
-        await message.answer("✅ Фильтр успешно добавлен!")
+        await message.answer(
+            f"✅ Фильтр успешно добавлен!\n\n"
+            f"📊 Тип: {filter_type}\n"
+            f"📅 Дата замены: {change_date}",
+            reply_markup=get_main_keyboard()
+        )
         await state.finish()
         
     except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
+        await message.answer(
+            "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД (например: 2024-01-15):",
+            reply_markup=get_cancel_keyboard()
+        )
 
-# Список фильтров
-@dp.message_handler(commands=['list'])
-async def cmd_list(message: types.Message):
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    cur.execute("SELECT id, filter_type, last_change FROM filters WHERE user_id = ?", 
-                (message.from_user.id,))
-    filters = cur.fetchall()
-    conn.close()
-
-    if not filters:
-        await message.answer("📭 Список фильтров пуст")
-        return
-
-    response = "📋 Ваши фильтры:\n\n"
-    for f in filters:
-        response += f"🆔 {f[0]}\nТип: {f[1]}\nЗаменен: {f[2]}\n\n"
-
-    await message.answer(response)
-
-# Удаление фильтра
-@dp.message_handler(commands=['delete'])
-async def cmd_delete(message: types.Message):
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    cur.execute("SELECT id, filter_type FROM filters WHERE user_id = ?", 
-                (message.from_user.id,))
-    filters = cur.fetchall()
-    conn.close()
-
-    if not filters:
-        await message.answer("❌ Нет фильтров для удаления")
-        return
-
-    keyboard = types.InlineKeyboardMarkup()
-    for f in filters:
-        keyboard.add(types.InlineKeyboardButton(
-            f"{f[1]} (ID: {f[0]})",
-            callback_data=f"delete_{f[0]}"
-        ))
-
-    await message.answer("Выберите фильтр для удаления:", reply_markup=keyboard)
-
+# Обработка удаления через inline кнопки
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('delete_'))
 async def process_delete(callback_query: types.CallbackQuery):
     filter_id = callback_query.data.split('_')[1]
 
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
-    cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?",
+    
+    # Сначала получим информацию о фильтре для сообщения
+    cur.execute("SELECT filter_type, last_change FROM filters WHERE id = ? AND user_id = ?",
                 (filter_id, callback_query.from_user.id))
-    conn.commit()
+    filter_info = cur.fetchone()
+    
+    if filter_info:
+        cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?",
+                    (filter_id, callback_query.from_user.id))
+        conn.commit()
+        
+        await callback_query.message.edit_text(
+            f"✅ Фильтр удален:\n📊 {filter_info[0]}\n📅 {filter_info[1]}"
+        )
+    else:
+        await callback_query.answer("Фильтр не найден", show_alert=True)
+    
     conn.close()
 
-    await callback_query.answer("Фильтр удален", show_alert=False)
-    await bot.send_message(callback_query.from_user.id, "✅ Фильтр успешно удален")
+# Обработка отмены удаления
+@dp.callback_query_handler(lambda c: c.data == "cancel_delete")
+async def cancel_delete(callback_query: types.CallbackQuery):
+    await callback_query.message.edit_text("❌ Удаление отменено")
 
-# Обработка отмены и других сообщений
+# Обработка других сообщений
 @dp.message_handler()
 async def handle_other_messages(message: types.Message):
-    await message.answer("Используйте команды:\n/add - добавить фильтр\n/list - список фильтров\n/delete - удалить фильтр")
+    await message.answer(
+        "Используйте кнопки ниже для управления фильтрами:",
+        reply_markup=get_main_keyboard()
+    )
 
 # Запуск бота
 if __name__ == '__main__':
