@@ -889,12 +889,3 @@ async def handle_other_messages(message: types.Message):
 # Запуск бота
 if __name__ == '__main__':
     init_db()
-    
-    # Инициализируем Google Sheets
-    init_google_sheets_alternative()
-    
-    if not google_sheets_available:
-        logging.warning("Google Sheets недоступен. Бот будет работать только с локальной БД.")
-    
-   logging.info("Бот запущен с улучшениями!")
-    executor.start_polling(dp, skip_updates=True)
