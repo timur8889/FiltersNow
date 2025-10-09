@@ -33,6 +33,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 filter_type TEXT,
+                location TEXT,
                 last_change DATE,
                 expiry_date DATE,
                 lifetime_days INTEGER)''')
@@ -42,6 +43,7 @@ def init_db():
 # States
 class FilterStates(StatesGroup):
     waiting_filter_type = State()
+    waiting_location = State()
     waiting_change_date = State()
     waiting_lifetime = State()
 
@@ -68,6 +70,18 @@ def get_filter_type_keyboard():
         types.KeyboardButton("Аквафор")
     )
     keyboard.add(types.KeyboardButton("Другой тип"))
+    keyboard.add(types.KeyboardButton("❌ Отмена"))
+    return keyboard
+
+def get_location_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.add(
+        types.KeyboardButton("Кухня"),
+        types.KeyboardButton("Ванная"),
+        types.KeyboardButton("Гостиная"),
+        types.KeyboardButton("Под раковиной")
+    )
+    keyboard.add(types.KeyboardButton("Другое место"))
     keyboard.add(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
@@ -115,7 +129,27 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 
     await FilterStates.next()
     await message.answer(
-        f"📅 Срок службы для '{message.text}': {data['lifetime']} дней\n"
+        "📍 Выберите место установки фильтра:",
+        reply_markup=get_location_keyboard()
+    )
+
+@dp.message_handler(state=FilterStates.waiting_location)
+async def process_location(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
+        return
+        
+    if message.text == "Другое место":
+        await message.answer("Введите свое место установки:", reply_markup=get_cancel_keyboard())
+        return
+    
+    async with state.proxy() as data:
+        data['location'] = message.text
+
+    await FilterStates.next()
+    await message.answer(
+        f"📅 Срок службы для '{data['filter_type']}': {data['lifetime']} дней\n"
         f"Введите дату последней замены (ГГГГ-ММ-ДД):",
         reply_markup=get_cancel_keyboard()
     )
@@ -154,6 +188,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             change_date = data['change_date']
             filter_type = data['filter_type']
+            location = data['location']
             
             if message.text.endswith("дней"):
                 lifetime = int(message.text.split()[0])
@@ -165,9 +200,9 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             conn = sqlite3.connect('filters.db')
             cur = conn.cursor()
             cur.execute('''INSERT INTO filters 
-                        (user_id, filter_type, last_change, expiry_date, lifetime_days) 
-                        VALUES (?, ?, ?, ?, ?)''',
-                       (message.from_user.id, filter_type, change_date, expiry_date, lifetime))
+                        (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                        VALUES (?, ?, ?, ?, ?, ?)''',
+                       (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
             conn.commit()
             conn.close()
 
@@ -177,6 +212,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             await message.answer(
                 f"✅ Фильтр успешно добавлен!\n\n"
                 f"📊 Тип: {filter_type}\n"
+                f"📍 Место: {location}\n"
                 f"📅 Дата замены: {change_date}\n"
                 f"⏰ Срок службы: {lifetime} дней\n"
                 f"📅 Годен до: {expiry_date} {status_icon}\n"
@@ -194,7 +230,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
 async def cmd_list(message: types.Message):
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
-    cur.execute("SELECT id, filter_type, last_change, expiry_date, lifetime_days FROM filters WHERE user_id = ?", 
+    cur.execute("SELECT id, filter_type, location, last_change, expiry_date, lifetime_days FROM filters WHERE user_id = ?", 
                 (message.from_user.id,))
     filters = cur.fetchall()
     conn.close()
@@ -207,7 +243,7 @@ async def cmd_list(message: types.Message):
     today = datetime.now().date()
     
     for f in filters:
-        expiry_date = datetime.strptime(str(f[3]), '%Y-%m-%d').date()
+        expiry_date = datetime.strptime(str(f[4]), '%Y-%m-%d').date()
         days_until_expiry = (expiry_date - today).days
         
         if days_until_expiry <= 0:
@@ -221,9 +257,10 @@ async def cmd_list(message: types.Message):
         
         response += (f"🆔 {f[0]}\n"
                     f"📊 Тип: {f[1]}\n"
-                    f"📅 Заменен: {f[2]}\n"
-                    f"⏰ Срок: {f[4]} дней\n"
-                    f"📅 Годен до: {f[3]}\n"
+                    f"📍 Место: {f[2]}\n"
+                    f"📅 Заменен: {f[3]}\n"
+                    f"⏰ Срок: {f[5]} дней\n"
+                    f"📅 Годен до: {f[4]}\n"
                     f"⏳ Осталось дней: {days_until_expiry}\n"
                     f"📢 Статус: {status_icon}\n\n")
 
@@ -235,7 +272,7 @@ async def cmd_list(message: types.Message):
 async def cmd_check(message: types.Message):
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
-    cur.execute("SELECT filter_type, expiry_date FROM filters WHERE user_id = ?", 
+    cur.execute("SELECT filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
                 (message.from_user.id,))
     filters = cur.fetchall()
     conn.close()
@@ -249,13 +286,13 @@ async def cmd_check(message: types.Message):
     expiring_soon = []
     
     for f in filters:
-        expiry_date = datetime.strptime(str(f[1]), '%Y-%m-%d').date()
+        expiry_date = datetime.strptime(str(f[2]), '%Y-%m-%d').date()
         days_until_expiry = (expiry_date - today).days
         
         if days_until_expiry <= 0:
-            expired_filters.append(f"{f[0]} - просрочен {abs(days_until_expiry)} дней назад")
+            expired_filters.append(f"{f[0]} ({f[1]}) - просрочен {abs(days_until_expiry)} дней назад")
         elif days_until_expiry <= 30:
-            expiring_soon.append(f"{f[0]} - осталось {days_until_expiry} дней")
+            expiring_soon.append(f"{f[0]} ({f[1]}) - осталось {days_until_expiry} дней")
 
     response = "🔔 Проверка сроков фильтров:\n\n"
     
@@ -276,7 +313,7 @@ async def cmd_check(message: types.Message):
 async def cmd_delete(message: types.Message):
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
-    cur.execute("SELECT id, filter_type, expiry_date FROM filters WHERE user_id = ?", 
+    cur.execute("SELECT id, filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
                 (message.from_user.id,))
     filters = cur.fetchall()
     conn.close()
@@ -287,13 +324,13 @@ async def cmd_delete(message: types.Message):
 
     keyboard = types.InlineKeyboardMarkup(row_width=1)
     for f in filters:
-        expiry_date = datetime.strptime(str(f[2]), '%Y-%m-%d').date()
+        expiry_date = datetime.strptime(str(f[3]), '%Y-%m-%d').date()
         days_until_expiry = (expiry_date - datetime.now().date()).days
         
         status = "❌" if days_until_expiry <= 0 else "🟡" if days_until_expiry <= 30 else "✅"
         
         keyboard.add(types.InlineKeyboardButton(
-            f"{status} {f[1]} (до {f[2]})",
+            f"{status} {f[1]} ({f[2]}) - до {f[3]}",
             callback_data=f"delete_{f[0]}"
         ))
     
@@ -319,7 +356,7 @@ async def process_delete(callback_query: types.CallbackQuery):
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     
-    cur.execute("SELECT filter_type, expiry_date FROM filters WHERE id = ? AND user_id = ?",
+    cur.execute("SELECT filter_type, location, expiry_date FROM filters WHERE id = ? AND user_id = ?",
                 (filter_id, callback_query.from_user.id))
     filter_info = cur.fetchone()
     
@@ -330,7 +367,7 @@ async def process_delete(callback_query: types.CallbackQuery):
         conn.close()
         
         await callback_query.message.edit_text(
-            f"✅ Фильтр удален:\n📊 {filter_info[0]}\n📅 Срок истекал: {filter_info[1]}"
+            f"✅ Фильтр удален:\n📊 {filter_info[0]}\n📍 {filter_info[1]}\n📅 Срок истекал: {filter_info[2]}"
         )
     else:
         await callback_query.answer("Фильтр не найден", show_alert=True)
