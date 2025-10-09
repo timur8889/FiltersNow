@@ -11,3 +11,4 @@ typing_extensions==4.12.2
 python-dotenv==1.0.0
 pytz==2025.2
 aiogram==2.25.1
+gspread==5.7.0
