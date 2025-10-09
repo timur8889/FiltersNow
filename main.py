@@ -896,10 +896,5 @@ if __name__ == '__main__':
     if not google_sheets_available:
         logging.warning("Google Sheets недоступен. Бот будет работать только с локальной БД.")
     
-    # Настройка планировщика задач
-    scheduler.add_job(check_expiring_filters, CronTrigger(hour=9, minute=0))  # Каждый день в 9:00
-    scheduler.add_job(send_admin_report, CronTrigger(hour=8, minute=0))      # Каждый день в 8:00
-    scheduler.start()
-    
-    logging.info("Бот запущен с улучшениями!")
+   logging.info("Бот запущен с улучшениями!")
     executor.start_polling(dp, skip_updates=True)
