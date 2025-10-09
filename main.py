@@ -200,8 +200,7 @@ def init_db():
                     lifetime_days INTEGER)''')
         conn.commit()
         conn.close()
-        logging.info("✅ База данных инициализирована")
-    except Exception as e:
+       except Exception as e:
         logging.error(f"❌ Ошибка инициализации БД: {e}")
 
 # Клавиатуры
