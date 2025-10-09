@@ -12,7 +12,7 @@ ADMIN_ID = 5024165375  # Замените на ваш ID в Telegram
 
 # Инициализация бота
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
