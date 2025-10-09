@@ -5,7 +5,6 @@ from datetime import datetime
 # from aiogram import Bot, Dispatcher, types
 from aiogram import Bot, types
 from aiogram.dispatcher import Dispatcher
-from aiogram.dispatcher.router import Router
 
 # Настройки
 API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
