@@ -1,11 +1,11 @@
 import logging
 import sqlite3
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor
+# Вместо этого:
+# from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, types
+from aiogram.dispatcher import Dispatcher
+from aiogram.dispatcher.router import Router
 
 # Настройки
 API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
