@@ -1,32 +1,22 @@
 import logging
 import sqlite3
-import gspread
-import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
-from google.oauth2.service_account import Credentials
-from google.auth.exceptions import GoogleAuthError
-from gspread.exceptions import APIError, SpreadsheetNotFound, WorksheetNotFound
 
 # Настройки
-API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
-ADMIN_ID = 5024165375
-
-# Настройки Google Sheets
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-SERVICE_ACCOUNT_FILE = 'service_account.json'  # Файл с учетными данными
-SPREADSHEET_NAME = 'Учет фильтров'  # Название таблицы
+API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'  # Замените на реальный токен
+ADMIN_ID = 5024165375  # Замените на ваш ID в Telegram
 
 # Стандартные сроки службы фильтров (в днях)
 DEFAULT_LIFETIMES = {
-    "угольный": 180,
-    "механический": 90,
-    "обратного осмоса": 365,
-    "умягчитель": 180,
+    "МагистральныйSL10": 180,
+    "Магистральный SL20": 90,
+    "Гейзер": 365,
+    "Аквафор": 180,
     "пост-фильтр": 180,
     "пре-фильтр": 90
 }
@@ -37,77 +27,19 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# Инициализация Google Sheets с улучшенной обработкой ошибок
-def init_google_sheets():
-    try:
-        # Проверяем существование файла учетных данных
-        if not os.path.exists(SERVICE_ACCOUNT_FILE):
-            logging.error(f"Файл учетных данных {SERVICE_ACCOUNT_FILE} не найден")
-            return None
-            
-        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-        client = gspread.authorize(creds)
-        
-        # Проверяем соединение
-        client.list_spreadsheet_files()
-        
-        # Попробуем открыть существующую таблицу или создать новую
-        try:
-            spreadsheet = client.open(SPREADSHEET_NAME)
-            logging.info(f"Таблица '{SPREADSHEET_NAME}' найдена")
-        except SpreadsheetNotFound:
-            logging.info(f"Таблица '{SPREADSHEET_NAME}' не найдена, создаем новую")
-            spreadsheet = client.create(SPREADSHEET_NAME)
-            # Предоставляем доступ для просмотра всем по ссылке
-            spreadsheet.share(None, perm_type='anyone', role='reader')
-        
-        # Получаем первый лист
-        try:
-            worksheet = spreadsheet.sheet1
-        except WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title="Фильтры", rows=100, cols=10)
-        
-        # Устанавливаем заголовки, если лист пустой
-        try:
-            if not worksheet.get('A1'):
-                headers = [['ID', 'User ID', 'Тип фильтра', 'Дата замены', 'Срок годности', 'Оставшееся дней', 'Статус']]
-                worksheet.update('A1:G1', headers)
-                worksheet.format('A1:G1', {'textFormat': {'bold': True}})
-                logging.info("Заголовки таблицы установлены")
-        except APIError as e:
-            logging.error(f"Ошибка при установке заголовков: {e}")
-            return None
-        
-        logging.info("Google Sheets успешно инициализирован")
-        return worksheet
-        
-    except GoogleAuthError as e:
-        logging.error(f"Ошибка аутентификации Google: {e}")
-        return None
-    except APIError as e:
-        logging.error(f"Ошибка API Google Sheets: {e}")
-        return None
-    except Exception as e:
-        logging.error(f"Неожиданная ошибка при инициализации Google Sheets: {e}")
-        return None
-
 # Инициализация БД
 def init_db():
-    try:
-        conn = sqlite3.connect('filters.db')
-        cur = conn.cursor()
-        cur.execute('''CREATE TABLE IF NOT EXISTS filters (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    filter_type TEXT,
-                    last_change DATE,
-                    expiry_date DATE,
-                    lifetime_days INTEGER)''')
-        conn.commit()
-        conn.close()
-        logging.info("База данных инициализирована")
-    except Exception as e:
-        logging.error(f"Ошибка инициализации БД: {e}")
+    conn = sqlite3.connect('filters.db')
+    cur = conn.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS filters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                filter_type TEXT,
+                last_change DATE,
+                expiry_date DATE,
+                lifetime_days INTEGER)''')
+    conn.commit()
+    conn.close()
 
 # States
 class FilterStates(StatesGroup):
@@ -122,7 +54,6 @@ def get_main_keyboard():
     keyboard.add(types.KeyboardButton("➕ Добавить фильтр"))
     keyboard.add(types.KeyboardButton("🗑️ Удалить фильтр"))
     keyboard.add(types.KeyboardButton("🔔 Проверить сроки"))
-    keyboard.add(types.KeyboardButton("📊 Синхронизировать с Google Sheets"))
     return keyboard
 
 def get_cancel_keyboard():
@@ -152,78 +83,12 @@ def get_filter_type_keyboard():
     keyboard.add(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
-# Синхронизация с Google Sheets с улучшенной обработкой ошибок
-def sync_to_google_sheets():
-    try:
-        worksheet = init_google_sheets()
-        if not worksheet:
-            logging.error("Не удалось инициализировать Google Sheets для синхронизации")
-            return None
-        
-        conn = sqlite3.connect('filters.db')
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id, filter_type, last_change, expiry_date, lifetime_days FROM filters")
-        filters = cur.fetchall()
-        conn.close()
-        
-        if not filters:
-            logging.info("Нет данных для синхронизации")
-            return worksheet
-        
-        # Подготавливаем данные
-        data = []
-        today = datetime.now().date()
-        
-        for f in filters:
-            expiry_date = datetime.strptime(str(f[4]), '%Y-%m-%d').date()
-            days_until_expiry = (expiry_date - today).days
-            
-            # Определяем статус
-            if days_until_expiry <= 0:
-                status = "ПРОСРОЧЕН"
-            elif days_until_expiry <= 7:
-                status = "СРОЧНО"
-            elif days_until_expiry <= 30:
-                status = "СКОРО"
-            else:
-                status = "НОРМА"
-            
-            data.append([
-                f[0],  # ID
-                f[1],  # User ID
-                f[2],  # Тип фильтра
-                str(f[3]),  # Дата замены
-                str(f[4]),  # Срок годности
-                days_until_expiry,  # Оставшееся дней
-                status  # Статус
-            ])
-        
-        # Очищаем старые данные (кроме заголовка) и добавляем новые
-        try:
-            all_values = worksheet.get_all_values()
-            if len(all_values) > 1:
-                worksheet.delete_rows(2, len(all_values))
-            
-            if data:
-                worksheet.update(f'A2:G{len(data)+1}', data)
-                logging.info(f"Синхронизировано {len(data)} записей с Google Sheets")
-        except APIError as e:
-            logging.error(f"Ошибка при обновлении данных в Google Sheets: {e}")
-            return None
-        
-        return worksheet
-        
-    except Exception as e:
-        logging.error(f"Ошибка синхронизации с Google Sheets: {e}")
-        return None
-
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     await message.answer(
         "🤖 Бот для учета замены фильтров\n\n"
         "Отслеживайте сроки службы всех ваших фильтров!\n"
-        "📊 Данные синхронизируются с Google Sheets\n"
         "Используйте кнопки ниже для управления:",
         reply_markup=get_main_keyboard()
     )
@@ -248,11 +113,6 @@ async def cmd_add(message: types.Message):
 
 @dp.message_handler(state=FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
-        return
-        
     if message.text == "Другой тип":
         await message.answer("Введите свой вариант типа фильтра:", reply_markup=get_cancel_keyboard())
         return
@@ -271,11 +131,6 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=FilterStates.waiting_change_date)
 async def process_date(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
-        return
-        
     try:
         change_date = datetime.strptime(message.text, '%Y-%m-%d').date()
         
@@ -290,15 +145,10 @@ async def process_date(message: types.Message, state: FSMContext):
         )
         
     except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД:", reply_markup=get_cancel_keyboard())
+        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД:")
 
 @dp.message_handler(state=FilterStates.waiting_lifetime)
 async def process_lifetime(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
-        return
-        
     try:
         async with state.proxy() as data:
             change_date = data['change_date']
@@ -323,10 +173,6 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             conn.commit()
             conn.close()
 
-            # Синхронизируем с Google Sheets
-            sync_result = sync_to_google_sheets()
-            sync_status = "✅ Данные синхронизированы с Google Sheets" if sync_result else "⚠️ Данные сохранены локально (Google Sheets не доступен)"
-
             # Определяем статус срока
             days_until_expiry = (expiry_date - datetime.now().date()).days
             status_icon = "🔔" if days_until_expiry <= 30 else "✅"
@@ -337,14 +183,13 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 f"📅 Дата замены: {change_date}\n"
                 f"⏰ Срок службы: {lifetime} дней\n"
                 f"📅 Годен до: {expiry_date} {status_icon}\n"
-                f"⏳ Осталось дней: {days_until_expiry}\n\n"
-                f"{sync_status}",
+                f"⏳ Осталось дней: {days_until_expiry}",
                 reply_markup=get_main_keyboard()
             )
             await state.finish()
             
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите количество дней:", reply_markup=get_lifetime_keyboard())
+        await message.answer("❌ Неверный формат. Введите количество дней:")
 
 # Список фильтров
 @dp.message_handler(lambda message: message.text == "📋 Список фильтров")
@@ -429,43 +274,6 @@ async def cmd_check(message: types.Message):
 
     await message.answer(response, reply_markup=get_main_keyboard())
 
-# Синхронизация с Google Sheets
-@dp.message_handler(lambda message: message.text == "📊 Синхронизировать с Google Sheets")
-@dp.message_handler(commands=['sync'])
-async def cmd_sync(message: types.Message):
-    try:
-        worksheet = sync_to_google_sheets()
-        
-        if worksheet:
-            # Получаем ссылку на таблицу
-            spreadsheet = worksheet.spreadsheet
-            url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
-            
-            await message.answer(
-                f"✅ Данные успешно синхронизированы с Google Sheets!\n\n"
-                f"📊 Ссылка на таблицу:\n{url}\n\n"
-                f"Таблица обновляется автоматически при каждом изменении.",
-                reply_markup=get_main_keyboard(),
-                disable_web_page_preview=True
-            )
-        else:
-            await message.answer(
-                "❌ Не удалось подключиться к Google Sheets.\n\n"
-                "Возможные причины:\n"
-                "• Файл service_account.json не найден\n"
-                "• Неправильные учетные данные\n"
-                "• Проблемы с доступом к интернету\n"
-                "• Превышены лимиты API Google\n\n"
-                "Данные сохранены локально и будут синхронизированы при восстановлении связи.",
-                reply_markup=get_main_keyboard()
-            )
-    except Exception as e:
-        logging.error(f"Ошибка синхронизации: {e}")
-        await message.answer(
-            "❌ Произошла ошибка при синхронизации данных.",
-            reply_markup=get_main_keyboard()
-        )
-
 # Удаление фильтра
 @dp.message_handler(lambda message: message.text == "🗑️ Удалить фильтр")
 @dp.message_handler(commands=['delete'])
@@ -520,17 +328,14 @@ async def process_delete(callback_query: types.CallbackQuery):
         cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?",
                     (filter_id, callback_query.from_user.id))
         conn.commit()
-        conn.close()
-        
-        # Синхронизируем с Google Sheets
-        sync_to_google_sheets()
         
         await callback_query.message.edit_text(
             f"✅ Фильтр удален:\n📊 {filter_info[0]}\n📅 Срок истекал: {filter_info[1]}"
         )
     else:
         await callback_query.answer("Фильтр не найден", show_alert=True)
-        conn.close()
+    
+    conn.close()
 
 # Обработка отмены удаления
 @dp.callback_query_handler(lambda c: c.data == "cancel_delete")
@@ -548,15 +353,4 @@ async def handle_other_messages(message: types.Message):
 # Запуск бота
 if __name__ == '__main__':
     init_db()
-    
-    # Проверяем наличие файла учетных данных Google
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        logging.warning(f"Файл учетных данных {SERVICE_ACCOUNT_FILE} не найден. Google Sheets недоступен.")
-    else:
-        # Инициализируем Google Sheets при запуске
-        worksheet = init_google_sheets()
-        if worksheet:
-            # Синхронизируем существующие данные
-            sync_to_google_sheets()
-    
     executor.start_polling(dp, skip_updates=True)
