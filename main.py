@@ -1,45 +1,220 @@
 import logging
 import sqlite3
+import gspread
+import os
+import json
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
+from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 
 # Настройки
-API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'  # Замените на реальный токен
-ADMIN_ID = 5024165375  # Замените на ваш ID в Telegram
+API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
+ADMIN_ID = 5024165375
 
-# Стандартные сроки службы фильтров (в днях)
+# Настройки Google Sheets
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+SERVICE_ACCOUNT_FILE = 'service_account.json'
+SPREADSHEET_NAME = 'Учет фильтров'
+
+# Стандартные сроки службы фильтров
 DEFAULT_LIFETIMES = {
-    "МагистральныйSL10": 180,
-    "Магистральный SL20": 90,
-    "Гейзер": 365,
-    "Аквафор": 180,
+    "угольный": 180,
+    "механический": 90,
+    "обратного осмоса": 365,
+    "умягчитель": 180,
     "пост-фильтр": 180,
     "пре-фильтр": 90
 }
 
 # Инициализация бота
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
+# Глобальная переменная для статуса Google Sheets
+google_sheets_available = False
+spreadsheet_url = ""
+
+# Функция для диагностики проблем с Google Sheets
+def diagnose_google_sheets_issue():
+    issues = []
+    
+    # Проверка файла учетных данных
+    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+        issues.append("❌ Файл service_account.json не найден")
+        return issues
+    
+    try:
+        with open(SERVICE_ACCOUNT_FILE, 'r') as f:
+            creds_data = json.load(f)
+        
+        # Проверка обязательных полей
+        required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+        for field in required_fields:
+            if field not in creds_data:
+                issues.append(f"❌ В файле учетных данных отсутствует поле: {field}")
+        
+        if issues:
+            return issues
+            
+        # Проверка формата private_key
+        if not creds_data['private_key'].startswith('-----BEGIN PRIVATE KEY-----'):
+            issues.append("❌ Неправильный формат приватного ключа")
+            
+    except json.JSONDecodeError:
+        issues.append("❌ Файл service_account.json содержит невалидный JSON")
+    except Exception as e:
+        issues.append(f"❌ Ошибка при чтении файла учетных данных: {e}")
+    
+    return issues
+
+# Альтернативный способ инициализации Google Sheets
+def init_google_sheets_alternative():
+    global google_sheets_available, spreadsheet_url
+    
+    try:
+        # Диагностика проблем
+        issues = diagnose_google_sheets_issue()
+        if issues:
+            for issue in issues:
+                logging.error(issue)
+            return None
+        
+        # Загрузка учетных данных
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        
+        # Обновление токена, если необходимо
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        
+        # Создание клиента
+        client = gspread.authorize(creds)
+        
+        # Проверка доступности API
+        client.list_spreadsheet_files()
+        
+        # Поиск или создание таблицы
+        try:
+            spreadsheet = client.open(SPREADSHEET_NAME)
+        except gspread.SpreadsheetNotFound:
+            # Создаем новую таблицу
+            spreadsheet = client.create(SPREADSHEET_NAME)
+            # Настраиваем доступ
+            spreadsheet.share(None, perm_type='anyone', role='reader')
+        
+        # Получаем или создаем лист
+        try:
+            worksheet = spreadsheet.get_worksheet(0)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title="Фильтры", rows=100, cols=10)
+        
+        # Настраиваем заголовки
+        current_data = worksheet.get_all_values()
+        if not current_data:
+            headers = ['ID', 'User ID', 'Тип фильтра', 'Дата замены', 'Срок годности', 'Оставшееся дней', 'Статус']
+            worksheet.append_row(headers)
+            # Форматируем заголовки
+            worksheet.format('A1:G1', {
+                'textFormat': {'bold': True},
+                'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+            })
+        
+        # Сохраняем URL для доступа
+        global spreadsheet_url
+        spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+        
+        google_sheets_available = True
+        logging.info(f"✅ Google Sheets успешно подключен: {spreadsheet_url}")
+        return worksheet
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка подключения к Google Sheets: {e}")
+        google_sheets_available = False
+        return None
+
+# Упрощенная функция синхронизации
+def simple_sync_to_google_sheets():
+    if not google_sheets_available:
+        return False
+    
+    try:
+        worksheet = init_google_sheets_alternative()
+        if not worksheet:
+            return False
+        
+        # Получаем данные из БД
+        conn = sqlite3.connect('filters.db')
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, filter_type, last_change, expiry_date, lifetime_days FROM filters")
+        filters = cur.fetchall()
+        conn.close()
+        
+        if not filters:
+            return True
+        
+        # Очищаем старые данные (кроме заголовка)
+        all_data = worksheet.get_all_values()
+        if len(all_data) > 1:
+            worksheet.delete_rows(2, len(all_data))
+        
+        # Добавляем новые данные
+        today = datetime.now().date()
+        for f in filters:
+            expiry_date = datetime.strptime(str(f[4]), '%Y-%m-%d').date()
+            days_until_expiry = (expiry_date - today).days
+            
+            # Определяем статус
+            if days_until_expiry <= 0:
+                status = "ПРОСРОЧЕН"
+            elif days_until_expiry <= 7:
+                status = "СРОЧНО"
+            elif days_until_expiry <= 30:
+                status = "СКОРО"
+            else:
+                status = "НОРМА"
+            
+            row_data = [
+                f[0],  # ID
+                f[1],  # User ID
+                f[2],  # Тип фильтра
+                str(f[3]),  # Дата замены
+                str(f[4]),  # Срок годности
+                days_until_expiry,  # Оставшееся дней
+                status  # Статус
+            ]
+            worksheet.append_row(row_data)
+        
+        logging.info(f"✅ Данные синхронизированы: {len(filters)} записей")
+        return True
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка синхронизации: {e}")
+        return False
+
 # Инициализация БД
 def init_db():
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    cur.execute('''CREATE TABLE IF NOT EXISTS filters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                filter_type TEXT,
-                last_change DATE,
-                expiry_date DATE,
-                lifetime_days INTEGER)''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('filters.db')
+        cur = conn.cursor()
+        cur.execute('''CREATE TABLE IF NOT EXISTS filters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    filter_type TEXT,
+                    last_change DATE,
+                    expiry_date DATE,
+                    lifetime_days INTEGER)''')
+        conn.commit()
+        conn.close()
+        logging.info("✅ База данных инициализирована")
+    except Exception as e:
+        logging.error(f"❌ Ошибка инициализации БД: {e}")
 
 # States
 class FilterStates(StatesGroup):
@@ -54,6 +229,8 @@ def get_main_keyboard():
     keyboard.add(types.KeyboardButton("➕ Добавить фильтр"))
     keyboard.add(types.KeyboardButton("🗑️ Удалить фильтр"))
     keyboard.add(types.KeyboardButton("🔔 Проверить сроки"))
+    if google_sheets_available:
+        keyboard.add(types.KeyboardButton("📊 Google Sheets"))
     return keyboard
 
 def get_cancel_keyboard():
@@ -86,10 +263,12 @@ def get_filter_type_keyboard():
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
+    status_text = "✅ Google Sheets подключен" if google_sheets_available else "❌ Google Sheets недоступен (работаем локально)"
+    
     await message.answer(
-        "🤖 Бот для учета замены фильтров\n\n"
-        "Отслеживайте сроки службы всех ваших фильтров!\n"
-        "Используйте кнопки ниже для управления:",
+        f"🤖 Бот для учета замены фильтров\n\n"
+        f"{status_text}\n"
+        f"Используйте кнопки ниже для управления:",
         reply_markup=get_main_keyboard()
     )
 
@@ -99,7 +278,7 @@ def get_lifetime_by_type(filter_type):
     for key, days in DEFAULT_LIFETIMES.items():
         if key in filter_type_lower:
             return days
-    return 180  # значение по умолчанию
+    return 180
 
 # Добавление фильтра
 @dp.message_handler(lambda message: message.text == "➕ Добавить фильтр")
@@ -113,13 +292,18 @@ async def cmd_add(message: types.Message):
 
 @dp.message_handler(state=FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
+    # Обработка отмены должна быть ПЕРВОЙ
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
+        return
+        
     if message.text == "Другой тип":
         await message.answer("Введите свой вариант типа фильтра:", reply_markup=get_cancel_keyboard())
         return
     
     async with state.proxy() as data:
         data['filter_type'] = message.text
-        # Автоматически определяем срок службы по типу
         data['lifetime'] = get_lifetime_by_type(message.text)
 
     await FilterStates.next()
@@ -131,6 +315,12 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=FilterStates.waiting_change_date)
 async def process_date(message: types.Message, state: FSMContext):
+    # Обработка отмены должна быть ПЕРВОЙ
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
+        return
+        
     try:
         change_date = datetime.strptime(message.text, '%Y-%m-%d').date()
         
@@ -145,22 +335,26 @@ async def process_date(message: types.Message, state: FSMContext):
         )
         
     except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД:")
+        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД:", reply_markup=get_cancel_keyboard())
 
 @dp.message_handler(state=FilterStates.waiting_lifetime)
 async def process_lifetime(message: types.Message, state: FSMContext):
+    # Обработка отмены должна быть ПЕРВОЙ
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
+        return
+        
     try:
         async with state.proxy() as data:
             change_date = data['change_date']
             filter_type = data['filter_type']
             
-            # Определяем срок службы
             if message.text.endswith("дней"):
                 lifetime = int(message.text.split()[0])
             else:
                 lifetime = int(message.text)
             
-            # Рассчитываем дату окончания
             expiry_date = change_date + timedelta(days=lifetime)
             
             # Сохраняем в БД
@@ -173,7 +367,10 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             conn.commit()
             conn.close()
 
-            # Определяем статус срока
+            # Пытаемся синхронизировать с Google Sheets
+            sync_success = simple_sync_to_google_sheets()
+            sync_status = "✅ Данные синхронизированы с Google Sheets" if sync_success else "⚠️ Данные сохранены локально"
+
             days_until_expiry = (expiry_date - datetime.now().date()).days
             status_icon = "🔔" if days_until_expiry <= 30 else "✅"
             
@@ -183,13 +380,14 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 f"📅 Дата замены: {change_date}\n"
                 f"⏰ Срок службы: {lifetime} дней\n"
                 f"📅 Годен до: {expiry_date} {status_icon}\n"
-                f"⏳ Осталось дней: {days_until_expiry}",
+                f"⏳ Осталось дней: {days_until_expiry}\n\n"
+                f"{sync_status}",
                 reply_markup=get_main_keyboard()
             )
             await state.finish()
             
     except ValueError:
-        await message.answer("❌ Неверный формат. Введите количество дней:")
+        await message.answer("❌ Неверный формат. Введите количество дней:", reply_markup=get_lifetime_keyboard())
 
 # Список фильтров
 @dp.message_handler(lambda message: message.text == "📋 Список фильтров")
@@ -213,7 +411,6 @@ async def cmd_list(message: types.Message):
         expiry_date = datetime.strptime(str(f[3]), '%Y-%m-%d').date()
         days_until_expiry = (expiry_date - today).days
         
-        # Определяем иконку статуса
         if days_until_expiry <= 0:
             status_icon = "❌ ПРОСРОЧЕН"
         elif days_until_expiry <= 7:
@@ -274,6 +471,45 @@ async def cmd_check(message: types.Message):
 
     await message.answer(response, reply_markup=get_main_keyboard())
 
+# Управление Google Sheets
+@dp.message_handler(lambda message: message.text == "📊 Google Sheets")
+@dp.message_handler(commands=['sheets'])
+async def cmd_sheets(message: types.Message):
+    if not google_sheets_available:
+        # Диагностика проблемы
+        issues = diagnose_google_sheets_issue()
+        issues_text = "\n".join(issues) if issues else "Неизвестная ошибка"
+        
+        await message.answer(
+            f"❌ Google Sheets недоступен\n\n"
+            f"Проблемы:\n{issues_text}\n\n"
+            f"Инструкция по настройке:\n"
+            f"1. Создайте сервисный аккаунт в Google Cloud Console\n"
+            f"2. Включите Google Sheets API\n"
+            f"3. Скачайте JSON-ключ и переименуйте в 'service_account.json'\n"
+            f"4. Положите файл в папку с ботом",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    # Синхронизируем данные
+    sync_success = simple_sync_to_google_sheets()
+    
+    if sync_success:
+        await message.answer(
+            f"✅ Google Sheets подключен!\n\n"
+            f"📊 Ссылка на таблицу:\n{spreadsheet_url}\n\n"
+            f"Данные автоматически синхронизируются при добавлении/удалении фильтров.",
+            reply_markup=get_main_keyboard(),
+            disable_web_page_preview=True
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка синхронизации с Google Sheets\n"
+            "Данные сохранены локально и будут синхронизированы позже.",
+            reply_markup=get_main_keyboard()
+        )
+
 # Удаление фильтра
 @dp.message_handler(lambda message: message.text == "🗑️ Удалить фильтр")
 @dp.message_handler(commands=['delete'])
@@ -305,13 +541,17 @@ async def cmd_delete(message: types.Message):
 
     await message.answer("Выберите фильтр для удаления:", reply_markup=keyboard)
 
-# Обработка отмены
+# Обработка отмены для всех состояний
 @dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
 async def cmd_cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    
     await state.finish()
     await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
 
-# Обработка удаления через inline кнопки
+# Обработка удаления
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('delete_'))
 async def process_delete(callback_query: types.CallbackQuery):
     filter_id = callback_query.data.split('_')[1]
@@ -319,7 +559,6 @@ async def process_delete(callback_query: types.CallbackQuery):
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     
-    # Сначала получим информацию о фильтре для сообщения
     cur.execute("SELECT filter_type, expiry_date FROM filters WHERE id = ? AND user_id = ?",
                 (filter_id, callback_query.from_user.id))
     filter_info = cur.fetchone()
@@ -328,16 +567,18 @@ async def process_delete(callback_query: types.CallbackQuery):
         cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?",
                     (filter_id, callback_query.from_user.id))
         conn.commit()
+        conn.close()
+        
+        # Синхронизируем с Google Sheets
+        simple_sync_to_google_sheets()
         
         await callback_query.message.edit_text(
             f"✅ Фильтр удален:\n📊 {filter_info[0]}\n📅 Срок истекал: {filter_info[1]}"
         )
     else:
         await callback_query.answer("Фильтр не найден", show_alert=True)
-    
-    conn.close()
+        conn.close()
 
-# Обработка отмены удаления
 @dp.callback_query_handler(lambda c: c.data == "cancel_delete")
 async def cancel_delete(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text("❌ Удаление отменено")
@@ -353,4 +594,11 @@ async def handle_other_messages(message: types.Message):
 # Запуск бота
 if __name__ == '__main__':
     init_db()
+    
+    # Инициализируем Google Sheets
+    init_google_sheets_alternative()
+    
+    if not google_sheets_available:
+        logging.warning("Google Sheets недоступен. Бот будет работать только с локальной БД.")
+    
     executor.start_polling(dp, skip_updates=True)
