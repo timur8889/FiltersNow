@@ -12,3 +12,4 @@ python-dotenv==1.0.0
 pytz==2025.2
 aiogram==2.25.1
 gspread==5.7.0
+panadas==2.0.3
