@@ -16,3 +16,4 @@ aiogram==2.25.1
 pandas>=2.0.0
 openpyxl>=3.0.0
 python-dotenv==1.0.0
+oauth2client==4.1.3
