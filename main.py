@@ -139,6 +139,27 @@ def get_confirmation_keyboard(filter_id):
     )
     return keyboard
 
+# Функция для преобразования даты из формата ДД.ММ.ГГ в ДД.ММ.ГГГГ
+def parse_date(date_str):
+    try:
+        # Пробуем разные форматы дат
+        formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y']
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+        
+        # Если ни один формат не подошел
+        raise ValueError("Неверный формат даты")
+    except Exception as e:
+        raise ValueError(f"Ошибка преобразования даты: {e}")
+
+# Функция для форматирования даты в красивый вид
+def format_date_nice(date):
+    return date.strftime('%d.%m.%y')
+
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
@@ -244,12 +265,13 @@ async def process_location(message: types.Message, state: FSMContext):
         data['location'] = message.text
 
     await FilterStates.next()
+    today_nice = format_date_nice(datetime.now().date())
     await message.answer(
         f"📅 <b>Дата последней замены</b>\n\n"
         f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
         f"📍 <i>Место:</i> {data['location']}\n\n"
-        f"📝 <b>Введите дату замены в формате ГГГГ-ММ-ДД:</b>\n"
-        f"<i>Например: {datetime.now().strftime('%Y-%m-%d')}</i>",
+        f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+        f"<i>Например: {today_nice}</i>",
         parse_mode='HTML',
         reply_markup=get_cancel_keyboard()
     )
@@ -262,7 +284,8 @@ async def process_date(message: types.Message, state: FSMContext):
         return
         
     try:
-        change_date = datetime.strptime(message.text, '%Y-%m-%d').date()
+        # Преобразуем дату из формата ДД.ММ.ГГ
+        change_date = parse_date(message.text)
         
         async with state.proxy() as data:
             data['change_date'] = change_date
@@ -276,11 +299,12 @@ async def process_date(message: types.Message, state: FSMContext):
             reply_markup=get_lifetime_keyboard()
         )
         
-    except ValueError:
+    except ValueError as e:
+        today_nice = format_date_nice(datetime.now().date())
         await message.answer(
             "❌ <b>Неверный формат даты!</b>\n\n"
-            "📝 <i>Используйте формат ГГГГ-ММ-ДД</i>\n"
-            f"<i>Пример: {datetime.now().strftime('%Y-%m-%d')}</i>",
+            "📝 <i>Используйте формат ДД.ММ.ГГ</i>\n"
+            f"<i>Пример: {today_nice}</i>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
@@ -338,13 +362,16 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 status_icon = "✅ В НОРМЕ"
                 status_emoji = "✅"
             
+            change_date_nice = format_date_nice(change_date)
+            expiry_date_nice = format_date_nice(expiry_date)
+            
             await message.answer(
                 f"{status_emoji} <b>ФИЛЬТР ДОБАВЛЕН!</b>\n\n"
                 f"🔧 <b>Тип:</b> {filter_type}\n"
                 f"📍 <b>Место:</b> {location}\n"
-                f"📅 <b>Заменен:</b> {change_date}\n"
+                f"📅 <b>Заменен:</b> {change_date_nice}\n"
                 f"⏱️ <b>Срок службы:</b> {lifetime} дней\n"
-                f"📅 <b>Годен до:</b> {expiry_date}\n"
+                f"📅 <b>Годен до:</b> {expiry_date_nice}\n"
                 f"⏳ <b>Осталось дней:</b> {days_until_expiry}\n"
                 f"📊 <b>Статус:</b> {status_icon}",
                 parse_mode='HTML',
@@ -402,13 +429,16 @@ async def cmd_list(message: types.Message):
             status_icon = "✅"
             status_text = "НОРМА"
         
+        last_change_nice = format_date_nice(datetime.strptime(str(f[3]), '%Y-%m-%d').date())
+        expiry_date_nice = format_date_nice(expiry_date)
+        
         response += (
             f"{status_icon} <b>ФИЛЬТР #{f[0]}</b>\n"
             f"   🔧 {f[1]}\n"
             f"   📍 {f[2]}\n"
-            f"   📅 Заменен: {f[3]}\n"
+            f"   📅 Заменен: {last_change_nice}\n"
             f"   ⏱️ Срок: {f[5]} дн.\n"
-            f"   🗓️ Годен до: {f[4]}\n"
+            f"   🗓️ Годен до: {expiry_date_nice}\n"
             f"   ⏳ Осталось: {days_until_expiry} дн.\n"
             f"   📊 Статус: {status_text}\n\n"
         )
@@ -444,12 +474,14 @@ async def cmd_check(message: types.Message):
         expiry_date = datetime.strptime(str(f[2]), '%Y-%m-%d').date()
         days_until_expiry = (expiry_date - today).days
         
+        expiry_date_nice = format_date_nice(expiry_date)
+        
         if days_until_expiry <= 0:
-            expired_filters.append(f"🔴 {f[0]} ({f[1]}) - просрочен {abs(days_until_expiry)} дн. назад")
+            expired_filters.append(f"🔴 {f[0]} ({f[1]}) - просрочен {abs(days_until_expiry)} дн. назад (до {expiry_date_nice})")
         elif days_until_expiry <= 7:
-            expiring_soon.append(f"🟡 {f[0]} ({f[1]}) - осталось {days_until_expiry} дн.")
+            expiring_soon.append(f"🟡 {f[0]} ({f[1]}) - осталось {days_until_expiry} дн. (до {expiry_date_nice})")
         elif days_until_expiry <= 30:
-            warning_filters.append(f"🟠 {f[0]} ({f[1]}) - осталось {days_until_expiry} дн.")
+            warning_filters.append(f"🟠 {f[0]} ({f[1]}) - осталось {days_until_expiry} дн. (до {expiry_date_nice})")
 
     response = "⏳ <b>КОНТРОЛЬ СРОКОВ</b>\n\n"
     
@@ -572,14 +604,17 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
                     status_icon = "✅"
                     status_text = "НОРМА"
                 
+                last_change_nice = format_date_nice(datetime.strptime(str(filter_data[4]), '%Y-%m-%d').date())
+                expiry_date_nice = format_date_nice(expiry_date)
+                
                 await message.answer(
                     f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
                     f"{status_icon} <b>Текущие данные:</b>\n"
                     f"🔧 <b>Тип:</b> {filter_data[2]}\n"
                     f"📍 <b>Место:</b> {filter_data[3]}\n"
-                    f"📅 <b>Дата замены:</b> {filter_data[4]}\n"
+                    f"📅 <b>Дата замены:</b> {last_change_nice}\n"
                     f"⏱️ <b>Срок службы:</b> {filter_data[6]} дней\n"
-                    f"🗓️ <b>Годен до:</b> {filter_data[5]}\n"
+                    f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n"
                     f"⏳ <b>Осталось дней:</b> {days_until_expiry}\n"
                     f"📊 <b>Статус:</b> {status_text}\n\n"
                     f"📝 <b>Выберите поле для редактирования:</b>",
@@ -656,10 +691,12 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
                 reply_markup=get_location_keyboard()
             )
         elif field == "last_change":
+            last_change_nice = format_date_nice(datetime.strptime(str(filter_data[4]), '%Y-%m-%d').date())
+            today_nice = format_date_nice(datetime.now().date())
             await message.answer(
-                f"📅 <b>Текущая дата замены:</b> {filter_data[4]}\n\n"
-                f"📝 <b>Введите новую дату замены (ГГГГ-ММ-ДД):</b>\n"
-                f"<i>Например: {datetime.now().strftime('%Y-%m-%d')}</i>",
+                f"📅 <b>Текущая дата замены:</b> {last_change_nice}\n\n"
+                f"📝 <b>Введите новую дату замены в формате ДД.ММ.ГГ:</b>\n"
+                f"<i>Например: {today_nice}</i>",
                 parse_mode='HTML',
                 reply_markup=get_cancel_keyboard()
             )
@@ -728,7 +765,8 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             
         elif field == "last_change":
             try:
-                new_date = datetime.strptime(message.text, '%Y-%m-%d').date()
+                # Преобразуем дату из формата ДД.ММ.ГГ
+                new_date = parse_date(message.text)
                 
                 # Получаем текущий срок службы
                 cur.execute("SELECT lifetime_days FROM filters WHERE id = ?", (filter_id,))
@@ -740,20 +778,25 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 cur.execute("UPDATE filters SET last_change = ?, expiry_date = ? WHERE id = ?",
                            (new_date, new_expiry, filter_id))
                 
+                old_date_nice = format_date_nice(datetime.strptime(str(old_filter_data[4]), '%Y-%m-%d').date())
+                new_date_nice = format_date_nice(new_date)
+                new_expiry_nice = format_date_nice(new_expiry)
+                
                 await message.answer(
                     f"✅ <b>Дата замены успешно изменена!</b>\n\n"
-                    f"📅 <b>Было:</b> {old_filter_data[4]}\n"
-                    f"📅 <b>Стало:</b> {new_date}\n"
-                    f"🗓️ <b>Новая дата истечения:</b> {new_expiry}",
+                    f"📅 <b>Было:</b> {old_date_nice}\n"
+                    f"📅 <b>Стало:</b> {new_date_nice}\n"
+                    f"🗓️ <b>Новая дата истечения:</b> {new_expiry_nice}",
                     parse_mode='HTML',
                     reply_markup=get_management_keyboard()
                 )
                 
             except ValueError:
+                today_nice = format_date_nice(datetime.now().date())
                 await message.answer(
                     "❌ <b>Неверный формат даты!</b>\n\n"
-                    "📝 <i>Используйте формат ГГГГ-ММ-ДД</i>\n"
-                    f"<i>Пример: {datetime.now().strftime('%Y-%m-%d')}</i>",
+                    "📝 <i>Используйте формат ДД.ММ.ГГ</i>\n"
+                    f"<i>Пример: {today_nice}</i>",
                     parse_mode='HTML',
                     reply_markup=get_cancel_keyboard()
                 )
@@ -784,11 +827,13 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 cur.execute("UPDATE filters SET lifetime_days = ?, expiry_date = ? WHERE id = ?",
                            (new_lifetime, new_expiry, filter_id))
                 
+                new_expiry_nice = format_date_nice(new_expiry)
+                
                 await message.answer(
                     f"✅ <b>Срок службы успешно изменен!</b>\n\n"
                     f"⏱️ <b>Было:</b> {old_filter_data[6]} дней\n"
                     f"⏱️ <b>Стало:</b> {new_lifetime} дней\n"
-                    f"🗓️ <b>Новая дата истечения:</b> {new_expiry}",
+                    f"🗓️ <b>Новая дата истечения:</b> {new_expiry_nice}",
                     parse_mode='HTML',
                     reply_markup=get_management_keyboard()
                 )
@@ -826,14 +871,17 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             status_icon = "✅"
             status_text = "НОРМА"
         
+        last_change_nice = format_date_nice(datetime.strptime(str(updated_filter[4]), '%Y-%m-%d').date())
+        expiry_date_nice = format_date_nice(expiry_date)
+        
         await message.answer(
             f"📋 <b>ОБНОВЛЕННАЯ ИНФОРМАЦИЯ:</b>\n\n"
             f"{status_icon} <b>Фильтр #{filter_id}</b>\n"
             f"🔧 <b>Тип:</b> {updated_filter[2]}\n"
             f"📍 <b>Место:</b> {updated_filter[3]}\n"
-            f"📅 <b>Заменен:</b> {updated_filter[4]}\n"
+            f"📅 <b>Заменен:</b> {last_change_nice}\n"
             f"⏱️ <b>Срок:</b> {updated_filter[6]} дн.\n"
-            f"🗓️ <b>Годен до:</b> {updated_filter[5]}\n"
+            f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n"
             f"⏳ <b>Осталось:</b> {days_until_expiry} дн.\n"
             f"📊 <b>Статус:</b> {status_text}",
             parse_mode='HTML'
@@ -851,6 +899,8 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             reply_markup=get_management_keyboard()
         )
         await state.finish()
+
+# Остальной код (удаление, статистика и т.д.) остается таким же...
 
 # Удаление фильтра
 @dp.message_handler(lambda message: message.text == "🗑️ Удалить")
@@ -883,8 +933,10 @@ async def cmd_delete(message: types.Message):
         else:
             status = "✅"
         
+        expiry_date_nice = format_date_nice(expiry_date)
+        
         keyboard.add(types.InlineKeyboardButton(
-            f"{status} {f[1]} | {f[2]} | до {f[3]}",
+            f"{status} {f[1]} | {f[2]} | до {expiry_date_nice}",
             callback_data=f"select_delete_{f[0]}"
         ))
     
@@ -914,13 +966,14 @@ async def confirm_delete(callback_query: types.CallbackQuery):
         expiry_date = datetime.strptime(str(filter_info[2]), '%Y-%m-%d').date()
         days_until_expiry = (expiry_date - datetime.now().date()).days
         
+        expiry_date_nice = format_date_nice(expiry_date)
         status_text = "🔴 ПРОСРОЧЕН" if days_until_expiry <= 0 else "🟡 Истекает скоро" if days_until_expiry <= 30 else "✅ В норме"
         
         await callback_query.message.edit_text(
             f"⚠️ <b>Подтверждение удаления</b>\n\n"
             f"🔧 <b>Тип:</b> {filter_info[0]}\n"
             f"📍 <b>Место:</b> {filter_info[1]}\n"
-            f"📅 <b>Срок годности:</b> {filter_info[2]}\n"
+            f"📅 <b>Срок годности:</b> {expiry_date_nice}\n"
             f"⏳ <b>Осталось дней:</b> {days_until_expiry}\n"
             f"📊 <b>Статус:</b> {status_text}\n\n"
             f"❓ <b>Вы уверены, что хотите удалить этот фильтр?</b>",
@@ -948,11 +1001,13 @@ async def process_delete(callback_query: types.CallbackQuery):
         conn.commit()
         conn.close()
         
+        expiry_date_nice = format_date_nice(datetime.strptime(str(filter_info[2]), '%Y-%m-%d').date())
+        
         await callback_query.message.edit_text(
             f"✅ <b>Фильтр удален:</b>\n\n"
             f"🔧 <b>Тип:</b> {filter_info[0]}\n"
             f"📍 <b>Место:</b> {filter_info[1]}\n"
-            f"📅 <b>Срок истекал:</b> {filter_info[2]}",
+            f"📅 <b>Срок истекал:</b> {expiry_date_nice}",
             parse_mode='HTML'
         )
     else:
