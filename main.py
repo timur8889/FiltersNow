@@ -15,7 +15,7 @@ from aiogram.utils import executor
 
 # Настройки
 # ИЗМЕНЕНО: Токен теперь берется из переменной окружения
-API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME')
+API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = 5024165375
 
 # ДОБАВЛЕНО: Проверка токена при запуске
