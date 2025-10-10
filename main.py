@@ -11,6 +11,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
 
+# Через переменные окружения
+service_account_info = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT'])
+credentials = service_account.Credentials.from_service_account_info(
+    service_account_info
+)
+
 # Настройки
 API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
 ADMIN_ID = 5024165375
