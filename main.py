@@ -102,16 +102,8 @@ def get_filter_type_keyboard():
     return keyboard
 
 def get_location_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    keyboard.row(
-        types.KeyboardButton("🏠 Кухня"),
-        types.KeyboardButton("🚿 Ванная")
-    )
-    keyboard.row(
-        types.KeyboardButton("🛋️ Гостиная"),
-        types.KeyboardButton("🚰 Под раковиной")
-    )
-    keyboard.row(types.KeyboardButton("📍 Другое место"))
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(types.KeyboardButton("📍 Место установки фильтра"))
     keyboard.row(types.KeyboardButton("🔙 Отмена"))
     return keyboard
 
@@ -220,8 +212,8 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 
     await FilterStates.next()
     await message.answer(
-        "📍 <b>Выберите место установки фильтра:</b>\n\n"
-        "🏠 <i>Где установлен этот фильтр?</i>",
+        "📍 <b>Нажмите кнопку для ввода места установки фильтра:</b>\n\n"
+        "🏠 <i>Например: Кухня, Ванная комната, Под раковиной и т.д.</i>",
         parse_mode='HTML',
         reply_markup=get_location_keyboard()
     )
@@ -233,25 +225,14 @@ async def process_location(message: types.Message, state: FSMContext):
         await message.answer("❌ Добавление фильтра отменено", reply_markup=get_main_keyboard())
         return
         
-    if message.text == "📍 Другое место":
-        await message.answer(
-            "📍 <b>Введите свое место установки:</b>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    async with state.proxy() as data:
-        data['location'] = message.text
-
-    await FilterStates.next()
+    # Теперь всегда запрашиваем ручной ввод
     await message.answer(
-        f"📅 <b>Срок службы для '{data['filter_type']}':</b> {data['lifetime']} дней\n\n"
-        f"📝 <b>Введите дату последней замены (ГГГГ-ММ-ДД):</b>\n"
-        f"<i>Например: {datetime.now().strftime('%Y-%m-%d')}</i>",
+        "📍 <b>Введите место установки фильтра:</b>\n\n"
+        "🏠 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная и т.д.</i>",
         parse_mode='HTML',
         reply_markup=get_cancel_keyboard()
     )
+    return
 
 @dp.message_handler(state=FilterStates.waiting_change_date)
 async def process_date(message: types.Message, state: FSMContext):
@@ -601,7 +582,7 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
             await message.answer(
                 "📍 <b>Введите новое место установки:</b>",
                 parse_mode='HTML',
-                reply_markup=get_location_keyboard()
+                reply_markup=get_cancel_keyboard()
             )
         elif field == "last_change":
             await message.answer(
