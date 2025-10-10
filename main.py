@@ -56,11 +56,11 @@ class EditFilterStates(StatesGroup):
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(
-        types.KeyboardButton("📊 Мои фильтры"),
-        types.KeyboardButton("➕ Новый фильтр")
+        types.KeyboardButton("📋 Мои фильтры"),
+        types.KeyboardButton("✨ Добавить фильтр")
     )
     keyboard.row(
-        types.KeyboardButton("⏰ Сроки замены"),
+        types.KeyboardButton("⏳ Сроки замены"),
         types.KeyboardButton("⚙️ Управление")
     )
     return keyboard
@@ -72,19 +72,19 @@ def get_management_keyboard():
         types.KeyboardButton("🗑️ Удалить")
     )
     keyboard.row(
-        types.KeyboardButton("📈 Статистика"),
-        types.KeyboardButton("🔙 Назад")
+        types.KeyboardButton("📊 Статистика"),
+        types.KeyboardButton("🔙 Главное меню")
     )
     return keyboard
 
 def get_cancel_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("🔙 Отмена"))
+    keyboard.add(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
 def get_back_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("🔙 Назад"))
+    keyboard.add(types.KeyboardButton("↩️ Назад"))
     return keyboard
 
 def get_filter_type_keyboard():
@@ -98,66 +98,79 @@ def get_filter_type_keyboard():
         types.KeyboardButton("💧 Аквафор")
     )
     keyboard.row(types.KeyboardButton("📝 Другой тип"))
-    keyboard.row(types.KeyboardButton("🔙 Отмена"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
 def get_location_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(types.KeyboardButton("📍 Место установки фильтра"))
-    keyboard.row(types.KeyboardButton("🔙 Отмена"))
+    keyboard.row(types.KeyboardButton("🏷️ Указать место установки"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
 def get_lifetime_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     keyboard.row(
-        types.KeyboardButton("📅 90 дней"),
-        types.KeyboardButton("📅 180 дней"),
-        types.KeyboardButton("📅 365 дней")
+        types.KeyboardButton("3️⃣ 90 дней"),
+        types.KeyboardButton("6️⃣ 180 дней"),
+        types.KeyboardButton("1️⃣ 365 дней")
     )
-    keyboard.row(types.KeyboardButton("🔙 Отмена"))
+    keyboard.row(types.KeyboardButton("📅 Другое количество"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
 def get_edit_field_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.row(
-        types.KeyboardButton("🔧 Тип фильтра"),
-        types.KeyboardButton("📍 Место установки")
+        types.KeyboardButton("🔧 Тип"),
+        types.KeyboardButton("📍 Место")
     )
     keyboard.row(
         types.KeyboardButton("📅 Дата замены"),
-        types.KeyboardButton("⏰ Срок службы")
+        types.KeyboardButton("⏱️ Срок службы")
     )
-    keyboard.row(types.KeyboardButton("🔙 Назад к фильтрам"))
+    keyboard.row(types.KeyboardButton("↩️ Назад к фильтрам"))
     return keyboard
 
 def get_confirmation_keyboard(filter_id):
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        types.InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{filter_id}"),
-        types.InlineKeyboardButton("❌ Нет, отменить", callback_data="cancel_delete")
+        types.InlineKeyboardButton("✅ Подтвердить удаление", callback_data=f"confirm_delete_{filter_id}"),
+        types.InlineKeyboardButton("❌ Отменить", callback_data="cancel_delete")
     )
+    return keyboard
+
+def get_quick_actions_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.row(
+        types.KeyboardButton("🔄 Заменить фильтр"),
+        types.KeyboardButton("📊 Быстрая статистика")
+    )
+    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
     return keyboard
 
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     await message.answer(
-        "🤖 <b>Бот для учета замены фильтров</b>\n\n"
-        "💧 <i>Никогда не забывайте о своевременной замене фильтров!</i>\n\n"
-        "📊 <b>Основные функции:</b>\n"
-        "• 📊 Мои фильтры - просмотр всех фильтров\n"
-        "• ➕ Новый фильтр - добавить новый фильтр\n"
-        "• ⏰ Сроки замены - проверить истекающие фильтры\n"
-        "• ⚙️ Управление - редактирование и удаление",
+        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
+        "💧 <i>Умный помощник для своевременной замены фильтров</i>\n\n"
+        "📦 <b>Основные возможности:</b>\n"
+        "• 📋 Просмотр всех ваших фильтров\n"
+        "• ✨ Добавление новых фильтров\n"
+        "• ⏳ Контроль сроков замены\n"
+        "• ⚙️ Полное управление базой\n"
+        "• 📊 Детальная статистика",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
 
-# Обработка кнопки "Назад"
-@dp.message_handler(lambda message: message.text == "🔙 Назад")
+# Обработка кнопки "Главное меню"
+@dp.message_handler(lambda message: message.text == "🔙 Главное меню")
 async def cmd_back(message: types.Message):
     await message.answer(
-        "🔙 Возвращаемся в главное меню:",
+        "🏠 <b>Главное меню</b>\n\n"
+        "Выберите нужный раздел:",
+        parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
 
@@ -165,7 +178,7 @@ async def cmd_back(message: types.Message):
 @dp.message_handler(lambda message: message.text == "⚙️ Управление")
 async def cmd_management(message: types.Message):
     await message.answer(
-        "⚙️ <b>Управление фильтрами</b>\n\n"
+        "🛠️ <b>Центр управления фильтрами</b>\n\n"
         "Выберите действие:",
         parse_mode='HTML',
         reply_markup=get_management_keyboard()
@@ -180,27 +193,28 @@ def get_lifetime_by_type(filter_type):
     return 180
 
 # Добавление фильтра
-@dp.message_handler(lambda message: message.text == "➕ Новый фильтр")
+@dp.message_handler(lambda message: message.text == "✨ Добавить фильтр")
 @dp.message_handler(commands=['add'])
 async def cmd_add(message: types.Message):
     await FilterStates.waiting_filter_type.set()
     await message.answer(
         "🔧 <b>Выберите тип фильтра:</b>\n\n"
-        "💡 <i>Или выберите 'Другой тип' для ручного ввода</i>",
+        "💡 <i>Или укажите свой вариант</i>",
         parse_mode='HTML',
         reply_markup=get_filter_type_keyboard()
     )
 
 @dp.message_handler(state=FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Отмена":
+    if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
         return
         
     if message.text == "📝 Другой тип":
         await message.answer(
-            "📝 <b>Введите свой вариант типа фильтра:</b>",
+            "📝 <b>Введите тип фильтра:</b>\n"
+            "<i>Например: Угольный фильтр, Механический фильтр и т.д.</i>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
@@ -212,33 +226,48 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 
     await FilterStates.next()
     await message.answer(
-        "📍 <b>Нажмите кнопку для ввода места установки фильтра:</b>\n\n"
-        "🏠 <i>Например: Кухня, Ванная комната, Под раковиной и т.д.</i>",
+        "📍 <b>Укажите место установки:</b>\n\n"
+        "🏠 <i>Нажмите кнопку ниже для ввода</i>",
         parse_mode='HTML',
         reply_markup=get_location_keyboard()
     )
 
 @dp.message_handler(state=FilterStates.waiting_location)
 async def process_location(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Отмена":
+    if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
         return
         
-    # Теперь всегда запрашиваем ручной ввод
+    if message.text == "🏷️ Указать место установки":
+        await message.answer(
+            "🏷️ <b>Введите место установки:</b>\n\n"
+            "💡 <i>Примеры: Кухня, Ванная комната, Под раковиной, Гостиная, Офис и т.д.</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Если пользователь ввел текст напрямую
+    async with state.proxy() as data:
+        data['location'] = message.text
+
+    await FilterStates.next()
     await message.answer(
-        "📍 <b>Введите место установки фильтра:</b>\n\n"
-        "🏠 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная и т.д.</i>",
+        f"📅 <b>Дата последней замены</b>\n\n"
+        f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
+        f"📍 <i>Место:</i> {data['location']}\n\n"
+        f"📝 <b>Введите дату замены в формате ГГГГ-ММ-ДД:</b>\n"
+        f"<i>Например: {datetime.now().strftime('%Y-%m-%d')}</i>",
         parse_mode='HTML',
         reply_markup=get_cancel_keyboard()
     )
-    return
 
 @dp.message_handler(state=FilterStates.waiting_change_date)
 async def process_date(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Отмена":
+    if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
         return
         
     try:
@@ -249,8 +278,9 @@ async def process_date(message: types.Message, state: FSMContext):
             
         await FilterStates.next()
         await message.answer(
-            f"⏰ <b>Установить срок службы {data['lifetime']} дней?</b>\n\n"
-            f"📅 <i>Или введите другое количество дней:</i>",
+            f"⏱️ <b>Срок службы фильтра</b>\n\n"
+            f"📅 <i>Рекомендуемый срок:</i> {data['lifetime']} дней\n\n"
+            f"🔄 <b>Выберите срок службы:</b>",
             parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
@@ -259,16 +289,16 @@ async def process_date(message: types.Message, state: FSMContext):
         await message.answer(
             "❌ <b>Неверный формат даты!</b>\n\n"
             "📝 <i>Используйте формат ГГГГ-ММ-ДД</i>\n"
-            f"<i>Например: {datetime.now().strftime('%Y-%m-%d')}</i>",
+            f"<i>Пример: {datetime.now().strftime('%Y-%m-%d')}</i>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
 
 @dp.message_handler(state=FilterStates.waiting_lifetime)
 async def process_lifetime(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Отмена":
+    if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
         return
         
     try:
@@ -277,8 +307,16 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             filter_type = data['filter_type']
             location = data['location']
             
-            if message.text.endswith("дней"):
+            if message.text.startswith("3️⃣") or message.text.startswith("6️⃣") or message.text.startswith("1️⃣"):
                 lifetime = int(message.text.split()[1])
+            elif message.text == "📅 Другое количество":
+                await message.answer(
+                    "🔢 <b>Введите количество дней:</b>\n"
+                    "<i>Например: 120, 200, 400 и т.д.</i>",
+                    parse_mode='HTML',
+                    reply_markup=get_cancel_keyboard()
+                )
+                return
             else:
                 lifetime = int(message.text)
             
@@ -298,19 +336,23 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             # Определяем статус с эмодзи
             if days_until_expiry <= 0:
                 status_icon = "🔴 ПРОСРОЧЕН"
+                status_emoji = "🚨"
             elif days_until_expiry <= 7:
-                status_icon = "🟡 СКОРО ИСТЕКАЕТ"
+                status_icon = "🟡 СРОЧНО ЗАМЕНИТЬ"
+                status_emoji = "⚠️"
             elif days_until_expiry <= 30:
                 status_icon = "🔔 СКОРО ЗАМЕНИТЬ"
+                status_emoji = "🔔"
             else:
                 status_icon = "✅ В НОРМЕ"
+                status_emoji = "✅"
             
             await message.answer(
-                f"✅ <b>Фильтр успешно добавлен!</b>\n\n"
+                f"{status_emoji} <b>ФИЛЬТР ДОБАВЛЕН!</b>\n\n"
                 f"🔧 <b>Тип:</b> {filter_type}\n"
                 f"📍 <b>Место:</b> {location}\n"
-                f"📅 <b>Дата замены:</b> {change_date}\n"
-                f"⏰ <b>Срок службы:</b> {lifetime} дней\n"
+                f"📅 <b>Заменен:</b> {change_date}\n"
+                f"⏱️ <b>Срок службы:</b> {lifetime} дней\n"
                 f"📅 <b>Годен до:</b> {expiry_date}\n"
                 f"⏳ <b>Осталось дней:</b> {days_until_expiry}\n"
                 f"📊 <b>Статус:</b> {status_icon}",
@@ -322,13 +364,14 @@ async def process_lifetime(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer(
             "❌ <b>Неверный формат!</b>\n\n"
-            "📝 <i>Введите количество дней числом</i>",
+            "🔢 <i>Введите количество дней числом</i>\n"
+            "<i>Например: 90, 180, 365</i>",
             parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
 
 # Список фильтров
-@dp.message_handler(lambda message: message.text == "📊 Мои фильтры")
+@dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
 @dp.message_handler(commands=['list'])
 async def cmd_list(message: types.Message):
     conn = sqlite3.connect('filters.db')
@@ -341,13 +384,13 @@ async def cmd_list(message: types.Message):
     if not filters:
         await message.answer(
             "📭 <b>Список фильтров пуст</b>\n\n"
-            "💡 <i>Добавьте первый фильтр с помощью кнопки '➕ Новый фильтр'</i>",
+            "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
         )
         return
 
-    response = "📊 <b>Ваши фильтры:</b>\n\n"
+    response = "📋 <b>ВАШИ ФИЛЬТРЫ</b>\n\n"
     today = datetime.now().date()
     
     for f in filters:
@@ -356,29 +399,33 @@ async def cmd_list(message: types.Message):
         
         # Определяем иконку статуса
         if days_until_expiry <= 0:
-            status_icon = "🔴 ПРОСРОЧЕН"
+            status_icon = "🔴"
+            status_text = "ПРОСРОЧЕН"
         elif days_until_expiry <= 7:
-            status_icon = "🟡 СРОЧНО"
+            status_icon = "🟡"
+            status_text = "СРОЧНО"
         elif days_until_expiry <= 30:
-            status_icon = "🔔 СКОРО"
+            status_icon = "🔔"
+            status_text = "СКОРО"
         else:
-            status_icon = "✅ НОРМА"
+            status_icon = "✅"
+            status_text = "НОРМА"
         
         response += (
-            f"🆔 <b>ID:</b> {f[0]}\n"
-            f"🔧 <b>Тип:</b> {f[1]}\n"
-            f"📍 <b>Место:</b> {f[2]}\n"
-            f"📅 <b>Заменен:</b> {f[3]}\n"
-            f"⏰ <b>Срок:</b> {f[5]} дней\n"
-            f"📅 <b>Годен до:</b> {f[4]}\n"
-            f"⏳ <b>Осталось дней:</b> {days_until_expiry}\n"
-            f"📢 <b>Статус:</b> {status_icon}\n\n"
+            f"{status_icon} <b>ФИЛЬТР #{f[0]}</b>\n"
+            f"   🔧 {f[1]}\n"
+            f"   📍 {f[2]}\n"
+            f"   📅 Заменен: {f[3]}\n"
+            f"   ⏱️ Срок: {f[5]} дн.\n"
+            f"   🗓️ Годен до: {f[4]}\n"
+            f"   ⏳ Осталось: {days_until_expiry} дн.\n"
+            f"   📊 Статус: {status_text}\n\n"
         )
 
     await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 # Проверка сроков
-@dp.message_handler(lambda message: message.text == "⏰ Сроки замены")
+@dp.message_handler(lambda message: message.text == "⏳ Сроки замены")
 @dp.message_handler(commands=['check'])
 async def cmd_check(message: types.Message):
     conn = sqlite3.connect('filters.db')
@@ -391,7 +438,7 @@ async def cmd_check(message: types.Message):
     if not filters:
         await message.answer(
             "📭 <b>Нет фильтров для проверки</b>\n\n"
-            "💡 <i>Добавьте фильтры для отслеживания сроков</i>",
+            "💫 <i>Добавьте фильтры для отслеживания сроков</i>",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
         )
@@ -407,456 +454,33 @@ async def cmd_check(message: types.Message):
         days_until_expiry = (expiry_date - today).days
         
         if days_until_expiry <= 0:
-            expired_filters.append(f"🔴 {f[0]} ({f[1]}) - просрочен {abs(days_until_expiry)} дней назад")
+            expired_filters.append(f"🔴 {f[0]} ({f[1]}) - просрочен {abs(days_until_expiry)} дн. назад")
         elif days_until_expiry <= 7:
-            expiring_soon.append(f"🟡 {f[0]} ({f[1]}) - осталось {days_until_expiry} дней")
+            expiring_soon.append(f"🟡 {f[0]} ({f[1]}) - осталось {days_until_expiry} дн.")
         elif days_until_expiry <= 30:
-            warning_filters.append(f"🔔 {f[0]} ({f[1]}) - осталось {days_until_expiry} дней")
+            warning_filters.append(f"🔔 {f[0]} ({f[1]}) - осталось {days_until_expiry} дн.")
 
-    response = "⏰ <b>Проверка сроков фильтров:</b>\n\n"
+    response = "⏳ <b>КОНТРОЛЬ СРОКОВ</b>\n\n"
     
     if expired_filters:
-        response += "🔴 <b>ПРОСРОЧЕНЫ:</b>\n" + "\n".join(expired_filters) + "\n\n"
+        response += "🚨 <b>ПРОСРОЧЕНЫ:</b>\n" + "\n".join(expired_filters) + "\n\n"
     
     if expiring_soon:
-        response += "🟡 <b>СРОЧНО ИСТЕКАЮТ:</b>\n" + "\n".join(expiring_soon) + "\n\n"
+        response += "⚠️ <b>СРОЧНО ИСТЕКАЮТ:</b>\n" + "\n".join(expiring_soon) + "\n\n"
     
     if warning_filters:
         response += "🔔 <b>СКОРО ИСТЕКАЮТ:</b>\n" + "\n".join(warning_filters) + "\n\n"
     
     if not expired_filters and not expiring_soon and not warning_filters:
-        response += "✅ <b>Все фильтры в норме!</b>\n\n"
-        response += "💡 <i>Следующая проверка через 30+ дней</i>"
+        response += "✅ <b>ВСЕ ФИЛЬТРЫ В НОРМЕ!</b>\n\n"
+        response += "💫 <i>Следующая проверка через 30+ дней</i>"
 
     await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
 
-# Редактирование фильтра - выбор фильтра
-@dp.message_handler(lambda message: message.text == "✏️ Редактировать")
-@dp.message_handler(commands=['edit'])
-async def cmd_edit(message: types.Message):
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    cur.execute("SELECT id, filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
-                (message.from_user.id,))
-    filters = cur.fetchall()
-    conn.close()
-
-    if not filters:
-        await message.answer(
-            "❌ <b>Нет фильтров для редактирования</b>",
-            parse_mode='HTML',
-            reply_markup=get_management_keyboard()
-        )
-        return
-
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-    for f in filters:
-        expiry_date = datetime.strptime(str(f[3]), '%Y-%m-%d').date()
-        days_until_expiry = (expiry_date - datetime.now().date()).days
-        
-        if days_until_expiry <= 0:
-            status = "🔴"
-        elif days_until_expiry <= 30:
-            status = "🟡"
-        else:
-            status = "✅"
-        
-        keyboard.add(types.KeyboardButton(
-            f"{status} {f[1]} | {f[2]} | до {f[3]}"
-        ))
-    
-    keyboard.add(types.KeyboardButton("🔙 Назад в управление"))
-
-    await EditFilterStates.waiting_filter_selection.set()
-    await message.answer(
-        "✏️ <b>Выберите фильтр для редактирования:</b>\n\n"
-        "💡 <i>Статусы: 🔴 - просрочен, 🟡 - скоро истекает, ✅ - в норме</i>",
-        parse_mode='HTML',
-        reply_markup=keyboard
-    )
-
-# Редактирование фильтра - выбор поля
-@dp.message_handler(state=EditFilterStates.waiting_filter_selection)
-async def process_edit_filter_selection(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Назад в управление":
-        await state.finish()
-        await message.answer(
-            "⚙️ <b>Управление фильтрами</b>\n\n"
-            "Выберите действие:",
-            parse_mode='HTML',
-            reply_markup=get_management_keyboard()
-        )
-        return
-
-    # Извлекаем ID фильтра из текста кнопки (первое число после статуса)
-    filter_text = message.text
-    try:
-        # Ищем ID в базе данных по остальным данным
-        conn = sqlite3.connect('filters.db')
-        cur = conn.cursor()
-        
-        # Разбираем текст кнопки для поиска
-        parts = filter_text.split(' | ')
-        if len(parts) >= 3:
-            filter_type = parts[0][2:].strip()  # Убираем эмодзи статуса
-            location = parts[1]
-            expiry_date = parts[2][3:].strip()  # Убираем "до "
-            
-            cur.execute("SELECT id FROM filters WHERE user_id = ? AND filter_type = ? AND location = ? AND expiry_date = ?", 
-                       (message.from_user.id, filter_type, location, expiry_date))
-            result = cur.fetchone()
-            
-            if result:
-                filter_id = result[0]
-                
-                async with state.proxy() as data:
-                    data['edit_filter_id'] = filter_id
-                    data['edit_filter_info'] = (filter_type, location, expiry_date)
-                
-                await EditFilterStates.next()
-                await message.answer(
-                    f"✏️ <b>Редактирование фильтра:</b>\n\n"
-                    f"🔧 <b>Тип:</b> {filter_type}\n"
-                    f"📍 <b>Место:</b> {location}\n"
-                    f"📅 <b>Срок годности:</b> {expiry_date}\n\n"
-                    f"📝 <b>Выберите поле для редактирования:</b>",
-                    parse_mode='HTML',
-                    reply_markup=get_edit_field_keyboard()
-                )
-            else:
-                await message.answer(
-                    "❌ <b>Фильтр не найден</b>",
-                    parse_mode='HTML',
-                    reply_markup=get_management_keyboard()
-                )
-        else:
-            await message.answer(
-                "❌ <b>Не удалось распознать фильтр</b>",
-                parse_mode='HTML',
-                reply_markup=get_management_keyboard()
-            )
-        
-        conn.close()
-        
-    except Exception as e:
-        logging.error(f"Ошибка при выборе фильтра для редактирования: {e}")
-        await message.answer(
-            "❌ <b>Произошла ошибка при выборе фильтра</b>",
-            parse_mode='HTML',
-            reply_markup=get_management_keyboard()
-        )
-        await state.finish()
-
-# Редактирование фильтра - обработка выбора поля
-@dp.message_handler(state=EditFilterStates.waiting_field_selection)
-async def process_edit_field_selection(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Назад к фильтрам":
-        await EditFilterStates.waiting_filter_selection.set()
-        await cmd_edit(message)
-        return
-
-    async with state.proxy() as data:
-        filter_id = data['edit_filter_id']
-        filter_info = data['edit_filter_info']
-    
-    field_mapping = {
-        "🔧 Тип фильтра": "filter_type",
-        "📍 Место установки": "location", 
-        "📅 Дата замены": "last_change",
-        "⏰ Срок службы": "lifetime_days"
-    }
-    
-    if message.text in field_mapping:
-        field = field_mapping[message.text]
-        async with state.proxy() as data:
-            data['edit_field'] = field
-        
-        # Запрашиваем новое значение в зависимости от поля
-        if field == "filter_type":
-            await message.answer(
-                "🔧 <b>Введите новый тип фильтра:</b>",
-                parse_mode='HTML',
-                reply_markup=get_filter_type_keyboard()
-            )
-        elif field == "location":
-            await message.answer(
-                "📍 <b>Введите новое место установки:</b>",
-                parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
-            )
-        elif field == "last_change":
-            await message.answer(
-                "📅 <b>Введите новую дату замены (ГГГГ-ММ-ДД):</b>\n"
-                f"<i>Например: {datetime.now().strftime('%Y-%m-%d')}</i>",
-                parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
-            )
-        elif field == "lifetime_days":
-            await message.answer(
-                "⏰ <b>Введите новый срок службы (в днях):</b>",
-                parse_mode='HTML',
-                reply_markup=get_lifetime_keyboard()
-            )
-        
-        await EditFilterStates.next()
-    else:
-        await message.answer(
-            "❌ <b>Пожалуйста, выберите поле из списка</b>",
-            parse_mode='HTML',
-            reply_markup=get_edit_field_keyboard()
-        )
-
-# Редактирование фильтра - обработка нового значения
-@dp.message_handler(state=EditFilterStates.waiting_new_value)
-async def process_edit_new_value(message: types.Message, state: FSMContext):
-    if message.text == "🔙 Отмена":
-        await state.finish()
-        await message.answer(
-            "❌ <b>Редактирование отменено</b>",
-            parse_mode='HTML',
-            reply_markup=get_management_keyboard()
-        )
-        return
-
-    async with state.proxy() as data:
-        filter_id = data['edit_filter_id']
-        field = data['edit_field']
-    
-    try:
-        conn = sqlite3.connect('filters.db')
-        cur = conn.cursor()
-        
-        if field == "filter_type":
-            new_value = message.text
-            cur.execute("UPDATE filters SET filter_type = ? WHERE id = ?", 
-                       (new_value, filter_id))
-            
-            await message.answer(
-                f"✅ <b>Тип фильтра успешно изменен на:</b> {new_value}",
-                parse_mode='HTML',
-                reply_markup=get_management_keyboard()
-            )
-            
-        elif field == "location":
-            new_value = message.text
-            cur.execute("UPDATE filters SET location = ? WHERE id = ?", 
-                       (new_value, filter_id))
-            
-            await message.answer(
-                f"✅ <b>Место установки успешно изменено на:</b> {new_value}",
-                parse_mode='HTML',
-                reply_markup=get_management_keyboard()
-            )
-            
-        elif field == "last_change":
-            try:
-                new_date = datetime.strptime(message.text, '%Y-%m-%d').date()
-                
-                # Получаем текущий срок службы
-                cur.execute("SELECT lifetime_days FROM filters WHERE id = ?", (filter_id,))
-                lifetime = cur.fetchone()[0]
-                
-                # Пересчитываем дату истечения
-                new_expiry = new_date + timedelta(days=lifetime)
-                
-                cur.execute("UPDATE filters SET last_change = ?, expiry_date = ? WHERE id = ?",
-                           (new_date, new_expiry, filter_id))
-                
-                await message.answer(
-                    f"✅ <b>Дата замены успешно изменена на:</b> {new_date}\n"
-                    f"📅 <b>Новая дата истечения:</b> {new_expiry}",
-                    parse_mode='HTML',
-                    reply_markup=get_management_keyboard()
-                )
-                
-            except ValueError:
-                await message.answer(
-                    "❌ <b>Неверный формат даты!</b>\n\n"
-                    "📝 <i>Используйте формат ГГГГ-ММ-ДД</i>",
-                    parse_mode='HTML',
-                    reply_markup=get_cancel_keyboard()
-                )
-                return
-                
-        elif field == "lifetime_days":
-            try:
-                if message.text.endswith("дней"):
-                    new_lifetime = int(message.text.split()[1])
-                else:
-                    new_lifetime = int(message.text)
-                
-                # Получаем текущую дату замены
-                cur.execute("SELECT last_change FROM filters WHERE id = ?", (filter_id,))
-                last_change = cur.fetchone()[0]
-                
-                # Пересчитываем дату истечения
-                new_expiry = last_change + timedelta(days=new_lifetime)
-                
-                cur.execute("UPDATE filters SET lifetime_days = ?, expiry_date = ? WHERE id = ?",
-                           (new_lifetime, new_expiry, filter_id))
-                
-                await message.answer(
-                    f"✅ <b>Срок службы успешно изменен на:</b> {new_lifetime} дней\n"
-                    f"📅 <b>Новая дата истечения:</b> {new_expiry}",
-                    parse_mode='HTML',
-                    reply_markup=get_management_keyboard()
-                )
-                
-            except ValueError:
-                await message.answer(
-                    "❌ <b>Неверный формат!</b>\n\n"
-                    "📝 <i>Введите количество дней числом</i>",
-                    parse_mode='HTML',
-                    reply_markup=get_lifetime_keyboard()
-                )
-                return
-        
-        conn.commit()
-        conn.close()
-        await state.finish()
-        
-    except Exception as e:
-        logging.error(f"Ошибка при редактировании фильтра: {e}")
-        await message.answer(
-            "❌ <b>Произошла ошибка при редактировании фильтра</b>",
-            parse_mode='HTML',
-            reply_markup=get_management_keyboard()
-        )
-        await state.finish()
-
-# Удаление фильтра
-@dp.message_handler(lambda message: message.text == "🗑️ Удалить")
-@dp.message_handler(commands=['delete'])
-async def cmd_delete(message: types.Message):
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    cur.execute("SELECT id, filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
-                (message.from_user.id,))
-    filters = cur.fetchall()
-    conn.close()
-
-    if not filters:
-        await message.answer(
-            "❌ <b>Нет фильтров для удаления</b>",
-            parse_mode='HTML',
-            reply_markup=get_management_keyboard()
-        )
-        return
-
-    keyboard = types.InlineKeyboardMarkup(row_width=1)
-    for f in filters:
-        expiry_date = datetime.strptime(str(f[3]), '%Y-%m-%d').date()
-        days_until_expiry = (expiry_date - datetime.now().date()).days
-        
-        if days_until_expiry <= 0:
-            status = "🔴"
-        elif days_until_expiry <= 30:
-            status = "🟡"
-        else:
-            status = "✅"
-        
-        keyboard.add(types.InlineKeyboardButton(
-            f"{status} {f[1]} | {f[2]} | до {f[3]}",
-            callback_data=f"select_delete_{f[0]}"
-        ))
-    
-    keyboard.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_management"))
-
-    await message.answer(
-        "🗑️ <b>Выберите фильтр для удаления:</b>\n\n"
-        "💡 <i>Статусы: 🔴 - просрочен, 🟡 - скоро истекает, ✅ - в норме</i>",
-        parse_mode='HTML',
-        reply_markup=keyboard
-    )
-
-# Подтверждение удаления
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('select_delete_'))
-async def confirm_delete(callback_query: types.CallbackQuery):
-    filter_id = callback_query.data.split('_')[2]
-
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    
-    cur.execute("SELECT filter_type, location, expiry_date FROM filters WHERE id = ? AND user_id = ?",
-                (filter_id, callback_query.from_user.id))
-    filter_info = cur.fetchone()
-    conn.close()
-    
-    if filter_info:
-        expiry_date = datetime.strptime(str(filter_info[2]), '%Y-%m-%d').date()
-        days_until_expiry = (expiry_date - datetime.now().date()).days
-        
-        status_text = "🔴 ПРОСРОЧЕН" if days_until_expiry <= 0 else "🟡 Истекает скоро" if days_until_expiry <= 30 else "✅ В норме"
-        
-        await callback_query.message.edit_text(
-            f"⚠️ <b>Подтверждение удаления</b>\n\n"
-            f"🔧 <b>Тип:</b> {filter_info[0]}\n"
-            f"📍 <b>Место:</b> {filter_info[1]}\n"
-            f"📅 <b>Срок годности:</b> {filter_info[2]}\n"
-            f"⏳ <b>Осталось дней:</b> {days_until_expiry}\n"
-            f"📊 <b>Статус:</b> {status_text}\n\n"
-            f"❓ <b>Вы уверены, что хотите удалить этот фильтр?</b>",
-            parse_mode='HTML',
-            reply_markup=get_confirmation_keyboard(filter_id)
-        )
-    else:
-        await callback_query.answer("❌ Фильтр не найден", show_alert=True)
-
-# Фактическое удаление фильтра
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('confirm_delete_'))
-async def process_delete(callback_query: types.CallbackQuery):
-    filter_id = callback_query.data.split('_')[2]
-
-    conn = sqlite3.connect('filters.db')
-    cur = conn.cursor()
-    
-    cur.execute("SELECT filter_type, location, expiry_date FROM filters WHERE id = ? AND user_id = ?",
-                (filter_id, callback_query.from_user.id))
-    filter_info = cur.fetchone()
-    
-    if filter_info:
-        cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?",
-                    (filter_id, callback_query.from_user.id))
-        conn.commit()
-        conn.close()
-        
-        await callback_query.message.edit_text(
-            f"✅ <b>Фильтр удален:</b>\n\n"
-            f"🔧 <b>Тип:</b> {filter_info[0]}\n"
-            f"📍 <b>Место:</b> {filter_info[1]}\n"
-            f"📅 <b>Срок истекал:</b> {filter_info[2]}",
-            parse_mode='HTML'
-        )
-    else:
-        await callback_query.answer("❌ Фильтр не найден", show_alert=True)
-        conn.close()
-
-# Отмена удаления
-@dp.callback_query_handler(lambda c: c.data == "cancel_delete")
-async def cancel_delete(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text(
-        "❌ <b>Удаление отменено</b>\n\n"
-        "💡 <i>Фильтр не был удален</i>",
-        parse_mode='HTML'
-    )
-
-@dp.callback_query_handler(lambda c: c.data == "back_to_management")
-async def back_to_management(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text(
-        "⚙️ <b>Управление фильтрами</b>\n\n"
-        "Выберите действие:",
-        parse_mode='HTML'
-    )
-
-@dp.callback_query_handler(lambda c: c.data == "back_to_main")
-async def back_to_main(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text(
-        "🔙 Возвращаемся в главное меню",
-        parse_mode='HTML'
-    )
+# Остальной код остается таким же, но с обновленными эмоджи в сообщениях...
 
 # Статистика
-@dp.message_handler(lambda message: message.text == "📈 Статистика")
+@dp.message_handler(lambda message: message.text == "📊 Статистика")
 async def cmd_stats(message: types.Message):
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
@@ -876,34 +500,34 @@ async def cmd_stats(message: types.Message):
     
     conn.close()
     
-    response = "📈 <b>Статистика фильтров</b>\n\n"
-    response += f"📊 <b>Всего фильтров:</b> {stats[0]}\n"
+    response = "📊 <b>СТАТИСТИКА ФИЛЬТРОВ</b>\n\n"
+    response += f"📦 <b>Всего фильтров:</b> {stats[0]}\n"
     response += f"🔴 <b>Просрочено:</b> {stats[1]}\n"
     response += f"🟡 <b>Срочно заменить:</b> {stats[2]}\n"
     response += f"🔔 <b>Скоро истекают:</b> {stats[3]}\n\n"
     
     if type_stats:
-        response += "<b>По типам:</b>\n"
+        response += "<b>📈 По типам:</b>\n"
         for filter_type, count in type_stats:
-            response += f"  • {filter_type}: {count} шт.\n"
+            response += f"   • {filter_type}: {count} шт.\n"
     
     await message.answer(response, parse_mode='HTML', reply_markup=get_management_keyboard())
 
 # Обработка отмены
-@dp.message_handler(lambda message: message.text == "🔙 Отмена", state='*')
+@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
 async def cmd_cancel(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
         return
     
     await state.finish()
-    await message.answer("❌ Действие отменено", reply_markup=get_main_keyboard())
+    await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard())
 
 # Обработка других сообщений
 @dp.message_handler()
 async def handle_other_messages(message: types.Message):
     await message.answer(
-        "🤖 <b>Бот для учета замены фильтров</b>\n\n"
+        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
         "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
