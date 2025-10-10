@@ -1,9 +1,12 @@
-from dotenv import load_dotenv
-load_dotenv()  # Загружает переменные из .env файла
 import logging
 import sqlite3
 import os
 from datetime import datetime, timedelta
+
+# ДОБАВЛЕНО: Импорт и загрузка переменных окружения
+from dotenv import load_dotenv
+load_dotenv()  # Загружает переменные из .env файла
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -11,8 +14,15 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 
 # Настройки
+# ИЗМЕНЕНО: Токен теперь берется из переменной окружения
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME')
 ADMIN_ID = 5024165375
+
+# ДОБАВЛЕНО: Проверка токена при запуске
+if not API_TOKEN or API_TOKEN == '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME':
+    logging.error("Токен бота не настроен! Установите переменную окружения TELEGRAM_BOT_TOKEN")
+    logging.error("Создайте файл .env с содержанием: TELEGRAM_BOT_TOKEN=ваш_токен")
+    exit(1)
 
 # Настройка логирования
 logging.basicConfig(
@@ -33,10 +43,6 @@ DEFAULT_LIFETIMES = {
 }
 
 # Инициализация бота
-if not API_TOKEN or API_TOKEN == '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME':
-    logging.error("Токен бота не настроен! Установите переменную окружения TELEGRAM_BOT_TOKEN")
-    exit(1)
-
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
