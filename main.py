@@ -1,11 +1,15 @@
 import logging
 import sqlite3
+import gspread
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
+from oauth2client.service_account import ServiceAccountCredentials
+import os
+import json
 
 # Настройки
 API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
@@ -40,6 +44,26 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Инициализация Google Sheets
+def init_google_sheets():
+    try:
+        # Проверяем наличие файла с учетными данными
+        if not os.path.exists('credentials.json'):
+            return None
+        
+        # Настройка scope и авторизация
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        logging.error(f"Ошибка инициализации Google Sheets: {e}")
+        return None
+
 # States
 class FilterStates(StatesGroup):
     waiting_filter_type = State()
@@ -57,6 +81,10 @@ class EditFilterStates(StatesGroup):
     waiting_filter_selection = State()
     waiting_field_selection = State()
     waiting_new_value = State()
+
+class ExcelStates(StatesGroup):
+    waiting_spreadsheet_url = State()
+    waiting_sheet_name = State()
 
 # Клавиатуры
 def get_main_keyboard():
@@ -88,8 +116,18 @@ def get_management_keyboard():
     )
     keyboard.row(
         types.KeyboardButton("📊 Статистика"),
-        types.KeyboardButton("🔙 Главное меню")
+        types.KeyboardButton("📤 Экспорт в Excel")
     )
+    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+    return keyboard
+
+def get_excel_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("📤 Экспорт в Excel"),
+        types.KeyboardButton("📥 Импорт из Excel")
+    )
+    keyboard.row(types.KeyboardButton("🔙 В управление"))
     return keyboard
 
 def get_cancel_keyboard():
@@ -175,6 +213,169 @@ def parse_date(date_str):
 def format_date_nice(date):
     return date.strftime('%d.%m.%y')
 
+# Функция для экспорта данных в Google Sheets
+async def export_to_google_sheets(user_id, spreadsheet_url=None, sheet_name="Фильтры"):
+    try:
+        client = init_google_sheets()
+        if not client:
+            return None, "❌ Google Sheets не настроен. Добавьте файл credentials.json"
+        
+        # Получаем данные из базы
+        conn = sqlite3.connect('filters.db')
+        cur = conn.cursor()
+        cur.execute("SELECT filter_type, location, last_change, expiry_date, lifetime_days FROM filters WHERE user_id = ?", 
+                    (user_id,))
+        filters = cur.fetchall()
+        conn.close()
+        
+        if not filters:
+            return None, "❌ Нет данных для экспорта"
+        
+        if spreadsheet_url:
+            # Открываем существующую таблицу
+            try:
+                spreadsheet = client.open_by_url(spreadsheet_url)
+            except Exception as e:
+                return None, f"❌ Не удалось открыть таблицу по ссылке: {e}"
+        else:
+            # Создаем новую таблицу
+            spreadsheet = client.create(f"Фильтры пользователя {user_id}")
+            # Даем доступ на чтение всем
+            spreadsheet.share(None, perm_type='anyone', role='reader')
+        
+        # Работаем с листом
+        try:
+            worksheet = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=100, cols=10)
+        
+        # Подготавливаем заголовки
+        headers = ["Тип фильтра", "Место установки", "Дата замены", "Срок службы (дни)", "Годен до", "Осталось дней", "Статус"]
+        
+        # Подготавливаем данные
+        data = [headers]
+        today = datetime.now().date()
+        
+        for filter_data in filters:
+            expiry_date = datetime.strptime(str(filter_data[3]), '%Y-%m-%d').date()
+            days_until_expiry = (expiry_date - today).days
+            
+            # Определяем статус
+            if days_until_expiry <= 0:
+                status = "ПРОСРОЧЕН"
+            elif days_until_expiry <= 7:
+                status = "СРОЧНО"
+            elif days_until_expiry <= 30:
+                status = "СКОРО"
+            else:
+                status = "НОРМА"
+            
+            last_change_nice = format_date_nice(datetime.strptime(str(filter_data[2]), '%Y-%m-%d').date())
+            expiry_date_nice = format_date_nice(expiry_date)
+            
+            row = [
+                filter_data[0],  # Тип фильтра
+                filter_data[1],  # Место установки
+                last_change_nice,  # Дата замены
+                filter_data[4],  # Срок службы
+                expiry_date_nice,  # Годен до
+                days_until_expiry,  # Осталось дней
+                status  # Статус
+            ]
+            data.append(row)
+        
+        # Очищаем лист и записываем данные
+        worksheet.clear()
+        worksheet.update('A1', data)
+        
+        # Форматируем заголовки
+        worksheet.format('A1:G1', {
+            'textFormat': {'bold': True},
+            'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+        })
+        
+        # Автоподбор ширины колонок
+        worksheet.columns_auto_resize(0, 6)
+        
+        return spreadsheet.url, f"✅ Данные успешно экспортированы!\n\n📊 Записей: {len(filters)}\n🔗 Ссылка: {spreadsheet.url}"
+        
+    except Exception as e:
+        logging.error(f"Ошибка экспорта в Google Sheets: {e}")
+        return None, f"❌ Ошибка экспорта: {e}"
+
+# Функция для импорта данных из Google Sheets
+async def import_from_google_sheets(user_id, spreadsheet_url, sheet_name="Фильтры"):
+    try:
+        client = init_google_sheets()
+        if not client:
+            return False, "❌ Google Sheets не настроен. Добавьте файл credentials.json"
+        
+        # Открываем таблицу
+        try:
+            spreadsheet = client.open_by_url(spreadsheet_url)
+            worksheet = spreadsheet.worksheet(sheet_name)
+        except Exception as e:
+            return False, f"❌ Не удалось открыть таблицу: {e}"
+        
+        # Получаем все данные
+        data = worksheet.get_all_values()
+        
+        if len(data) <= 1:  # Только заголовки
+            return False, "❌ В таблице нет данных для импорта"
+        
+        # Парсим данные
+        imported_count = 0
+        errors = []
+        
+        conn = sqlite3.connect('filters.db')
+        cur = conn.cursor()
+        
+        for i, row in enumerate(data[1:], start=2):  # Пропускаем заголовки
+            try:
+                if len(row) < 5:  # Минимальное количество полей
+                    continue
+                
+                filter_type = row[0].strip()
+                location = row[1].strip()
+                last_change_str = row[2].strip()
+                lifetime_days = int(row[3]) if row[3].strip() else 180
+                
+                if not filter_type or not location:
+                    continue
+                
+                # Парсим дату
+                try:
+                    last_change = parse_date(last_change_str)
+                except ValueError:
+                    # Если дата не распознана, используем сегодняшнюю
+                    last_change = datetime.now().date()
+                
+                # Рассчитываем дату истечения
+                expiry_date = last_change + timedelta(days=lifetime_days)
+                
+                # Добавляем в базу
+                cur.execute('''INSERT INTO filters 
+                            (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                            VALUES (?, ?, ?, ?, ?, ?)''',
+                           (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
+                imported_count += 1
+                
+            except Exception as e:
+                errors.append(f"Строка {i}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+        result_message = f"✅ Импорт завершен!\n\n📥 Загружено записей: {imported_count}"
+        if errors:
+            result_message += f"\n\n❌ Ошибки ({len(errors)}):\n" + "\n".join(errors[:5])  # Показываем первые 5 ошибок
+        
+        return True, result_message
+        
+    except Exception as e:
+        logging.error(f"Ошибка импорта из Google Sheets: {e}")
+        return False, f"❌ Ошибка импорта: {e}"
+
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
@@ -186,7 +387,8 @@ async def cmd_start(message: types.Message):
         "• ✨ Добавление новых фильтров\n"
         "• ⏳ Контроль сроков замены\n"
         "• ⚙️ Полное управление базой\n"
-        "• 📊 Детальная статистика",
+        "• 📊 Детальная статистика\n"
+        "• 📤 Экспорт/импорт в Excel",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
@@ -210,6 +412,114 @@ async def cmd_management(message: types.Message):
         parse_mode='HTML',
         reply_markup=get_management_keyboard()
     )
+
+# Обработка кнопки "Экспорт в Excel"
+@dp.message_handler(lambda message: message.text == "📤 Экспорт в Excel")
+async def cmd_excel_export(message: types.Message):
+    await message.answer(
+        "📤 <b>Экспорт в Google Sheets</b>\n\n"
+        "💡 <i>Вы можете экспортировать данные в новую таблицу или в существующую</i>\n\n"
+        "🔄 <b>Создаю новую таблицу...</b>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    
+    # Экспортируем в новую таблицу
+    url, result_message = await export_to_google_sheets(message.from_user.id)
+    
+    if url:
+        # Создаем инлайн-кнопку для открытия таблицы
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(types.InlineKeyboardButton("📊 Открыть таблицу", url=url))
+        keyboard.add(types.InlineKeyboardButton("📥 Импорт из Excel", callback_data="import_excel"))
+        
+        await message.answer(
+            result_message,
+            parse_mode='HTML',
+            reply_markup=keyboard
+        )
+    else:
+        await message.answer(
+            result_message,
+            parse_mode='HTML',
+            reply_markup=get_management_keyboard()
+        )
+
+# Обработка кнопки импорта
+@dp.callback_query_handler(lambda c: c.data == "import_excel")
+async def process_import_excel(callback_query: types.CallbackQuery):
+    await ExcelStates.waiting_spreadsheet_url.set()
+    await callback_query.message.answer(
+        "📥 <b>Импорт из Google Sheets</b>\n\n"
+        "📝 <b>Отправьте ссылку на Google Sheets таблицу:</b>\n\n"
+        "💡 <i>Таблица должна быть доступна для редактирования</i>\n"
+        "<i>Формат данных должен соответствовать экспорту</i>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+
+# Обработка ссылки на таблицу для импорта
+@dp.message_handler(state=ExcelStates.waiting_spreadsheet_url)
+async def process_spreadsheet_url(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Импорт отменен", reply_markup=get_management_keyboard())
+        return
+    
+    spreadsheet_url = message.text.strip()
+    
+    # Проверяем, что это ссылка на Google Sheets
+    if 'docs.google.com/spreadsheets' not in spreadsheet_url:
+        await message.answer(
+            "❌ <b>Неверная ссылка!</b>\n\n"
+            "💡 <i>Отправьте корректную ссылку на Google Sheets таблицу</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    async with state.proxy() as data:
+        data['spreadsheet_url'] = spreadsheet_url
+    
+    await ExcelStates.next()
+    await message.answer(
+        "📋 <b>Введите название листа:</b>\n\n"
+        "💡 <i>По умолчанию: 'Фильтры'</i>\n"
+        "<i>Оставьте пустым для использования листа по умолчанию</i>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+
+# Обработка названия листа для импорта
+@dp.message_handler(state=ExcelStates.waiting_sheet_name)
+async def process_sheet_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Импорт отменен", reply_markup=get_management_keyboard())
+        return
+    
+    async with state.proxy() as data:
+        spreadsheet_url = data['spreadsheet_url']
+        sheet_name = message.text.strip() if message.text.strip() else "Фильтры"
+    
+    await message.answer(
+        "🔄 <b>Импортирую данные...</b>",
+        parse_mode='HTML'
+    )
+    
+    # Выполняем импорт
+    success, result_message = await import_from_google_sheets(
+        message.from_user.id, 
+        spreadsheet_url, 
+        sheet_name
+    )
+    
+    await message.answer(
+        result_message,
+        parse_mode='HTML',
+        reply_markup=get_management_keyboard()
+    )
+    await state.finish()
 
 # Определение срока службы по типу фильтра
 def get_lifetime_by_type(filter_type):
@@ -580,7 +890,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             reply_markup=get_lifetime_keyboard()
         )
 
-# Остальной код остается без изменений...
+# Остальной код (список фильтров, проверка сроков, редактирование, удаление, статистика) остается без изменений...
 
 # Список фильтров
 @dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
@@ -1242,7 +1552,7 @@ async def cmd_stats(message: types.Message):
                     SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as urgent,
                     SUM(CASE WHEN expiry_date BETWEEN date('now', '+8 days') AND date('now', '+30 days') THEN 1 ELSE 0 END) as soon
                  FROM filters WHERE user_id = ?''', (message.from_user.id,))
-    stats = cur.fetchone()
+    stats = cur.fetchall()
     
     cur.execute('''SELECT filter_type, COUNT(*) as count 
                    FROM filters WHERE user_id = ? GROUP BY filter_type''', 
