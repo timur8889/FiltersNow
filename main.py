@@ -19,11 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
-bot = Bot(token=API_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
-
 # Безопасное подключение к БД
 def get_db_connection():
     conn = sqlite3.connect('filters.db', check_same_thread=False)
