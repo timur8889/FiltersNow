@@ -102,19 +102,7 @@ def get_filter_type_keyboard():
     return keyboard
 
 def get_location_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    keyboard.row(
-        types.KeyboardButton("🏠 Кухня"),
-        types.KeyboardButton("🚿 Ванная")
-    )
-    keyboard.row(
-        types.KeyboardButton("🍽️ Под раковиной"),
-        types.KeyboardButton("🚰 Магистральный")
-    )
-    keyboard.row(
-        types.KeyboardButton("🛋️ Гостиная"),
-        types.KeyboardButton("🏢 Офис")
-    )
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(types.KeyboardButton("📍 Другое место"))
     keyboard.row(types.KeyboardButton("❌ Отмена"))
     return keyboard
@@ -229,8 +217,8 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 
     await FilterStates.next()
     await message.answer(
-        "📍 <b>Выберите место установки:</b>\n\n"
-        "🏠 <i>Где установлен этот фильтр?</i>",
+        "📍 <b>Укажите место установки фильтра:</b>\n\n"
+        "💡 <i>Нажмите кнопку '📍 Другое место' для ввода своего варианта</i>",
         parse_mode='HTML',
         reply_markup=get_location_keyboard()
     )
@@ -244,14 +232,14 @@ async def process_location(message: types.Message, state: FSMContext):
         
     if message.text == "📍 Другое место":
         await message.answer(
-            "📍 <b>Введите свое место установки:</b>\n\n"
-            "💡 <i>Например: Балкон, Гараж, Подвал, Дача и т.д.</i>",
+            "📍 <b>Введите место установки фильтра:</b>\n\n"
+            "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
         return
     
-    # Если пользователь выбрал конкретное место из кнопок
+    # Если пользователь ввел текст напрямую (без использования кнопки)
     async with state.proxy() as data:
         data['location'] = message.text
 
