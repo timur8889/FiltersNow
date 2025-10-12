@@ -142,66 +142,63 @@ def validate_filter_name(name: str):
         raise ValueError("Название содержит запрещенные символы")
     return safe_db_string(name)
 
-# ========== УЛУЧШЕНИЯ: КЛАВИАТУРЫ ДЛЯ МНОЖЕСТВЕННОГО ДОБАВЛЕНИЯ ==========
-def get_multiple_filters_keyboard():
-    """Клавиатура для выбора нескольких фильтров"""
+# ========== ОБНОВЛЕННЫЕ КЛАВИАТУРЫ ==========
+
+def get_filter_type_keyboard():
+    """Клавиатура для выбора типа фильтра с ВСЕМИ вариантами"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     
-    # Первый ряд - популярные фильтры
+    # Все доступные фильтры в одном списке
     keyboard.row(
         types.KeyboardButton("🔧 Магистральный SL10"),
         types.KeyboardButton("🔧 Магистральный SL20")
     )
-    
-    # Второй ряд
     keyboard.row(
         types.KeyboardButton("💧 Гейзер Престиж"),
         types.KeyboardButton("💧 Аквафор Кристалл")
     )
-    
-    # Третий ряд
     keyboard.row(
         types.KeyboardButton("⚡ Угольный картридж"),
         types.KeyboardButton("🧽 Механический фильтр")
     )
-    
-    # Четвертый ряд - дополнительные опции
-    keyboard.row(
-        types.KeyboardButton("📦 Набор: Кухня + Ванная"),
-        types.KeyboardButton("🏠 Набор: Полная квартира")
-    )
-    
-    # Пятый ряд - управление
-    keyboard.row(
-        types.KeyboardButton("✅ Готово"),
-        types.KeyboardButton("🔄 Очистить список")
-    )
-    
+    keyboard.row(types.KeyboardButton("📝 Другой тип"))
     keyboard.row(types.KeyboardButton("❌ Отмена"))
     
     return keyboard
 
-def get_quick_sets_keyboard():
-    """Клавиатура быстрых наборов фильтров"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+def get_multiple_filters_keyboard():
+    """Упрощенная клавиатура для выбора нескольких фильтров"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     
-    keyboard.row(types.KeyboardButton("🏠 Стандартный набор квартиры"))
-    keyboard.row(types.KeyboardButton("🍳 Базовый кухонный набор"))
-    keyboard.row(types.KeyboardButton("🚿 Набор для ванной"))
-    keyboard.row(types.KeyboardButton("⚡ Расширенный набор"))
+    # Только основные фильтры
+    keyboard.row(
+        types.KeyboardButton("🔧 Магистральный SL10"),
+        types.KeyboardButton("🔧 Магистральный SL20")
+    )
+    keyboard.row(
+        types.KeyboardButton("💧 Гейзер Престиж"),
+        types.KeyboardButton("💧 Аквафор Кристалл")
+    )
+    # Добавляем кнопку "Другой тип"
+    keyboard.row(types.KeyboardButton("📝 Другой тип"))
     
-    keyboard.row(types.KeyboardButton("↩️ Назад к выбору"))
+    # Управляющие кнопки
+    keyboard.row(
+        types.KeyboardButton("✅ Готово"),
+        types.KeyboardButton("🔄 Очистить список")
+    )
     keyboard.row(types.KeyboardButton("❌ Отмена"))
     
     return keyboard
 
 def get_add_filter_keyboard():
+    """Обновленная клавиатура добавления фильтра (без быстрых наборов)"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(
         types.KeyboardButton("🔧 Один фильтр"),
         types.KeyboardButton("📦 Несколько фильтров")
     )
-    keyboard.row(types.KeyboardButton("🚀 Быстрые наборы"))
+    # Убрана кнопка "🚀 Быстрые наборы"
     keyboard.row(types.KeyboardButton("🔙 Главное меню"))
     return keyboard
 
@@ -238,20 +235,6 @@ def get_cancel_keyboard():
 def get_back_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add(types.KeyboardButton("↩️ Назад"))
-    return keyboard
-
-def get_filter_type_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    keyboard.row(
-        types.KeyboardButton("🔧 Магистральный SL10"),
-        types.KeyboardButton("🔧 Магистральный SL20")
-    )
-    keyboard.row(
-        types.KeyboardButton("💧 Гейзер"),
-        types.KeyboardButton("💧 Аквафор")
-    )
-    keyboard.row(types.KeyboardButton("📝 Другой тип"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
 def get_location_keyboard():
@@ -541,7 +524,7 @@ async def on_startup(dp):
     except Exception as e:
         logging.error(f"Не удалось отправить уведомление администратору: {e}")
 
-# ========== УЛУЧШЕНИЯ: ОБРАБОТЧИКИ С КНОПКАМИ ДЛЯ МНОЖЕСТВЕННОГО ДОБАВЛЕНИЯ ==========
+# ========== ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ ==========
 
 # Команда start
 @dp.message_handler(commands=['start'])
@@ -610,16 +593,16 @@ async def cmd_add(message: types.Message):
         reply_markup=get_add_filter_keyboard()
     )
 
-# Обработка выбора типа добавления
-@dp.message_handler(lambda message: message.text in ["🔧 Один фильтр", "📦 Несколько фильтров", "🚀 Быстрые наборы"])
+# Обработка выбора типа добавления (УБРАНА КНОПКА "БЫСТРЫЕ НАБОРЫ")
+@dp.message_handler(lambda message: message.text in ["🔧 Один фильтр", "📦 Несколько фильтров"])
 async def process_add_type(message: types.Message, state: FSMContext):
     if message.text == "🔧 Один фильтр":
         await FilterStates.waiting_filter_type.set()
         await message.answer(
             "🔧 <b>Выберите тип фильтра:</b>\n\n"
-            "💡 <i>Или укажите свой вариант</i>",
+            "💡 <i>Доступны все варианты фильтров</i>",
             parse_mode='HTML',
-            reply_markup=get_filter_type_keyboard()
+            reply_markup=get_filter_type_keyboard()  # Теперь показывает ВСЕ фильтры
         )
     elif message.text == "📦 Несколько фильтров":
         await MultipleFiltersStates.waiting_filters_list.set()
@@ -634,35 +617,73 @@ async def process_add_type(message: types.Message, state: FSMContext):
             "🔄 <b>Выберите фильтры из списка ниже:</b>\n\n"
             "💡 <i>Можно:</i>\n"
             "• Нажимать кнопки для добавления фильтров\n"
-            "• Выбрать готовый набор\n"
             "• Ввести свои варианты текстом\n"
+            "• Использовать кнопку '📝 Другой тип'\n"
             "• Нажать '✅ Готово' когда закончите\n\n"
             "📝 <b>Текущий список:</b>\n"
             "<i>Пока пусто</i>",
             parse_mode='HTML',
-            reply_markup=get_multiple_filters_keyboard()
-        )
-    elif message.text == "🚀 Быстрые наборы":
-        await MultipleFiltersStates.waiting_filters_list.set()
-        
-        # Инициализируем список
-        async with state.proxy() as data:
-            data['selected_filters'] = []
-            data['filters_list'] = []
-        
-        await message.answer(
-            "🚀 <b>Быстрые наборы фильтров</b>\n\n"
-            "💫 <i>Выберите готовый набор для быстрого добавления:</i>\n\n"
-            "🏠 <b>Стандартный набор квартиры</b> - основные фильтры\n"
-            "🍳 <b>Базовый кухонный набор</b> - минимум для кухни\n"
-            "🚿 <b>Набор для ванной</b> - фильтры для ванной комнаты\n"
-            "⚡ <b>Расширенный набор</b> - полный комплект\n\n"
-            "💡 <i>После выбора набора можно добавить дополнительные фильтры</i>",
-            parse_mode='HTML',
-            reply_markup=get_quick_sets_keyboard()
+            reply_markup=get_multiple_filters_keyboard()  # Упрощенная клавиатура
         )
 
-# Обработка кнопок при выборе нескольких фильтров
+# Обработка выбора типа фильтра для ОДНОГО фильтра
+@dp.message_handler(state=FilterStates.waiting_filter_type)
+async def process_filter_type(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        return
+        
+    if message.text == "📝 Другой тип":
+        await message.answer(
+            "📝 <b>Введите тип фильтра:</b>\n"
+            "<i>Например: Угольный фильтр, Механический фильтр и т.д.</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Обработка всех типов фильтров из списка
+    filter_mapping = {
+        "🔧 Магистральный SL10": "Магистральный SL10",
+        "🔧 Магистральный SL20": "Магистральный SL20",
+        "💧 Гейзер Престиж": "Гейзер Престиж",
+        "💧 Аквафор Кристалл": "Аквафор Кристалл",
+        "⚡ Угольный картридж": "Угольный картридж",
+        "🧽 Механический фильтр": "Механический фильтр"
+    }
+    
+    filter_name = None
+    
+    if message.text in filter_mapping:
+        filter_name = filter_mapping[message.text]
+    else:
+        # Пользователь ввел свой вариант
+        try:
+            filter_name = validate_filter_name(message.text)
+        except ValueError as e:
+            await message.answer(
+                f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
+                f"💡 <i>{str(e)}</i>",
+                parse_mode='HTML',
+                reply_markup=get_filter_type_keyboard()
+            )
+            return
+    
+    if filter_name:
+        async with state.proxy() as data:
+            data['filter_type'] = filter_name
+            data['lifetime'] = get_lifetime_by_type(filter_name)
+
+        await FilterStates.next()
+        await message.answer(
+            "📍 <b>Укажите место установки фильтра:</b>\n\n"
+            "💡 <i>Выберите из списка или укажите свой вариант</i>",
+            parse_mode='HTML',
+            reply_markup=get_location_keyboard()
+        )
+
+# Обработка кнопок при выборе НЕСКОЛЬКИХ фильтров
 @dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
 async def process_multiple_filters_selection(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
@@ -728,53 +749,24 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
         )
         return
     
-    # Обработка кнопки "Назад к выбору"
-    if message.text == "↩️ Назад к выбору":
+    # Обработка кнопки "Другой тип" для нескольких фильтров
+    if message.text == "📝 Другой тип":
         await message.answer(
-            "📦 <b>Добавление нескольких фильтров</b>\n\n"
-            "🔄 <b>Выберите фильтры из списка:</b>",
+            "📝 <b>Введите тип фильтра:</b>\n\n"
+            "💡 <i>Можно ввести несколько фильтров через запятую</i>\n"
+            "<i>Например: Угольный фильтр, Механический фильтр, Сетчатый фильтр</i>",
             parse_mode='HTML',
-            reply_markup=get_multiple_filters_keyboard()
+            reply_markup=get_cancel_keyboard()
         )
         return
     
-    # Обработка готовых наборов
-    predefined_filters = []
-    if message.text == "📦 Набор: Кухня + Ванная":
-        predefined_filters = ["Магистральный SL10", "Гейзер Престиж", "Угольный картридж"]
-    elif message.text == "🏠 Набор: Полная квартира":
-        predefined_filters = ["Магистральный SL10", "Магистральный SL20", "Гейзер Престиж", "Аквафор Кристалл", "Угольный картридж"]
-    elif message.text == "🏠 Стандартный набор квартиры":
-        predefined_filters = ["Магистральный SL10", "Гейзер Престиж", "Угольный картридж"]
-    elif message.text == "🍳 Базовый кухонный набор":
-        predefined_filters = ["Магистральный SL10", "Угольный картридж"]
-    elif message.text == "🚿 Набор для ванной":
-        predefined_filters = ["Магистральный SL20", "Механический фильтр"]
-    elif message.text == "⚡ Расширенный набор":
-        predefined_filters = ["Магистральный SL10", "Магистральный SL20", "Гейзер Престиж", "Аквафор Кристалл", "Угольный картридж", "Механический фильтр"]
-    
-    if predefined_filters:
-        data['selected_filters'].extend(predefined_filters)
-        # Удаляем дубликаты
-        data['selected_filters'] = list(dict.fromkeys(data['selected_filters']))
-        
-        await message.answer(
-            f"✅ <b>Набор добавлен!</b>\n\n"
-            f"📦 Добавлено фильтров: {len(predefined_filters)}\n"
-            f"📊 Всего в списке: {len(data['selected_filters'])}",
-            parse_mode='HTML',
-            reply_markup=get_multiple_filters_keyboard()
-        )
-        return
-    
-    # Обработка отдельных фильтров (кнопки)
+    # Обработка отдельных фильтров (кнопки) для нескольких фильтров
     filter_mapping = {
         "🔧 Магистральный SL10": "Магистральный SL10",
         "🔧 Магистральный SL20": "Магистральный SL20",
         "💧 Гейзер Престиж": "Гейзер Престиж",
-        "💧 Аквафор Кристалл": "Аквафор Кристалл",
-        "⚡ Угольный картридж": "Угольный картридж",
-        "🧽 Механический фильтр": "Механический фильтр"
+        "💧 Аквафор Кристалл": "Аквафор Кристалл"
+        # Убраны "⚡ Угольный картридж" и "🧽 Механический фильтр"
     }
     
     if message.text in filter_mapping:
@@ -811,9 +803,19 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
         # Добавляем только уникальные фильтры
         added_count = 0
         for new_filter in additional_filters:
-            if new_filter and new_filter not in data['selected_filters']:
-                data['selected_filters'].append(new_filter)
-                added_count += 1
+            try:
+                validated_filter = validate_filter_name(new_filter)
+                if validated_filter and validated_filter not in data['selected_filters']:
+                    data['selected_filters'].append(validated_filter)
+                    added_count += 1
+            except ValueError as e:
+                await message.answer(
+                    f"❌ <b>Ошибка в фильтре '{new_filter}':</b>\n\n"
+                    f"💡 <i>{str(e)}</i>",
+                    parse_mode='HTML',
+                    reply_markup=get_multiple_filters_keyboard()
+                )
+                return
         
         if added_count > 0:
             await message.answer(
@@ -846,48 +848,9 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
         reply_markup=get_multiple_filters_keyboard()
     )
 
-# ========== ОБРАБОТЧИКИ С УЛУЧШЕННОЙ БЕЗОПАСНОСТЬЮ ==========
+# ========== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ==========
 
-# Добавление одного фильтра
-@dp.message_handler(state=FilterStates.waiting_filter_type)
-async def process_filter_type(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
-        return
-        
-    if message.text == "📝 Другой тип":
-        await message.answer(
-            "📝 <b>Введите тип фильтра:</b>\n"
-            "<i>Например: Угольный фильтр, Механический фильтр и т.д.</i>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    try:
-        filter_name = validate_filter_name(message.text)
-        
-        async with state.proxy() as data:
-            data['filter_type'] = filter_name
-            data['lifetime'] = get_lifetime_by_type(filter_name)
-
-        await FilterStates.next()
-        await message.answer(
-            "📍 <b>Укажите место установки фильтра:</b>\n\n"
-            "💡 <i>Выберите из списка или укажите свой вариант</i>",
-            parse_mode='HTML',
-            reply_markup=get_location_keyboard()
-        )
-    except ValueError as e:
-        await message.answer(
-            f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
-            f"💡 <i>{str(e)}</i>",
-            parse_mode='HTML',
-            reply_markup=get_filter_type_keyboard()
-        )
-
-# Общий обработчик для места установки (и для одного, и для нескольких фильтров)
+# Общий обработчик для места установки
 @dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
 async def process_location(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
@@ -1130,7 +1093,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             reply_markup=get_lifetime_keyboard()
         )
 
-# Остальные обработчики с улучшенной безопасностью
+# Остальные обработчики остаются без изменений
 @dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
 @dp.message_handler(commands=['list'])
 async def cmd_list(message: types.Message):
