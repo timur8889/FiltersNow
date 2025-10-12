@@ -102,7 +102,8 @@ def get_all_users_stats():
                               SUM(CASE WHEN expiry_date <= date('now') THEN 1 ELSE 0 END) as expired_filters,
                               SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
                        FROM filters''')
-        return dict(cur.fetchone())
+        result = cur.fetchone()
+        return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
 
 def get_all_users():
     """Получение списка всех пользователей (для админа)"""
@@ -388,7 +389,7 @@ def backup_database():
         # Проверяем размер базы данных
         db_size = os.path.getsize('filters.db')
         if db_size == 0:
-            logging.warning("База данных пуста, пропускаем резервное копиering")
+            logging.warning("База данных пуста, пропускаем резервное копирование")
             return False
             
         shutil.copy2('filters.db', backup_file)
@@ -605,6 +606,124 @@ def create_detailed_stats(stats, filters):
         detailed += "🎉 <b>Отличная работа! Все фильтры в норме.</b>"
     
     return detailed
+
+# ========== ФОНОВЫЕ ЗАДАЧИ И ОБРАБОТКА ОШИБОК ==========
+async def check_expired_filters():
+    """Фоновая задача для проверки просроченных фильтров"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            # Фильтры, которые истекают в ближайшие 7 дней
+            cur.execute('''SELECT DISTINCT user_id, filter_type, location, expiry_date 
+                          FROM filters 
+                          WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')''')
+            expiring_filters = cur.fetchall()
+            
+            # Фильтры, которые уже просрочены (но не более 30 дней назад)
+            cur.execute('''SELECT DISTINCT user_id, filter_type, location, expiry_date 
+                          FROM filters 
+                          WHERE expiry_date BETWEEN date('now', '-30 days') AND date('now', '-1 day')''')
+            expired_filters = cur.fetchall()
+        
+        notified_users = set()
+        
+        # Уведомления о скором истечении срока
+        for user_id, filter_type, location, expiry_date in expiring_filters:
+            try:
+                days_until_expiry = (datetime.strptime(str(expiry_date), '%Y-%m-%d').date() - datetime.now().date()).days
+                expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
+                
+                await bot.send_message(
+                    user_id,
+                    f"🔔 <b>Напоминание о замене фильтра</b>\n\n"
+                    f"🔧 {filter_type}\n"
+                    f"📍 {location}\n"
+                    f"📅 Срок истекает: {expiry_date_nice}\n"
+                    f"⏳ Осталось дней: {days_until_expiry}\n\n"
+                    f"⚠️ <i>Рекомендуется заменить в ближайшее время</i>",
+                    parse_mode='HTML'
+                )
+                notified_users.add(user_id)
+                await asyncio.sleep(0.1)  # Небольшая задержка между сообщениями
+            except Exception as e:
+                logging.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+        
+        # Уведомления о просроченных фильтрах
+        for user_id, filter_type, location, expiry_date in expired_filters:
+            if user_id not in notified_users:  # Не спамим пользователям, которые уже получили уведомление
+                try:
+                    days_expired = (datetime.now().date() - datetime.strptime(str(expiry_date), '%Y-%m-%d').date()).days
+                    expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
+                    
+                    await bot.send_message(
+                        user_id,
+                        f"🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ</b>\n\n"
+                        f"🔧 {filter_type}\n"
+                        f"📍 {location}\n"
+                        f"📅 Срок истек: {expiry_date_nice}\n"
+                        f"⏰ Просрочено дней: {days_expired}\n\n"
+                        f"❌ <i>Требуется немедленная замена!</i>",
+                        parse_mode='HTML'
+                    )
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logging.error(f"Не удалось отправить срочное уведомление пользователю {user_id}: {e}")
+                    
+    except Exception as e:
+        logging.error(f"Ошибка при проверке просроченных фильтров: {e}")
+
+# Глобальный обработчик ошибок
+@dp.errors_handler()
+async def errors_handler(update, exception):
+    """Глобальный обработчик ошибок"""
+    logging.error(f"Ошибка: {exception}\n{traceback.format_exc()}")
+    
+    try:
+        # Отправляем сообщение администратору
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Ошибка в боте:\n\n"
+            f"Тип: {type(exception).__name__}\n"
+            f"Ошибка: {str(exception)[:1000]}"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить сообщение об ошибке администратору: {e}")
+    
+    return True
+
+# Запуск фоновой задачи
+async def schedule_daily_check():
+    """Планировщик ежедневных проверок"""
+    while True:
+        try:
+            await check_expired_filters()
+            # Создаем резервную копию раз в день в 3:00
+            if datetime.now().hour == 3 and datetime.now().minute == 0:
+                backup_database()
+                await asyncio.sleep(60)  # Ждем минуту чтобы не повторять
+        except Exception as e:
+            logging.error(f"Ошибка в фоновой задаче: {e}")
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+        
+        # Ожидаем 1 час до следующей проверки
+        await asyncio.sleep(60 * 60)
+
+async def on_startup(dp):
+    """Действия при запуске бота"""
+    logging.info("Бот запущен")
+    
+    # Создаем резервную копию при запуске
+    backup_database()
+    
+    # Запускаем фоновую задачу
+    asyncio.create_task(schedule_daily_check())
+    
+    # Уведомляем администратора о запуске
+    try:
+        await bot.send_message(ADMIN_ID, "🤖 Бот успешно запущен и работает")
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление администратору: {e}")
 
 # ========== ИСПРАВЛЕННЫЙ РАЗДЕЛ РЕДАКТИРОВАНИЯ ==========
 
@@ -1285,8 +1404,185 @@ async def process_filter_type(message: types.Message, state: FSMContext):
             reply_markup=get_location_keyboard()
         )
 
-# Остальные обработчики (change_date, lifetime, etc.) остаются без изменений
-# ... (добавьте сюда остальные обработчики из предыдущего кода)
+# ========== НЕДОСТАЮЩИЕ ОБРАБОТЧИКИ ==========
+
+@dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
+async def process_location(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard())
+        return
+        
+    if message.text == "📍 Указать место установки":
+        await message.answer(
+            "📍 <b>Введите место установки фильтра:</b>\n\n"
+            "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    current_state = await state.get_state()
+    
+    if current_state == FilterStates.waiting_location.state:
+        # Для одного фильтра
+        async with state.proxy() as data:
+            data['location'] = safe_db_string(message.text)
+
+        await FilterStates.next()
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"📅 <b>Дата последней замены</b>\n\n"
+            f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
+            f"📍 <i>Место:</i> {data['location']}\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+    else:
+        # Для нескольких фильтров
+        async with state.proxy() as data:
+            data['location'] = safe_db_string(message.text)
+
+        await MultipleFiltersStates.next()
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"📅 <b>Дата последней замены для всех фильтров</b>\n\n"
+            f"📍 <i>Место для всех фильтров:</i> {data['location']}\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=FilterStates.waiting_change_date)
+async def process_change_date(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        return
+    
+    try:
+        change_date = validate_date(message.text)
+        
+        async with state.proxy() as data:
+            data['change_date'] = change_date
+            filter_type = data['filter_type']
+            lifetime = data.get('lifetime', get_lifetime_by_type(filter_type))
+        
+        expiry_date = change_date + timedelta(days=lifetime)
+        expiry_date_nice = format_date_nice(expiry_date)
+        
+        await FilterStates.next()
+        
+        await message.answer(
+            f"⏱️ <b>Срок службы фильтра</b>\n\n"
+            f"🔧 <i>Фильтр:</i> {filter_type}\n"
+            f"📍 <i>Место:</i> {data['location']}\n"
+            f"📅 <i>Дата замены:</i> {format_date_nice(change_date)}\n"
+            f"🗓️ <i>Годен до:</i> {expiry_date_nice}\n\n"
+            f"📝 <b>Выберите или введите срок службы в днях:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+        
+    except ValueError as e:
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"❌ <b>Ошибка в дате!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=FilterStates.waiting_lifetime)
+async def process_lifetime(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        return
+    
+    lifetime_mapping = {
+        "3️⃣ 90 дней": 90,
+        "6️⃣ 180 дней": 180,
+        "1️⃣ 365 дней": 365
+    }
+    
+    try:
+        if message.text in lifetime_mapping:
+            lifetime = lifetime_mapping[message.text]
+        elif message.text == "📅 Другое количество":
+            await message.answer(
+                "📅 <b>Введите срок службы в днях:</b>\n\n"
+                "💡 <i>Например: 30, 60, 90, 180, 365 и т.д.</i>",
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+        else:
+            lifetime = validate_lifetime(message.text)
+        
+        async with state.proxy() as data:
+            change_date = data['change_date']
+            filter_type = data['filter_type']
+            location = data['location']
+            
+            expiry_date = change_date + timedelta(days=lifetime)
+            
+            # Сохраняем в БД
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('''INSERT INTO filters 
+                            (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                            VALUES (?, ?, ?, ?, ?, ?)''',
+                            (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                conn.commit()
+        
+        await message.answer(
+            f"🎉 <b>ФИЛЬТР УСПЕШНО ДОБАВЛЕН!</b>\n\n"
+            f"🔧 <b>Тип:</b> {filter_type}\n"
+            f"📍 <b>Место:</b> {location}\n"
+            f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n"
+            f"⏱️ <b>Срок службы:</b> {lifetime} дней\n"
+            f"🗓️ <b>Годен до:</b> {format_date_nice(expiry_date)}\n\n"
+            f"💫 <i>Теперь вы можете отслеживать срок его замены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+        await state.finish()
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в сроке службы!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите корректное число дней:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+
+# Обработка отмены
+@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    
+    await state.finish()
+    await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard())
+
+# Обработка других сообщений
+@dp.message_handler()
+async def handle_other_messages(message: types.Message):
+    await message.answer(
+        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
+        "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
 
 # Запуск бота
 if __name__ == '__main__':
