@@ -1,15 +1,28 @@
 import logging
 import sqlite3
+import os
+import asyncio
+import shutil
+import traceback
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения
+load_dotenv()
 
 # Настройки
-API_TOKEN = '8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME'
-ADMIN_ID = 5024165375
+API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
+
+# Проверка обязательных переменных
+if not API_TOKEN:
+    logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+    exit(1)
 
 # Стандартные сроки службы фильтров
 DEFAULT_LIFETIMES = {
@@ -36,9 +49,37 @@ def init_db():
                 location TEXT,
                 last_change DATE,
                 expiry_date DATE,
-                lifetime_days INTEGER)''')
+                lifetime_days INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Индексы для ускорения запросов
+    cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
+    cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
     conn.commit()
     conn.close()
+
+# Функция резервного копирования базы данных
+def backup_database():
+    """Создание резервной копии базы данных"""
+    try:
+        backup_dir = "backups"
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = os.path.join(backup_dir, f"filters_backup_{timestamp}.db")
+        
+        shutil.copy2('filters.db', backup_file)
+        logging.info(f"Создана резервная копия: {backup_file}")
+        
+        # Удаляем старые резервные копии (оставляем последние 7)
+        backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup")])
+        for old_backup in backups[:-7]:
+            os.remove(os.path.join(backup_dir, old_backup))
+            logging.info(f"Удалена старая резервная копия: {old_backup}")
+            
+    except Exception as e:
+        logging.error(f"Ошибка при создании резервной копии: {e}")
 
 # States
 class FilterStates(StatesGroup):
@@ -154,6 +195,14 @@ def get_confirmation_keyboard(filter_id):
     )
     return keyboard
 
+def get_reset_confirmation_keyboard():
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton("✅ Да, сбросить", callback_data="confirm_reset"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_reset")
+    )
+    return keyboard
+
 # Функция для преобразования даты из формата ДД.ММ.ГГ в ДД.ММ.ГГГГ
 def parse_date(date_str):
     try:
@@ -175,6 +224,123 @@ def parse_date(date_str):
 def format_date_nice(date):
     return date.strftime('%d.%m.%y')
 
+# Функция для проверки просроченных фильтров
+async def check_expired_filters():
+    """Фоновая задача для проверки просроченных фильтров"""
+    try:
+        conn = sqlite3.connect('filters.db')
+        cur = conn.cursor()
+        
+        # Фильтры, которые истекают в ближайшие 7 дней
+        cur.execute('''SELECT DISTINCT user_id, filter_type, location, expiry_date 
+                      FROM filters 
+                      WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')''')
+        expiring_filters = cur.fetchall()
+        
+        # Фильтры, которые уже просрочены (но не более 30 дней назад)
+        cur.execute('''SELECT DISTINCT user_id, filter_type, location, expiry_date 
+                      FROM filters 
+                      WHERE expiry_date BETWEEN date('now', '-30 days') AND date('now', '-1 day')''')
+        expired_filters = cur.fetchall()
+        conn.close()
+        
+        notified_users = set()
+        
+        # Уведомления о скором истечении срока
+        for user_id, filter_type, location, expiry_date in expiring_filters:
+            try:
+                days_until_expiry = (datetime.strptime(str(expiry_date), '%Y-%m-%d').date() - datetime.now().date()).days
+                expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
+                
+                await bot.send_message(
+                    user_id,
+                    f"🔔 <b>Напоминание о замене фильтра</b>\n\n"
+                    f"🔧 {filter_type}\n"
+                    f"📍 {location}\n"
+                    f"📅 Срок истекает: {expiry_date_nice}\n"
+                    f"⏳ Осталось дней: {days_until_expiry}\n\n"
+                    f"⚠️ <i>Рекомендуется заменить в ближайшее время</i>",
+                    parse_mode='HTML'
+                )
+                notified_users.add(user_id)
+                await asyncio.sleep(0.1)  # Небольшая задержка между сообщениями
+            except Exception as e:
+                logging.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+        
+        # Уведомления о просроченных фильтрах
+        for user_id, filter_type, location, expiry_date in expired_filters:
+            if user_id not in notified_users:  # Не спамим пользователям, которые уже получили уведомление
+                try:
+                    days_expired = (datetime.now().date() - datetime.strptime(str(expiry_date), '%Y-%m-%d').date()).days
+                    expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
+                    
+                    await bot.send_message(
+                        user_id,
+                        f"🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ</b>\n\n"
+                        f"🔧 {filter_type}\n"
+                        f"📍 {location}\n"
+                        f"📅 Срок истек: {expiry_date_nice}\n"
+                        f"⏰ Просрочено дней: {days_expired}\n\n"
+                        f"❌ <i>Требуется немедленная замена!</i>",
+                        parse_mode='HTML'
+                    )
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logging.error(f"Не удалось отправить срочное уведомление пользователю {user_id}: {e}")
+                    
+    except Exception as e:
+        logging.error(f"Ошибка при проверке просроченных фильтров: {e}")
+
+# Глобальный обработчик ошибок
+@dp.errors_handler()
+async def errors_handler(update, exception):
+    """Глобальный обработчик ошибок"""
+    logging.error(f"Ошибка: {exception}\n{traceback.format_exc()}")
+    
+    try:
+        # Отправляем сообщение администратору
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Ошибка в боте:\n\n"
+            f"Тип: {type(exception).__name__}\n"
+            f"Ошибка: {str(exception)[:1000]}"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить сообщение об ошибке администратору: {e}")
+    
+    return True
+
+# Запуск фоновой задачи
+async def schedule_daily_check():
+    """Планировщик ежедневных проверок"""
+    while True:
+        try:
+            await check_expired_filters()
+            # Создаем резервную копию раз в день в 3:00
+            if datetime.now().hour == 3:
+                backup_database()
+        except Exception as e:
+            logging.error(f"Ошибка в фоновой задаче: {e}")
+        
+        # Ожидаем 1 час до следующей проверки
+        await asyncio.sleep(60 * 60)
+
+async def on_startup(dp):
+    """Действия при запуске бота"""
+    logging.info("Бот запущен")
+    
+    # Создаем резервную копию при запуске
+    backup_database()
+    
+    # Запускаем фоновую задачу
+    asyncio.create_task(schedule_daily_check())
+    
+    # Уведомляем администратора о запуске
+    try:
+        await bot.send_message(ADMIN_ID, "🤖 Бот успешно запущен и работает")
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление администратору: {e}")
+
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
@@ -186,7 +352,8 @@ async def cmd_start(message: types.Message):
         "• ✨ Добавление новых фильтров\n"
         "• ⏳ Контроль сроков замены\n"
         "• ⚙️ Полное управление базой\n"
-        "• 📊 Детальная статистика",
+        "• 📊 Детальная статистика\n"
+        "• 🔔 Автоматические напоминания",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
@@ -579,8 +746,6 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
-
-# Остальной код остается без изменений...
 
 # Список фильтров
 @dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
@@ -1230,6 +1395,60 @@ async def back_to_main(callback_query: types.CallbackQuery):
         parse_mode='HTML'
     )
 
+# Команда сброса базы данных (только для админа)
+@dp.message_handler(commands=['reset_db'], user_id=ADMIN_ID)
+async def cmd_reset_db(message: types.Message):
+    """Сброс базы данных (только для администратора)"""
+    await message.answer(
+        "⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+        "Вы уверены, что хотите полностью очистить базу данных?\n"
+        "Это действие нельзя отменить!\n\n"
+        "🗑️ <i>Будут удалены ВСЕ фильтры всех пользователей</i>",
+        parse_mode='HTML',
+        reply_markup=get_reset_confirmation_keyboard()
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "confirm_reset")
+async def process_reset_db(callback_query: types.CallbackQuery):
+    """Обработка подтверждения сброса базы данных"""
+    try:
+        # Создаем резервную копию перед сбросом
+        backup_database()
+        
+        conn = sqlite3.connect('filters.db')
+        cur = conn.cursor()
+        cur.execute("DELETE FROM filters")
+        conn.commit()
+        
+        # Получаем количество удаленных записей
+        cur.execute("SELECT COUNT(*) FROM filters")
+        remaining = cur.fetchone()[0]
+        conn.close()
+        
+        await callback_query.message.edit_text(
+            f"✅ <b>База данных успешно сброшена!</b>\n\n"
+            f"🗑️ Все фильтры были удалены.\n"
+            f"💾 Создана резервная копия перед сбросом.",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при сбросе базы данных: {e}")
+        await callback_query.message.edit_text(
+            "❌ <b>Ошибка при сбросе базы данных</b>\n\n"
+            f"💡 <i>{str(e)}</i>",
+            parse_mode='HTML'
+        )
+
+@dp.callback_query_handler(lambda c: c.data == "cancel_reset")
+async def cancel_reset_db(callback_query: types.CallbackQuery):
+    """Отмена сброса базы данных"""
+    await callback_query.message.edit_text(
+        "✅ <b>Сброс базы данных отменен</b>\n\n"
+        "💡 <i>Данные сохранены</i>",
+        parse_mode='HTML'
+    )
+
 # Статистика
 @dp.message_handler(lambda message: message.text == "📊 Статистика")
 async def cmd_stats(message: types.Message):
@@ -1249,6 +1468,14 @@ async def cmd_stats(message: types.Message):
                 (message.from_user.id,))
     type_stats = cur.fetchall()
     
+    # Общая статистика по всем пользователям (только для админа)
+    if message.from_user.id == ADMIN_ID:
+        cur.execute('''SELECT COUNT(DISTINCT user_id) FROM filters''')
+        total_users = cur.fetchone()[0]
+        
+        cur.execute('''SELECT COUNT(*) FROM filters''')
+        total_filters = cur.fetchone()[0]
+    
     conn.close()
     
     response = "📊 <b>СТАТИСТИКА ФИЛЬТРОВ</b>\n\n"
@@ -1261,6 +1488,12 @@ async def cmd_stats(message: types.Message):
         response += "<b>📈 По типам:</b>\n"
         for filter_type, count in type_stats:
             response += f"   • {filter_type}: {count} шт.\n"
+    
+    # Добавляем общую статистику для админа
+    if message.from_user.id == ADMIN_ID:
+        response += f"\n👥 <b>Общая статистика (админ):</b>\n"
+        response += f"   • Пользователей: {total_users}\n"
+        response += f"   • Всего фильтров: {total_filters}\n"
     
     await message.answer(response, parse_mode='HTML', reply_markup=get_management_keyboard())
 
@@ -1286,5 +1519,16 @@ async def handle_other_messages(message: types.Message):
 
 # Запуск бота
 if __name__ == '__main__':
+    # Проверка обязательных переменных
+    if not API_TOKEN:
+        logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        exit(1)
+    
     init_db()
-    executor.start_polling(dp, skip_updates=True)
+    
+    # Запуск с обработчиком startup
+    executor.start_polling(
+        dp, 
+        skip_updates=True,
+        on_startup=on_startup
+    )
