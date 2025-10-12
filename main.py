@@ -5,7 +5,6 @@ import asyncio
 import shutil
 import traceback
 from datetime import datetime, timedelta
-from collections import defaultdict
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -16,24 +15,13 @@ from dotenv import load_dotenv
 # Загрузка переменных окружения
 load_dotenv()
 
-# Класс конфигурации
-class Config:
-    def __init__(self):
-        self.API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
-        self.BACKUP_KEEP_COUNT = 7
-        self.CHECK_INTERVAL = 3600  # 1 час
-        self.RATE_LIMIT = 10  # запросов в минуту
-        self.MESSAGE_CHUNK_SIZE = 4096  # Максимальный размер сообщения Telegram
-        
-        if not self.API_TOKEN:
-            raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+# Настройки
+API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
 
-# Инициализация конфигурации
-try:
-    config = Config()
-except ValueError as e:
-    logging.error(f"Ошибка конфигурации: {e}")
+# Проверка обязательных переменных
+if not API_TOKEN:
+    logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
     exit(1)
 
 # Стандартные сроки службы фильтров
@@ -45,16 +33,10 @@ DEFAULT_LIFETIMES = {
 }
 
 # Инициализация бота
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-bot = Bot(token=config.API_TOKEN)
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
-
-# Словарь для отслеживания запросов (защита от спама)
-user_requests = defaultdict(list)
 
 # Инициализация БД
 def init_db():
@@ -92,88 +74,12 @@ def backup_database():
         
         # Удаляем старые резервные копии (оставляем последние 7)
         backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup")])
-        for old_backup in backups[:-config.BACKUP_KEEP_COUNT]:
+        for old_backup in backups[:-7]:
             os.remove(os.path.join(backup_dir, old_backup))
             logging.info(f"Удалена старая резервная копия: {old_backup}")
             
     except Exception as e:
         logging.error(f"Ошибка при создании резервной копии: {e}")
-
-# Функции для улучшенной безопасности и обработки
-def is_rate_limited(user_id, limit=config.RATE_LIMIT, period=60):
-    """Проверка ограничения запросов"""
-    now = datetime.now()
-    user_requests[user_id] = [req for req in user_requests[user_id] 
-                             if now - req < timedelta(seconds=period)]
-    
-    if len(user_requests[user_id]) >= limit:
-        return True
-    
-    user_requests[user_id].append(now)
-    return False
-
-def log_user_action(user_id, action, details=""):
-    """Логирование действий пользователя"""
-    logging.info(f"User {user_id}: {action} - {details}")
-
-async def safe_send_message(chat_id, text, **kwargs):
-    """Безопасная отправка сообщений с ограничением длины"""
-    if len(text) > config.MESSAGE_CHUNK_SIZE:
-        parts = []
-        current_part = ""
-        
-        # Разделяем по строкам чтобы не обрывать сообщение посередине строки
-        lines = text.split('\n')
-        
-        for line in lines:
-            if len(current_part + line + '\n') <= config.MESSAGE_CHUNK_SIZE:
-                current_part += line + '\n'
-            else:
-                if current_part:
-                    parts.append(current_part.strip())
-                current_part = line + '\n'
-        
-        if current_part:
-            parts.append(current_part.strip())
-        
-        for i, part in enumerate(parts):
-            if i == len(parts) - 1:
-                # Последняя часть с оригинальной разметкой
-                await bot.send_message(chat_id, part, **kwargs)
-            else:
-                # Промежуточные части без разметки чтобы избежать ошибок
-                await bot.send_message(chat_id, part, parse_mode=None)
-            await asyncio.sleep(0.1)
-    else:
-        await bot.send_message(chat_id, text, **kwargs)
-
-def safe_parse_date(date_str):
-    """Безопасное преобразование даты с дополнительными проверками"""
-    try:
-        # Пробуем разные форматы дат
-        formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y']
-        
-        for fmt in formats:
-            try:
-                date = datetime.strptime(date_str, fmt).date()
-                break
-            except ValueError:
-                continue
-        else:
-            raise ValueError("Неверный формат даты")
-        
-        # Проверяем, что дата не в будущем (если это замена)
-        if date > datetime.now().date():
-            raise ValueError("Дата замены не может быть в будущем")
-        
-        # Проверяем разумность даты (не старше 10 лет)
-        if date < (datetime.now().date() - timedelta(days=3650)):
-            raise ValueError("Дата слишком старая")
-        
-        return date
-        
-    except Exception as e:
-        raise ValueError(f"Ошибка преобразования даты: {e}")
 
 # States
 class FilterStates(StatesGroup):
@@ -297,6 +203,23 @@ def get_reset_confirmation_keyboard():
     )
     return keyboard
 
+# Функция для преобразования даты из формата ДД.ММ.ГГ в ДД.ММ.ГГГГ
+def parse_date(date_str):
+    try:
+        # Пробуем разные форматы дат
+        formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y']
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+        
+        # Если ни один формат не подошел
+        raise ValueError("Неверный формат даты")
+    except Exception as e:
+        raise ValueError(f"Ошибка преобразования даты: {e}")
+
 # Функция для форматирования даты в красивый вид
 def format_date_nice(date):
     return date.strftime('%d.%m.%y')
@@ -329,7 +252,7 @@ async def check_expired_filters():
                 days_until_expiry = (datetime.strptime(str(expiry_date), '%Y-%m-%d').date() - datetime.now().date()).days
                 expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
                 
-                await safe_send_message(
+                await bot.send_message(
                     user_id,
                     f"🔔 <b>Напоминание о замене фильтра</b>\n\n"
                     f"🔧 {filter_type}\n"
@@ -351,7 +274,7 @@ async def check_expired_filters():
                     days_expired = (datetime.now().date() - datetime.strptime(str(expiry_date), '%Y-%m-%d').date()).days
                     expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
                     
-                    await safe_send_message(
+                    await bot.send_message(
                         user_id,
                         f"🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ</b>\n\n"
                         f"🔧 {filter_type}\n"
@@ -376,8 +299,8 @@ async def errors_handler(update, exception):
     
     try:
         # Отправляем сообщение администратору
-        await safe_send_message(
-            config.ADMIN_ID,
+        await bot.send_message(
+            ADMIN_ID,
             f"❌ Ошибка в боте:\n\n"
             f"Тип: {type(exception).__name__}\n"
             f"Ошибка: {str(exception)[:1000]}"
@@ -400,7 +323,7 @@ async def schedule_daily_check():
             logging.error(f"Ошибка в фоновой задаче: {e}")
         
         # Ожидаем 1 час до следующей проверки
-        await asyncio.sleep(config.CHECK_INTERVAL)
+        await asyncio.sleep(60 * 60)
 
 async def on_startup(dp):
     """Действия при запуске бота"""
@@ -414,42 +337,14 @@ async def on_startup(dp):
     
     # Уведомляем администратора о запуске
     try:
-        await safe_send_message(config.ADMIN_ID, "🤖 Бот успешно запущен и работает")
+        await bot.send_message(ADMIN_ID, "🤖 Бот успешно запущен и работает")
     except Exception as e:
         logging.error(f"Не удалось отправить уведомление администратору: {e}")
-
-# Универсальный обработчик отмены
-async def cancel_handler(message: types.Message, state: FSMContext):
-    """Универсальный обработчик отмены"""
-    current_state = await state.get_state()
-    if current_state is not None:
-        await state.finish()
-        log_user_action(message.from_user.id, "cancelled_action", f"state: {current_state}")
-    
-    await safe_send_message(
-        message.chat.id,
-        "🚫 Действие отменено", 
-        reply_markup=get_main_keyboard()
-    )
-
-# Мидлварь для проверки ограничения запросов (исправленная версия для aiogram 2.x)
-@dp.middleware_handler()
-async def rate_limit_middleware(handler, event, data):
-    """Мидлварь для ограничения запросов"""
-    if hasattr(event, 'from_user') and event.from_user:
-        user_id = event.from_user.id
-        if is_rate_limited(user_id):
-            if hasattr(event, 'message') and event.message:
-                await safe_send_message(event.message.chat.id, "⚠️ Слишком много запросов. Подождите немного.")
-            return
-    return await handler(event, data)
 
 # Команда start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    log_user_action(message.from_user.id, "started_bot")
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
         "💧 <i>Умный помощник для своевременной замены фильтров</i>\n\n"
         "📦 <b>Основные возможности:</b>\n"
@@ -466,9 +361,7 @@ async def cmd_start(message: types.Message):
 # Обработка кнопки "Главное меню"
 @dp.message_handler(lambda message: message.text == "🔙 Главное меню")
 async def cmd_back(message: types.Message):
-    log_user_action(message.from_user.id, "main_menu")
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "🏠 <b>Главное меню</b>\n\n"
         "Выберите нужный раздел:",
         parse_mode='HTML',
@@ -478,9 +371,7 @@ async def cmd_back(message: types.Message):
 # Обработка кнопки "Управление"
 @dp.message_handler(lambda message: message.text == "⚙️ Управление")
 async def cmd_management(message: types.Message):
-    log_user_action(message.from_user.id, "management_menu")
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "🛠️ <b>Центр управления фильтрами</b>\n\n"
         "Выберите действие:",
         parse_mode='HTML',
@@ -499,9 +390,7 @@ def get_lifetime_by_type(filter_type):
 @dp.message_handler(lambda message: message.text == "✨ Добавить фильтр")
 @dp.message_handler(commands=['add'])
 async def cmd_add(message: types.Message):
-    log_user_action(message.from_user.id, "started_add_filter")
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "🔧 <b>Выберите тип добавления:</b>\n\n"
         "💡 <i>Можно добавить один фильтр или сразу несколько</i>",
         parse_mode='HTML',
@@ -511,11 +400,9 @@ async def cmd_add(message: types.Message):
 # Обработка выбора типа добавления
 @dp.message_handler(lambda message: message.text in ["🔧 Один фильтр", "📦 Несколько фильтров"])
 async def process_add_type(message: types.Message):
-    log_user_action(message.from_user.id, "chose_add_type", message.text)
     if message.text == "🔧 Один фильтр":
         await FilterStates.waiting_filter_type.set()
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "🔧 <b>Выберите тип фильтра:</b>\n\n"
             "💡 <i>Или укажите свой вариант</i>",
             parse_mode='HTML',
@@ -523,8 +410,7 @@ async def process_add_type(message: types.Message):
         )
     elif message.text == "📦 Несколько фильтров":
         await MultipleFiltersStates.waiting_filters_list.set()
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "📦 <b>Добавление нескольких фильтров</b>\n\n"
             "📝 <b>Введите типы фильтров через запятую или с новой строки:</b>\n\n"
             "💡 <i>Примеры:</i>\n"
@@ -539,12 +425,12 @@ async def process_add_type(message: types.Message):
 @dp.message_handler(state=FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await cancel_handler(message, state)
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
         return
         
     if message.text == "📝 Другой тип":
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "📝 <b>Введите тип фильтра:</b>\n"
             "<i>Например: Угольный фильтр, Механический фильтр и т.д.</i>",
             parse_mode='HTML',
@@ -556,10 +442,8 @@ async def process_filter_type(message: types.Message, state: FSMContext):
         data['filter_type'] = message.text
         data['lifetime'] = get_lifetime_by_type(message.text)
 
-    log_user_action(message.from_user.id, "selected_filter_type", message.text)
     await FilterStates.next()
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "📍 <b>Укажите место установки фильтра:</b>\n\n"
         "💡 <i>Нажмите кнопку '📍 Другое место' для ввода своего варианта</i>",
         parse_mode='HTML',
@@ -570,7 +454,8 @@ async def process_filter_type(message: types.Message, state: FSMContext):
 @dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
 async def process_multiple_filters_list(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await cancel_handler(message, state)
+        await state.finish()
+        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard())
         return
     
     # Разделяем ввод на отдельные фильтры
@@ -585,8 +470,7 @@ async def process_multiple_filters_list(message: types.Message, state: FSMContex
         filters_list = [f.strip() for f in filter_text.split('\n') if f.strip()]
     
     if not filters_list:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Не удалось распознать фильтры</b>\n\n"
             "💡 <i>Введите типы фильтров через запятую или с новой строки</i>",
             parse_mode='HTML',
@@ -600,10 +484,8 @@ async def process_multiple_filters_list(message: types.Message, state: FSMContex
         # Устанавливаем срок службы по первому фильтру (можно будет изменить позже)
         data['lifetime'] = get_lifetime_by_type(filters_list[0])
     
-    log_user_action(message.from_user.id, "entered_multiple_filters", f"count: {len(filters_list)}")
     await MultipleFiltersStates.next()
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         f"📦 <b>Будет добавлено фильтров:</b> {len(filters_list)}\n\n"
         f"🔧 <b>Список фильтров:</b>\n" + "\n".join([f"• {f}" for f in filters_list]) + "\n\n"
         f"📍 <b>Укажите место установки для всех фильтров:</b>\n\n"
@@ -616,12 +498,12 @@ async def process_multiple_filters_list(message: types.Message, state: FSMContex
 @dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
 async def process_location(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await cancel_handler(message, state)
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard())
         return
         
     if message.text == "📍 Другое место":
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "📍 <b>Введите место установки фильтра:</b>\n\n"
             "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
             parse_mode='HTML',
@@ -636,11 +518,9 @@ async def process_location(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             data['location'] = message.text
 
-        log_user_action(message.from_user.id, "selected_location", message.text)
         await FilterStates.next()
         today_nice = format_date_nice(datetime.now().date())
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             f"📅 <b>Дата последней замены</b>\n\n"
             f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
             f"📍 <i>Место:</i> {data['location']}\n\n"
@@ -654,11 +534,9 @@ async def process_location(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             data['location'] = message.text
 
-        log_user_action(message.from_user.id, "selected_location_multiple", message.text)
         await MultipleFiltersStates.next()
         today_nice = format_date_nice(datetime.now().date())
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             f"📅 <b>Дата последней замены для всех фильтров</b>\n\n"
             f"📍 <i>Место для всех фильтров:</i> {data['location']}\n\n"
             f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
@@ -671,12 +549,13 @@ async def process_location(message: types.Message, state: FSMContext):
 @dp.message_handler(state=[FilterStates.waiting_change_date, MultipleFiltersStates.waiting_change_date])
 async def process_date(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await cancel_handler(message, state)
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard())
         return
         
     try:
-        # Преобразуем дату из формата ДД.ММ.ГГ с дополнительными проверками
-        change_date = safe_parse_date(message.text)
+        # Преобразуем дату из формата ДД.ММ.ГГ
+        change_date = parse_date(message.text)
         
         current_state = await state.get_state()
         
@@ -685,10 +564,8 @@ async def process_date(message: types.Message, state: FSMContext):
             async with state.proxy() as data:
                 data['change_date'] = change_date
                 
-            log_user_action(message.from_user.id, "selected_change_date", str(change_date))
             await FilterStates.next()
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"⏱️ <b>Срок службы фильтра</b>\n\n"
                 f"📅 <i>Рекомендуемый срок:</i> {data['lifetime']} дней\n\n"
                 f"🔄 <b>Выберите срок службы:</b>",
@@ -700,10 +577,8 @@ async def process_date(message: types.Message, state: FSMContext):
             async with state.proxy() as data:
                 data['change_date'] = change_date
                 
-            log_user_action(message.from_user.id, "selected_change_date_multiple", str(change_date))
             await MultipleFiltersStates.next()
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"⏱️ <b>Срок службы для всех фильтров</b>\n\n"
                 f"📅 <i>Рекомендуемый срок:</i> {data['lifetime']} дней\n\n"
                 f"🔄 <b>Выберите срок службы:</b>",
@@ -713,10 +588,9 @@ async def process_date(message: types.Message, state: FSMContext):
         
     except ValueError as e:
         today_nice = format_date_nice(datetime.now().date())
-        await safe_send_message(
-            message.chat.id,
-            f"❌ <b>Неверный формат даты!</b>\n\n"
-            f"📝 <i>{str(e)}</i>\n"
+        await message.answer(
+            "❌ <b>Неверный формат даты!</b>\n\n"
+            "📝 <i>Используйте формат ДД.ММ.ГГ</i>\n"
             f"<i>Пример: {today_nice}</i>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
@@ -726,7 +600,8 @@ async def process_date(message: types.Message, state: FSMContext):
 @dp.message_handler(state=[FilterStates.waiting_lifetime, MultipleFiltersStates.waiting_lifetime])
 async def process_lifetime(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await cancel_handler(message, state)
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard())
         return
         
     try:
@@ -742,8 +617,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 if message.text.startswith("3️⃣") or message.text.startswith("6️⃣") or message.text.startswith("1️⃣"):
                     lifetime = int(message.text.split()[1])
                 elif message.text == "📅 Другое количество":
-                    await safe_send_message(
-                        message.chat.id,
+                    await message.answer(
                         "🔢 <b>Введите количество дней:</b>\n"
                         "<i>Например: 120, 200, 400 и т.д.</i>",
                         parse_mode='HTML',
@@ -783,9 +657,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 change_date_nice = format_date_nice(change_date)
                 expiry_date_nice = format_date_nice(expiry_date)
                 
-                log_user_action(message.from_user.id, "added_filter", f"{filter_type} at {location}")
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     f"{status_emoji} <b>ФИЛЬТР ДОБАВЛЕН!</b>\n\n"
                     f"🔧 <b>Тип:</b> {filter_type}\n"
                     f"📍 <b>Место:</b> {location}\n"
@@ -809,8 +681,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 if message.text.startswith("3️⃣") or message.text.startswith("6️⃣") or message.text.startswith("1️⃣"):
                     lifetime = int(message.text.split()[1])
                 elif message.text == "📅 Другое количество":
-                    await safe_send_message(
-                        message.chat.id,
+                    await message.answer(
                         "🔢 <b>Введите количество дней:</b>\n"
                         "<i>Например: 120, 200, 400 и т.д.</i>",
                         parse_mode='HTML',
@@ -860,9 +731,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                     status_icon = "🔴" if result['days_until_expiry'] <= 0 else "🟡" if result['days_until_expiry'] <= 30 else "✅"
                     response += f"{status_icon} {result['type']} (до {expiry_date_nice})\n"
                 
-                log_user_action(message.from_user.id, "added_multiple_filters", f"count: {added_count}")
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     response,
                     parse_mode='HTML',
                     reply_markup=get_main_keyboard()
@@ -870,8 +739,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                 await state.finish()
             
     except ValueError:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Неверный формат!</b>\n\n"
             "🔢 <i>Введите количество дней числом</i>\n"
             "<i>Например: 90, 180, 365</i>",
@@ -883,7 +751,6 @@ async def process_lifetime(message: types.Message, state: FSMContext):
 @dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
 @dp.message_handler(commands=['list'])
 async def cmd_list(message: types.Message):
-    log_user_action(message.from_user.id, "viewed_filters_list")
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     cur.execute("SELECT id, filter_type, location, last_change, expiry_date, lifetime_days FROM filters WHERE user_id = ?", 
@@ -892,8 +759,7 @@ async def cmd_list(message: types.Message):
     conn.close()
 
     if not filters:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "📭 <b>Список фильтров пуст</b>\n\n"
             "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
             parse_mode='HTML',
@@ -936,13 +802,12 @@ async def cmd_list(message: types.Message):
             f"   📊 Статус: {status_text}\n\n"
         )
 
-    await safe_send_message(message.chat.id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
+    await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 # Проверка сроков
 @dp.message_handler(lambda message: message.text == "⏳ Сроки замены")
 @dp.message_handler(commands=['check'])
 async def cmd_check(message: types.Message):
-    log_user_action(message.from_user.id, "checked_expiry_dates")
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     cur.execute("SELECT filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
@@ -951,8 +816,7 @@ async def cmd_check(message: types.Message):
     conn.close()
 
     if not filters:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "📭 <b>Нет фильтров для проверки</b>\n\n"
             "💫 <i>Добавьте фильтры для отслеживания сроков</i>",
             parse_mode='HTML',
@@ -993,13 +857,12 @@ async def cmd_check(message: types.Message):
         response += "✅ <b>ВСЕ ФИЛЬТРЫ В НОРМЕ!</b>\n\n"
         response += "💫 <i>Следующая проверка через 30+ дней</i>"
 
-    await safe_send_message(message.chat.id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
+    await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 # Редактирование фильтра - выбор фильтра
 @dp.message_handler(lambda message: message.text == "✏️ Редактировать")
 @dp.message_handler(commands=['edit'])
 async def cmd_edit(message: types.Message):
-    log_user_action(message.from_user.id, "started_edit")
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     cur.execute("SELECT id, filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
@@ -1008,8 +871,7 @@ async def cmd_edit(message: types.Message):
     conn.close()
 
     if not filters:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Нет фильтров для редактирования</b>",
             parse_mode='HTML',
             reply_markup=get_management_keyboard()
@@ -1037,8 +899,7 @@ async def cmd_edit(message: types.Message):
     keyboard.add(types.KeyboardButton("🔙 Главное меню"))
 
     await EditFilterStates.waiting_filter_selection.set()
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "✏️ <b>Выберите фильтр для редактирования:</b>\n\n"
         "💡 <i>Статусы:\n🔴 - просрочен\n🟡 - срочно заменить\n🟠 - скоро истекает\n✅ - в норме</i>",
         parse_mode='HTML',
@@ -1050,8 +911,7 @@ async def cmd_edit(message: types.Message):
 async def process_edit_filter_selection(message: types.Message, state: FSMContext):
     if message.text == "🔙 Главное меню":
         await state.finish()
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "🏠 <b>Главное меню</b>",
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
@@ -1106,9 +966,7 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
                 last_change_nice = format_date_nice(datetime.strptime(str(filter_data[4]), '%Y-%m-%d').date())
                 expiry_date_nice = format_date_nice(expiry_date)
                 
-                log_user_action(message.from_user.id, "selected_filter_for_edit", f"id: {filter_id}")
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
                     f"{status_icon} <b>Текущие данные:</b>\n"
                     f"🔧 <b>Тип:</b> {filter_data[2]}\n"
@@ -1124,8 +982,7 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
                 )
                 await EditFilterStates.next()
             else:
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     "❌ <b>Фильтр не найден</b>\n\n"
                     "💡 <i>Попробуйте выбрать фильтр из списка еще раз</i>",
                     parse_mode='HTML',
@@ -1133,8 +990,7 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
                 )
                 await state.finish()
         else:
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 "❌ <b>Не удалось распознать фильтр</b>\n\n"
                 "💡 <i>Пожалуйста, выберите фильтр из списка кнопок</i>",
                 parse_mode='HTML',
@@ -1146,8 +1002,7 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
         
     except Exception as e:
         logging.error(f"Ошибка при выборе фильтра для редактирования: {e}")
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Произошла ошибка при выборе фильтра</b>\n\n"
             "💡 <i>Попробуйте еще раз</i>",
             parse_mode='HTML',
@@ -1181,16 +1036,14 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
         
         # Запрашиваем новое значение в зависимости от поля
         if field == "filter_type":
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"🔧 <b>Текущий тип:</b> {filter_data[2]}\n\n"
                 f"📝 <b>Введите новый тип фильтра:</b>",
                 parse_mode='HTML',
                 reply_markup=get_filter_type_keyboard()
             )
         elif field == "location":
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"📍 <b>Текущее место:</b> {filter_data[3]}\n\n"
                 f"📝 <b>Введите новое место установки:</b>",
                 parse_mode='HTML',
@@ -1199,8 +1052,7 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
         elif field == "last_change":
             last_change_nice = format_date_nice(datetime.strptime(str(filter_data[4]), '%Y-%m-%d').date())
             today_nice = format_date_nice(datetime.now().date())
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"📅 <b>Текущая дата замены:</b> {last_change_nice}\n\n"
                 f"📝 <b>Введите новую дату замены в формате ДД.ММ.ГГ:</b>\n"
                 f"<i>Например: {today_nice}</i>",
@@ -1208,19 +1060,16 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
                 reply_markup=get_cancel_keyboard()
             )
         elif field == "lifetime_days":
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"⏱️ <b>Текущий срок службы:</b> {filter_data[6]} дней\n\n"
                 f"📝 <b>Введите новый срок службы (в днях):</b>",
                 parse_mode='HTML',
                 reply_markup=get_lifetime_keyboard()
             )
         
-        log_user_action(message.from_user.id, "selected_field_for_edit", field)
         await EditFilterStates.next()
     else:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Пожалуйста, выберите поле из списка</b>",
             parse_mode='HTML',
             reply_markup=get_edit_field_keyboard()
@@ -1230,7 +1079,12 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
 @dp.message_handler(state=EditFilterStates.waiting_new_value)
 async def process_edit_new_value(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await cancel_handler(message, state)
+        await state.finish()
+        await message.answer(
+            "🚫 <b>Редактирование отменено</b>",
+            parse_mode='HTML',
+            reply_markup=get_management_keyboard()
+        )
         return
 
     async with state.proxy() as data:
@@ -1247,9 +1101,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             cur.execute("UPDATE filters SET filter_type = ? WHERE id = ?", 
                        (new_value, filter_id))
             
-            log_user_action(message.from_user.id, "edited_filter_type", f"id: {filter_id}, new: {new_value}")
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"✅ <b>Тип фильтра успешно изменен!</b>\n\n"
                 f"🔧 <b>Было:</b> {old_filter_data[2]}\n"
                 f"🔧 <b>Стало:</b> {new_value}",
@@ -1262,9 +1114,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             cur.execute("UPDATE filters SET location = ? WHERE id = ?", 
                        (new_value, filter_id))
             
-            log_user_action(message.from_user.id, "edited_location", f"id: {filter_id}, new: {new_value}")
-            await safe_send_message(
-                message.chat.id,
+            await message.answer(
                 f"✅ <b>Место установки успешно изменено!</b>\n\n"
                 f"📍 <b>Было:</b> {old_filter_data[3]}\n"
                 f"📍 <b>Стало:</b> {new_value}",
@@ -1274,8 +1124,8 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             
         elif field == "last_change":
             try:
-                # Преобразуем дату из формата ДД.ММ.ГГ с дополнительными проверками
-                new_date = safe_parse_date(message.text)
+                # Преобразуем дату из формата ДД.ММ.ГГ
+                new_date = parse_date(message.text)
                 
                 # Получаем текущий срок службы
                 cur.execute("SELECT lifetime_days FROM filters WHERE id = ?", (filter_id,))
@@ -1291,9 +1141,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 new_date_nice = format_date_nice(new_date)
                 new_expiry_nice = format_date_nice(new_expiry)
                 
-                log_user_action(message.from_user.id, "edited_change_date", f"id: {filter_id}, new: {new_date}")
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     f"✅ <b>Дата замены успешно изменена!</b>\n\n"
                     f"📅 <b>Было:</b> {old_date_nice}\n"
                     f"📅 <b>Стало:</b> {new_date_nice}\n"
@@ -1302,12 +1150,11 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                     reply_markup=get_management_keyboard()
                 )
                 
-            except ValueError as e:
+            except ValueError:
                 today_nice = format_date_nice(datetime.now().date())
-                await safe_send_message(
-                    message.chat.id,
-                    f"❌ <b>Неверный формат даты!</b>\n\n"
-                    f"📝 <i>{str(e)}</i>\n"
+                await message.answer(
+                    "❌ <b>Неверный формат даты!</b>\n\n"
+                    "📝 <i>Используйте формат ДД.ММ.ГГ</i>\n"
                     f"<i>Пример: {today_nice}</i>",
                     parse_mode='HTML',
                     reply_markup=get_cancel_keyboard()
@@ -1319,8 +1166,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 if message.text.startswith("3️⃣") or message.text.startswith("6️⃣") or message.text.startswith("1️⃣"):
                     new_lifetime = int(message.text.split()[1])
                 elif message.text == "📅 Другое количество":
-                    await safe_send_message(
-                        message.chat.id,
+                    await message.answer(
                         "🔢 <b>Введите количество дней:</b>\n"
                         "<i>Например: 120, 200, 400 и т.д.</i>",
                         parse_mode='HTML',
@@ -1342,9 +1188,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 
                 new_expiry_nice = format_date_nice(new_expiry)
                 
-                log_user_action(message.from_user.id, "edited_lifetime", f"id: {filter_id}, new: {new_lifetime}")
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     f"✅ <b>Срок службы успешно изменен!</b>\n\n"
                     f"⏱️ <b>Было:</b> {old_filter_data[6]} дней\n"
                     f"⏱️ <b>Стало:</b> {new_lifetime} дней\n"
@@ -1354,8 +1198,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 )
                 
             except ValueError:
-                await safe_send_message(
-                    message.chat.id,
+                await message.answer(
                     "❌ <b>Неверный формат!</b>\n\n"
                     "🔢 <i>Введите количество дней числом</i>\n"
                     "<i>Например: 90, 180, 365</i>",
@@ -1390,8 +1233,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
         last_change_nice = format_date_nice(datetime.strptime(str(updated_filter[4]), '%Y-%m-%d').date())
         expiry_date_nice = format_date_nice(expiry_date)
         
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             f"📋 <b>ОБНОВЛЕННАЯ ИНФОРМАЦИЯ:</b>\n\n"
             f"{status_icon} <b>Фильтр #{filter_id}</b>\n"
             f"🔧 <b>Тип:</b> {updated_filter[2]}\n"
@@ -1409,8 +1251,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
         
     except Exception as e:
         logging.error(f"Ошибка при редактировании фильтра: {e}")
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Произошла ошибка при редактировании фильтра</b>\n\n"
             "💡 <i>Попробуйте еще раз</i>",
             parse_mode='HTML',
@@ -1422,7 +1263,6 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
 @dp.message_handler(lambda message: message.text == "🗑️ Удалить")
 @dp.message_handler(commands=['delete'])
 async def cmd_delete(message: types.Message):
-    log_user_action(message.from_user.id, "started_delete")
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     cur.execute("SELECT id, filter_type, location, expiry_date FROM filters WHERE user_id = ?", 
@@ -1431,8 +1271,7 @@ async def cmd_delete(message: types.Message):
     conn.close()
 
     if not filters:
-        await safe_send_message(
-            message.chat.id,
+        await message.answer(
             "❌ <b>Нет фильтров для удаления</b>",
             parse_mode='HTML',
             reply_markup=get_management_keyboard()
@@ -1460,8 +1299,7 @@ async def cmd_delete(message: types.Message):
     
     keyboard.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_management"))
 
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "🗑️ <b>Выберите фильтр для удаления:</b>\n\n"
         "💡 <i>Статусы: 🔴 - просрочен, 🟡 - скоро истекает, ✅ - в норме</i>",
         parse_mode='HTML',
@@ -1522,7 +1360,6 @@ async def process_delete(callback_query: types.CallbackQuery):
         
         expiry_date_nice = format_date_nice(datetime.strptime(str(filter_info[2]), '%Y-%m-%d').date())
         
-        log_user_action(callback_query.from_user.id, "deleted_filter", f"id: {filter_id}")
         await callback_query.message.edit_text(
             f"✅ <b>Фильтр удален:</b>\n\n"
             f"🔧 <b>Тип:</b> {filter_info[0]}\n"
@@ -1559,12 +1396,10 @@ async def back_to_main(callback_query: types.CallbackQuery):
     )
 
 # Команда сброса базы данных (только для админа)
-@dp.message_handler(commands=['reset_db'], user_id=config.ADMIN_ID)
+@dp.message_handler(commands=['reset_db'], user_id=ADMIN_ID)
 async def cmd_reset_db(message: types.Message):
     """Сброс базы данных (только для администратора)"""
-    log_user_action(message.from_user.id, "requested_db_reset")
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "⚠️ <b>ВНИМАНИЕ!</b>\n\n"
         "Вы уверены, что хотите полностью очистить базу данных?\n"
         "Это действие нельзя отменить!\n\n"
@@ -1590,7 +1425,6 @@ async def process_reset_db(callback_query: types.CallbackQuery):
         remaining = cur.fetchone()[0]
         conn.close()
         
-        log_user_action(callback_query.from_user.id, "executed_db_reset")
         await callback_query.message.edit_text(
             f"✅ <b>База данных успешно сброшена!</b>\n\n"
             f"🗑️ Все фильтры были удалены.\n"
@@ -1618,7 +1452,6 @@ async def cancel_reset_db(callback_query: types.CallbackQuery):
 # Статистика
 @dp.message_handler(lambda message: message.text == "📊 Статистика")
 async def cmd_stats(message: types.Message):
-    log_user_action(message.from_user.id, "viewed_stats")
     conn = sqlite3.connect('filters.db')
     cur = conn.cursor()
     
@@ -1636,7 +1469,7 @@ async def cmd_stats(message: types.Message):
     type_stats = cur.fetchall()
     
     # Общая статистика по всем пользователям (только для админа)
-    if message.from_user.id == config.ADMIN_ID:
+    if message.from_user.id == ADMIN_ID:
         cur.execute('''SELECT COUNT(DISTINCT user_id) FROM filters''')
         total_users = cur.fetchone()[0]
         
@@ -1657,27 +1490,27 @@ async def cmd_stats(message: types.Message):
             response += f"   • {filter_type}: {count} шт.\n"
     
     # Добавляем общую статистику для админа
-    if message.from_user.id == config.ADMIN_ID:
+    if message.from_user.id == ADMIN_ID:
         response += f"\n👥 <b>Общая статистика (админ):</b>\n"
         response += f"   • Пользователей: {total_users}\n"
         response += f"   • Всего фильтров: {total_filters}\n"
     
-    await safe_send_message(message.chat.id, response, parse_mode='HTML', reply_markup=get_management_keyboard())
+    await message.answer(response, parse_mode='HTML', reply_markup=get_management_keyboard())
 
 # Обработка отмены
 @dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
 async def cmd_cancel(message: types.Message, state: FSMContext):
-    await cancel_handler(message, state)
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    
+    await state.finish()
+    await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard())
 
 # Обработка других сообщений
 @dp.message_handler()
 async def handle_other_messages(message: types.Message):
-    if is_rate_limited(message.from_user.id):
-        await safe_send_message(message.chat.id, "⚠️ Слишком много запросов. Подождите немного.")
-        return
-        
-    await safe_send_message(
-        message.chat.id,
+    await message.answer(
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
         "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
         parse_mode='HTML',
@@ -1686,10 +1519,15 @@ async def handle_other_messages(message: types.Message):
 
 # Запуск бота
 if __name__ == '__main__':
+    # Проверка обязательных переменных
+    if not API_TOKEN:
+        logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        exit(1)
+    
     init_db()
     
     # Запуск с обработчиком startup
-    executor.start_pooling(
+    executor.start_polling(
         dp, 
         skip_updates=True,
         on_startup=on_startup
