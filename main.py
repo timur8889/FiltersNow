@@ -175,7 +175,7 @@ def get_filter_type_keyboard():
     return keyboard
 
 def get_multiple_filters_keyboard():
-    """Клавиатура для выбора нескольких фильтров с ВСЕМИ вариантами"""
+    """Клавиатура для выбора нескольких фильтров с улучшенным отображением"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     
     # ВСЕ фильтры из списка
@@ -304,38 +304,18 @@ def get_lifetime_keyboard():
 
 # ========== УЛУЧШЕНИЯ: ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 def init_db():
-    """Безопасная инициализация базы данных"""
+    """Безопасная инициализация базы данных с проверками"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute('''CREATE TABLE IF NOT EXISTS filters (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER,
-                        filter_type TEXT,
-                        location TEXT,
-                        last_change DATE,
-                        expiry_date DATE,
-                        lifetime_days INTEGER,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
             
-            # Индексы для ускорения запросов
-            cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
-            cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
-            conn.commit()
-    except Exception as e:
-        logging.error(f"Ошибка инициализации БД: {e}")
-        # Создаем резервную копию при ошибке
-        if os.path.exists('filters.db'):
-            backup_name = f'filters_backup_error_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-            os.rename('filters.db', backup_name)
-            logging.info(f"Создана резервную копию при ошибке: {backup_name}")
-        
-        # Повторная попытка создания БД
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('''CREATE TABLE IF NOT EXISTS filters (
+            # Проверяем существование таблицы и её структуру
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filters'")
+            table_exists = cur.fetchone()
+            
+            if not table_exists:
+                # Создаем таблицу с полной структурой
+                cur.execute('''CREATE TABLE filters (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             user_id INTEGER,
                             filter_type TEXT,
@@ -345,19 +325,38 @@ def init_db():
                             lifetime_days INTEGER,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-                conn.commit()
-                logging.info("База данных успешно создана после ошибки")
-        except Exception as e2:
-            logging.error(f"Критическая ошибка при создании БД: {e2}")
-            raise
+                
+                # Создаем индексы
+                cur.execute('''CREATE INDEX idx_user_id ON filters(user_id)''')
+                cur.execute('''CREATE INDEX idx_expiry_date ON filters(expiry_date)''')
+                logging.info("База данных успешно создана")
+            else:
+                # Проверяем структуру существующей таблицы
+                cur.execute("PRAGMA table_info(filters)")
+                columns = [column[1] for column in cur.fetchall()]
+                required_columns = ['id', 'user_id', 'filter_type', 'location', 'last_change', 'expiry_date', 'lifetime_days', 'created_at', 'updated_at']
+                
+                # Можно добавить логику для миграций при необходимости
+                logging.info("База данных уже существует, проверка структуры завершена")
+            
+            conn.commit()
+            
+    except Exception as e:
+        logging.error(f"Критическая ошибка инициализации БД: {e}")
+        # Создаем резервную копию и пытаемся восстановить
+        if os.path.exists('filters.db'):
+            backup_name = f'filters_backup_critical_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+            shutil.copy2('filters.db', backup_name)
+            logging.info(f"Создана критическая резервная копия: {backup_name}")
+        raise
 
 # Функция резервного копирования базы данных
 def backup_database():
-    """Создание резервной копии базы данных"""
+    """Создание резервной копии базы данных с проверками"""
     try:
         if not os.path.exists('filters.db'):
             logging.warning("База данных не найдена для резервного копирования")
-            return
+            return False
             
         backup_dir = "backups"
         os.makedirs(backup_dir, exist_ok=True)
@@ -365,18 +364,30 @@ def backup_database():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = os.path.join(backup_dir, f"filters_backup_{timestamp}.db")
         
-        shutil.copy2('filters.db', backup_file)
-        logging.info(f"Создана резервная копия: {backup_file}")
-        
-        # Удаляем старые резервные копии (оставляем последние 7)
-        backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup")])
-        for old_backup in backups[:-7]:
-            old_backup_path = os.path.join(backup_dir, old_backup)
-            os.remove(old_backup_path)
-            logging.info(f"Удалена старая резервная копия: {old_backup}")
+        # Проверяем размер базы данных
+        db_size = os.path.getsize('filters.db')
+        if db_size == 0:
+            logging.warning("База данных пуста, пропускаем резервное копирование")
+            return False
             
+        shutil.copy2('filters.db', backup_file)
+        logging.info(f"Создана резервная копия: {backup_file} ({db_size} bytes)")
+        
+        # Удаляем старые резервные копии (оставляем последние 10 вместо 7)
+        backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup") and f.endswith(".db")])
+        for old_backup in backups[:-10]:
+            old_backup_path = os.path.join(backup_dir, old_backup)
+            try:
+                os.remove(old_backup_path)
+                logging.info(f"Удалена старая резервная копия: {old_backup}")
+            except Exception as e:
+                logging.error(f"Не удалось удалить старую резервную копию {old_backup}: {e}")
+        
+        return True
+        
     except Exception as e:
         logging.error(f"Ошибка при создании резервной копии: {e}")
+        return False
 
 # States
 class FilterStates(StatesGroup):
@@ -475,6 +486,104 @@ def create_expiry_infographic(filters):
     infographic += f"📦 <b>Всего фильтров:</b> {total}"
     
     return infographic
+
+def create_progress_bar(count, total, emoji):
+    """Создание текстового прогресс-бара"""
+    if total == 0:
+        return ""
+    
+    percentage = count / total
+    bars = int(percentage * 10)  # 10 символов для прогресс-бара
+    return emoji + "█" * bars + "░" * (10 - bars)
+
+def create_stats_infographic(stats, filters):
+    """Создание визуальной инфографики статистики"""
+    total = stats['total']
+    
+    # Создаем прогресс-бары
+    expired_bar = create_progress_bar(stats['expired'], total, "🔴")
+    expiring_7_bar = create_progress_bar(stats['expiring_7'], total, "🟡")
+    expiring_30_bar = create_progress_bar(stats['expiring_30'], total, "🟠")
+    ok_bar = create_progress_bar(stats['ok'], total, "✅")
+    
+    # Самый популярный тип фильтра
+    most_common_type = max(stats['filter_types'].items(), key=lambda x: x[1]) if stats['filter_types'] else ("Нет данных", 0)
+    
+    # Самый популярный тип фильтра
+    most_common_location = max(stats['locations'].items(), key=lambda x: x[1]) if stats['locations'] else ("Нет данных", 0)
+    
+    infographic = (
+        "📊 <b>СТАТИСТИКА ФИЛЬТРОВ - ИНФОГРАФИКА</b>\n\n"
+        
+        "🎯 <b>ОБЩАЯ СТАТИСТИКА</b>\n"
+        f"   📦 Всего фильтров: <b>{total}</b>\n"
+        f"   ⚠️ Требуют внимания: <b>{stats['expired'] + stats['expiring_7'] + stats['expiring_30']}</b>\n"
+        f"   ✅ В норме: <b>{stats['ok']}</b>\n\n"
+        
+        "📈 <b>РАСПРЕДЕЛЕНИЕ ПО СТАТУСАМ</b>\n"
+        f"   {expired_bar} Просрочено: {stats['expired']} ({stats['expired']/total*100:.1f}%)\n"
+        f"   {expiring_7_bar} Срочно: {stats['expiring_7']} ({stats['expiring_7']/total*100:.1f}%)\n"
+        f"   {expiring_30_bar} Скоро: {stats['expiring_30']} ({stats['expiring_30']/total*100:.1f}%)\n"
+        f"   {ok_bar} Норма: {stats['ok']} ({stats['ok']/total*100:.1f}%)\n\n"
+        
+        "🏆 <b>САМЫЕ ПОПУЛЯРНЫЕ</b>\n"
+        f"   🔧 Тип фильтра: <b>{most_common_type[0]}</b> ({most_common_type[1]} шт.)\n"
+        f"   📍 Место: <b>{most_common_location[0]}</b> ({most_common_location[1]} шт.)\n\n"
+    )
+    
+    # Добавляем информацию о ближайшем сроке
+    if stats['nearest_expiry'] is not None:
+        if stats['nearest_expiry'] <= 0:
+            infographic += f"🚨 <b>БЛИЖАЙШИЙ СРОК:</b> ПРОСРОЧЕН на {abs(stats['nearest_expiry'])} дн.\n"
+        else:
+            infographic += f"⏰ <b>БЛИЖАЙШИЙ СРОК:</b> через {stats['nearest_expiry']} дн.\n"
+    
+    return infographic
+
+def create_detailed_stats(stats, filters):
+    """Создание детальной статистики"""
+    total = stats['total']
+    
+    detailed = "📋 <b>ДЕТАЛЬНАЯ СТАТИСТИКА</b>\n\n"
+    
+    # Статистика по типам фильтров
+    if stats['filter_types']:
+        detailed += "🔧 <b>РАСПРЕДЕЛЕНИЕ ПО ТИПАМ:</b>\n"
+        for filter_type, count in sorted(stats['filter_types'].items(), key=lambda x: x[1], reverse=True)[:5]:  # Топ-5
+            percentage = count / total * 100
+            bar = create_progress_bar(count, total, "●")
+            detailed += f"   {bar} {filter_type}: {count} ({percentage:.1f}%)\n"
+        detailed += "\n"
+    
+    # Статистика по местам установки
+    if stats['locations']:
+        detailed += "📍 <b>РАСПРЕДЕЛЕНИЕ ПО МЕСТАМ:</b>\n"
+        for location, count in sorted(stats['locations'].items(), key=lambda x: x[1], reverse=True)[:5]:  # Топ-5
+            percentage = count / total * 100
+            bar = create_progress_bar(count, total, "●")
+            detailed += f"   {bar} {location}: {count} ({percentage:.1f}%)\n"
+        detailed += "\n"
+    
+    # Средний срок службы
+    if stats['ok'] > 0:
+        avg_days = stats['total_days_remaining'] / stats['ok']
+        detailed += f"📅 <b>СРЕДНИЙ СРОК У НОРМАЛЬНЫХ ФИЛЬТРОВ:</b> {avg_days:.1f} дней\n\n"
+    
+    # Рекомендации
+    recommendations = []
+    if stats['expired'] > 0:
+        recommendations.append(f"🚨 Заменить {stats['expired']} просроченных фильтров")
+    if stats['expiring_7'] > 0:
+        recommendations.append(f"⚠️ Подготовиться к замене {stats['expiring_7']} срочных фильтров")
+    if stats['expiring_30'] > 0:
+        recommendations.append(f"📝 Запланировать замену {stats['expiring_30']} фильтров в течение месяца")
+    
+    if recommendations:
+        detailed += "💡 <b>РЕКОМЕНДАЦИИ:</b>\n" + "\n".join([f"   • {rec}" for rec in recommendations])
+    else:
+        detailed += "🎉 <b>Отличная работа! Все фильтры в норме.</b>"
+    
+    return detailed
 
 # ========== УЛУЧШЕНИЯ: ФОНГОВЫЕ ЗАДАЧИ И ОБРАБОТКА ОШИБОК ==========
 async def check_expired_filters():
@@ -605,7 +714,7 @@ async def cmd_start(message: types.Message):
         "📦 <b>Основные возможности:</b>\n"
         "• 📋 Просмотр всех ваших фильтров\n"
         "• ✨ Добавление новых фильтров\n"
-        "• ⏳ Контроль сроков замены\n"
+        "• ⏳ Контроль сроков замену\n"
         "• ⚙️ Полное управление базой\n"
         "• 📊 Детальная статистика\n"
         "• 🔔 Автоматические напоминания",
@@ -695,6 +804,412 @@ async def process_add_type(message: types.Message, state: FSMContext):
             reply_markup=get_multiple_filters_keyboard()  # Теперь показывает ВСЕ фильтры
         )
 
+# ========== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
+
+@dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
+async def process_multiple_filters_selection(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        if 'selected_filters' not in data:
+            data['selected_filters'] = []
+        if 'filters_list' not in data:
+            data['filters_list'] = []
+    
+    # Обработка кнопки отмены
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard())
+        return
+    
+    # Обработка кнопки "Готово"
+    if message.text == "✅ Готово":
+        if not data['selected_filters']:
+            await message.answer(
+                "❌ <b>Список фильтров пуст!</b>\n\n"
+                "💡 <i>Добавьте хотя бы один фильтр перед завершением</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+            return
+        
+        # Проверяем общий лимит фильтров
+        current_filters_count = len(get_user_filters(message.from_user.id))
+        if current_filters_count + len(data['selected_filters']) > MAX_FILTERS_PER_USER:
+            await message.answer(
+                f"❌ <b>Превышен лимит фильтров!</b>\n\n"
+                f"📊 <i>Текущее количество: {current_filters_count}</i>\n"
+                f"📦 <i>Пытаетесь добавить: {len(data['selected_filters'])}</i>\n"
+                f"💡 <i>Максимум: {MAX_FILTERS_PER_USER}</i>\n\n"
+                f"🔄 <i>Удалите некоторые фильтры или уменьшите список</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+            return
+        
+        # Сохраняем выбранные фильтры и переходим к следующему шагу
+        data['filters_list'] = data['selected_filters'].copy()
+        await MultipleFiltersStates.waiting_location.set()
+        
+        # Формируем красивый список фильтров
+        filters_text = "\n".join([f"• {f}" for f in data['filters_list']])
+        
+        await message.answer(
+            f"✅ <b>Список фильтров сохранен!</b>\n\n"
+            f"📦 <b>Будет добавлено фильтров:</b> {len(data['filters_list'])}\n\n"
+            f"🔧 <b>Список фильтров:</b>\n{filters_text}\n\n"
+            f"📍 <b>Укажите место установки для всех фильтров:</b>\n\n"
+            f"💡 <i>Все фильтры будут установлены в одном месте</i>",
+            parse_mode='HTML',
+            reply_markup=get_location_keyboard()
+        )
+        return
+    
+    # Обработка кнопки "Очистить список"
+    if message.text == "🔄 Очистить список":
+        data['selected_filters'] = []
+        await message.answer(
+            "🔄 <b>Список фильтров очищен!</b>\n\n"
+            "💫 <i>Начните добавлять фильтры заново</i>",
+            parse_mode='HTML',
+            reply_markup=get_multiple_filters_keyboard()
+        )
+        return
+    
+    # Обработка кнопки "Другой тип" для нескольких фильтров
+    if message.text == "📝 Другой тип":
+        await message.answer(
+            "📝 <b>Введите тип фильтра:</b>\n\n"
+            "💡 <i>Можно ввести несколько фильтров через запятую</i>\n"
+            "<i>Например: Угольный фильтр, Механический фильтр, Сетчатый фильтр</i>",
+            parse_mode='HTML',
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        return
+    
+    # Обработка ВСЕХ фильтров из списка для нескольких фильтров
+    filter_mapping = {
+        "🔧 Магистральный SL10": "Магистральный SL10",
+        "🔧 Магистральный SL20": "Магистральный SL20",
+        "💧 Гейзер Престиж": "Гейзер Престиж",
+        "💧 Аквафор Кристалл": "Аквафор Кристалл",
+        "⚡ Угольный картридж": "Угольный картридж",
+        "🧽 Механический фильтр": "Механический фильтр"
+    }
+    
+    if message.text in filter_mapping:
+        filter_name = filter_mapping[message.text]
+        if filter_name not in data['selected_filters']:
+            data['selected_filters'].append(filter_name)
+            
+            # Формируем текущий список для отображения
+            if data['selected_filters']:
+                filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+                status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
+            else:
+                status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
+            
+            await message.answer(
+                f"✅ <b>Добавлен:</b> {filter_name}\n\n"
+                f"{status_text}\n\n"
+                f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        else:
+            await message.answer(
+                f"ℹ️ <b>Фильтр уже в списке:</b> {filter_name}",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        return
+    
+    # Обработка текстового ввода (пользователь ввел свои фильтры)
+    if message.text and message.text not in ["✅ Готово", "🔄 Очистить список", "❌ Отмена"]:
+        # Разделяем ввод на отдельные фильтры
+        filter_text = message.text
+        additional_filters = []
+        
+        # Пробуем разделить по запятым
+        if ',' in filter_text:
+            additional_filters = [f.strip() for f in filter_text.split(',') if f.strip()]
+        else:
+            # Или по переносам строк
+            additional_filters = [f.strip() for f in filter_text.split('\n') if f.strip()]
+        
+        # Добавляем только уникальные фильтры
+        added_count = 0
+        for new_filter in additional_filters:
+            try:
+                validated_filter = validate_filter_name(new_filter)
+                if validated_filter and validated_filter not in data['selected_filters']:
+                    data['selected_filters'].append(validated_filter)
+                    added_count += 1
+            except ValueError as e:
+                await message.answer(
+                    f"❌ <b>Ошибка в фильтре '{new_filter}':</b>\n\n"
+                    f"💡 <i>{str(e)}</i>",
+                    parse_mode='HTML',
+                    reply_markup=get_multiple_filters_keyboard()
+                )
+                return
+        
+        if added_count > 0:
+            # Формируем обновленный список
+            filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+            
+            await message.answer(
+                f"✅ <b>Добавлено фильтров:</b> {added_count}\n\n"
+                f"📊 Всего в списке: {len(data['selected_filters'])}\n\n"
+                f"🔧 <b>Текущий список:</b>\n{filters_text}",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        else:
+            await message.answer(
+                "ℹ️ <b>Новых фильтров не добавлено</b>\n\n"
+                "💡 <i>Все введенные фильтры уже есть в списке</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        return
+    
+    # Обновляем отображение списка при любом другом сообщении
+    if data['selected_filters']:
+        filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+        status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
+    else:
+        status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
+    
+    await message.answer(
+        f"📦 <b>Добавление фильтров</b>\n\n"
+        f"{status_text}\n\n"
+        f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
+        parse_mode='HTML',
+        reply_markup=get_multiple_filters_keyboard()
+    )
+
+# ========== ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ДАТЫ ДЛЯ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
+
+@dp.message_handler(state=MultipleFiltersStates.waiting_change_date)
+async def process_multiple_change_date(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard())
+        return
+    
+    try:
+        change_date = validate_date(message.text)
+        
+        async with state.proxy() as data:
+            data['change_date'] = change_date
+            filters_list = data['filters_list']
+            location = data['location']
+        
+        # Для каждого фильтра определяем срок службы
+        filters_with_lifetime = []
+        for filter_type in filters_list:
+            lifetime = get_lifetime_by_type(filter_type)
+            filters_with_lifetime.append((filter_type, lifetime))
+        
+        # Если все фильтры имеют одинаковый срок службы, используем его
+        unique_lifetimes = set(lifetime for _, lifetime in filters_with_lifetime)
+        
+        if len(unique_lifetimes) == 1:
+            # Все фильтры имеют одинаковый срок службы
+            common_lifetime = list(unique_lifetimes)[0]
+            async with state.proxy() as data:
+                data['lifetime'] = common_lifetime
+            
+            expiry_date = change_date + timedelta(days=common_lifetime)
+            expiry_date_nice = format_date_nice(expiry_date)
+            
+            await MultipleFiltersStates.next()
+            
+            filters_text = "\n".join([f"• {f[0]} ({f[1]} дн.)" for f in filters_with_lifetime])
+            
+            await message.answer(
+                f"✅ <b>Все фильтры имеют одинаковый срок службы!</b>\n\n"
+                f"📦 <b>Будет добавлено:</b> {len(filters_list)} фильтров\n"
+                f"📍 <b>Место:</b> {location}\n"
+                f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n"
+                f"⏱️ <b>Срок службы:</b> {common_lifetime} дней\n"
+                f"🗓️ <b>Годны до:</b> {expiry_date_nice}\n\n"
+                f"🔧 <b>Список фильтров:</b>\n{filters_text}\n\n"
+                f"💫 <b>Подтвердите добавление всех фильтров:</b>",
+                parse_mode='HTML',
+                reply_markup=types.ReplyKeyboardMarkup(
+                    resize_keyboard=True
+                ).add(
+                    types.KeyboardButton("✅ Да, добавить все"),
+                    types.KeyboardButton("❌ Отмена")
+                )
+            )
+        else:
+            # Фильтры имеют разные сроки службы
+            async with state.proxy() as data:
+                data['filters_with_lifetime'] = filters_with_lifetime
+            
+            await MultipleFiltersStates.next()
+            
+            filters_text = "\n".join([f"• {f[0]} - {f[1]} дней" for f in filters_with_lifetime])
+            
+            await message.answer(
+                f"🔧 <b>Фильтры имеют разные сроки службы</b>\n\n"
+                f"📦 <b>Будет добавлено:</b> {len(filters_list)} фильтров\n"
+                f"📍 <b>Место:</b> {location}\n"
+                f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n\n"
+                f"⏱️ <b>Сроки службы:</b>\n{filters_text}\n\n"
+                f"💫 <b>Подтвердите добавление всех фильтров:</b>",
+                parse_mode='HTML',
+                reply_markup=types.ReplyKeyboardMarkup(
+                    resize_keyboard=True
+                ).add(
+                    types.KeyboardButton("✅ Да, добавить все"),
+                    types.KeyboardButton("❌ Отмена")
+                )
+            )
+            
+    except ValueError as e:
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"❌ <b>Ошибка в дате!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=MultipleFiltersStates.waiting_lifetime)
+async def process_multiple_lifetime_confirmation(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard())
+        return
+    
+    if message.text == "✅ Да, добавить все":
+        async with state.proxy() as data:
+            change_date = data['change_date']
+            location = data['location']
+            filters_list = data['filters_list']
+            
+            if 'filters_with_lifetime' in data:
+                filters_with_lifetime = data['filters_with_lifetime']
+            else:
+                # Если сроки одинаковые, создаем список с общим сроком
+                common_lifetime = data['lifetime']
+                filters_with_lifetime = [(filter_type, common_lifetime) for filter_type in filters_list]
+        
+        # Сохраняем все фильтры в БД
+        added_count = 0
+        today = datetime.now().date()
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            for filter_type, lifetime in filters_with_lifetime:
+                expiry_date = change_date + timedelta(days=lifetime)
+                
+                try:
+                    cur.execute('''INSERT INTO filters 
+                                (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                                VALUES (?, ?, ?, ?, ?, ?)''',
+                                (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                    added_count += 1
+                except Exception as e:
+                    logging.error(f"Ошибка при добавлении фильтра {filter_type}: {e}")
+        
+        conn.commit()
+        
+        # Формируем итоговый список
+        filters_text = "\n".join([f"• {f[0]} ({f[1]} дн.)" for f in filters_with_lifetime])
+        
+        await message.answer(
+            f"🎉 <b>ФИЛЬТРЫ УСПЕШНО ДОБАВЛЕНЫ!</b>\n\n"
+            f"✅ <b>Добавлено:</b> {added_count} из {len(filters_list)} фильтров\n"
+            f"📍 <b>Место установки:</b> {location}\n"
+            f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n\n"
+            f"🔧 <b>Добавленные фильтры:</b>\n{filters_text}\n\n"
+            f"💫 <i>Теперь вы можете отслеживать сроки их замены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+        await state.finish()
+    else:
+        await message.answer(
+            "❓ <b>Подтвердите добавление фильтров</b>\n\n"
+            "💡 <i>Нажмите '✅ Да, добавить все' для подтверждения или '❌ Отмена' для отмены</i>",
+            parse_mode='HTML'
+        )
+
+# ========== УЛУЧШЕННАЯ СТАТИСТИКА С ИНФОГРАФИКОЙ ==========
+
+@dp.message_handler(lambda message: message.text == "📊 Статистика")
+@dp.message_handler(commands=['stats'])
+async def cmd_stats(message: types.Message):
+    """Подробная статистика по фильтрам с инфографикой"""
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📊 <b>Статистика</b>\n\n"
+            "📭 <i>Нет данных для отображения</i>\n"
+            "💫 <i>Добавьте фильтры для получения статистики</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    today = datetime.now().date()
+    stats = {
+        'total': len(filters),
+        'expired': 0,
+        'expiring_7': 0,
+        'expiring_30': 0,
+        'ok': 0,
+        'total_days_remaining': 0,
+        'nearest_expiry': None,
+        'filter_types': {},
+        'locations': {}
+    }
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        # Статистика по статусам
+        if days_until_expiry <= 0:
+            stats['expired'] += 1
+        elif days_until_expiry <= 7:
+            stats['expiring_7'] += 1
+        elif days_until_expiry <= 30:
+            stats['expiring_30'] += 1
+        else:
+            stats['ok'] += 1
+            stats['total_days_remaining'] += days_until_expiry
+        
+        # Ближайший срок
+        if stats['nearest_expiry'] is None or days_until_expiry < stats['nearest_expiry']:
+            stats['nearest_expiry'] = days_until_expiry
+        
+        # Статистика по типам фильтров
+        filter_type = f['filter_type']
+        stats['filter_types'][filter_type] = stats['filter_types'].get(filter_type, 0) + 1
+        
+        # Статистика по местам установки
+        location = f['location']
+        stats['locations'][location] = stats['locations'].get(location, 0) + 1
+    
+    # Создаем инфографику
+    infographic = create_stats_infographic(stats, filters)
+    
+    # Детальная статистика
+    detailed_stats = create_detailed_stats(stats, filters)
+    
+    await message.answer(infographic, parse_mode='HTML')
+    await asyncio.sleep(0.5)  # Небольшая задержка между сообщениями
+    await message.answer(detailed_stats, parse_mode='HTML', reply_markup=get_main_keyboard())
+
 # Обработка выбора типа фильтра для ОДНОГО фильтра
 @dp.message_handler(state=FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
@@ -752,171 +1267,167 @@ async def process_filter_type(message: types.Message, state: FSMContext):
             reply_markup=get_location_keyboard()  # Упрощенная клавиатура
         )
 
-# Обработка кнопок при выборе НЕСКОЛЬКИХ фильтров
-@dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
-async def process_multiple_filters_selection(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        if 'selected_filters' not in data:
-            data['selected_filters'] = []
-        if 'filters_list' not in data:
-            data['filters_list'] = []
-    
-    # Обработка кнопки отмены
+# Общий обработчик для места установки
+@dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
+async def process_location(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard())
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard())
         return
-    
-    # Обработка кнопки "Готово"
-    if message.text == "✅ Готово":
-        if not data['selected_filters']:
-            await message.answer(
-                "❌ <b>Список фильтров пуст!</b>\n\n"
-                "💡 <i>Добавьте хотя бы один фильтр перед завершением</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-            return
         
-        # Проверяем общий лимит фильтров
-        current_filters_count = len(get_user_filters(message.from_user.id))
-        if current_filters_count + len(data['selected_filters']) > MAX_FILTERS_PER_USER:
-            await message.answer(
-                f"❌ <b>Превышен лимит фильтров!</b>\n\n"
-                f"📊 <i>Текущее количество: {current_filters_count}</i>\n"
-                f"📦 <i>Пытаетесь добавить: {len(data['selected_filters'])}</i>\n"
-                f"💡 <i>Максимум: {MAX_FILTERS_PER_USER}</i>\n\n"
-                f"🔄 <i>Удалите некоторые фильтры или уменьшите список</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-            return
-        
-        # Сохраняем выбранные фильтры и переходим к следующему шагу
-        data['filters_list'] = data['selected_filters'].copy()
-        await MultipleFiltersStates.next()
-        
+    if message.text == "📍 Указать место установки":
         await message.answer(
-            f"✅ <b>Список фильтров сохранен!</b>\n\n"
-            f"📦 <b>Будет добавлено фильтров:</b> {len(data['filters_list'])}\n\n"
-            f"🔧 <b>Список фильтров:</b>\n" + "\n".join([f"• {f}" for f in data['filters_list']]) + "\n\n"
-            f"📍 <b>Укажите место установки для всех фильтров:</b>\n\n"
-            f"💡 <i>Все фильтры будут установлены в одном месте</i>",
-            parse_mode='HTML',
-            reply_markup=get_location_keyboard()  # Упрощенная клавиатура
-        )
-        return
-    
-    # Обработка кнопки "Очистить список"
-    if message.text == "🔄 Очистить список":
-        data['selected_filters'] = []
-        await message.answer(
-            "🔄 <b>Список фильтров очищен!</b>\n\n"
-            "💫 <i>Начните добавлять фильтры заново</i>",
-            parse_mode='HTML',
-            reply_markup=get_multiple_filters_keyboard()
-        )
-        return
-    
-    # Обработка кнопки "Другой тип" для нескольких фильтров
-    if message.text == "📝 Другой тип":
-        await message.answer(
-            "📝 <b>Введите тип фильтра:</b>\n\n"
-            "💡 <i>Можно ввести несколько фильтров через запятую</i>\n"
-            "<i>Например: Угольный фильтр, Механический фильтр, Сетчатый фильтр</i>",
+            "📍 <b>Введите место установки фильтра:</b>\n\n"
+            "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
         return
     
-    # Обработка ВСЕХ фильтров из списка для нескольких фильтров
-    filter_mapping = {
-        "🔧 Магистральный SL10": "Магистральный SL10",
-        "🔧 Магистральный SL20": "Магистральный SL20",
-        "💧 Гейзер Престиж": "Гейзер Престиж",
-        "💧 Аквафор Кристалл": "Аквафор Кристалл",
-        "⚡ Угольный картридж": "Угольный картридж",
-        "🧽 Механический фильтр": "Механический фильтр"
+    current_state = await state.get_state()
+    
+    if current_state == FilterStates.waiting_location.state:
+        # Для одного фильтра
+        async with state.proxy() as data:
+            data['location'] = safe_db_string(message.text)
+
+        await FilterStates.next()
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"📅 <b>Дата последней замены</b>\n\n"
+            f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
+            f"📍 <i>Место:</i> {data['location']}\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+    else:
+        # Для нескольких фильтров
+        async with state.proxy() as data:
+            data['location'] = safe_db_string(message.text)
+
+        await MultipleFiltersStates.next()
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"📅 <b>Дата последней замены для всех фильтров</b>\n\n"
+            f"📍 <i>Место для всех фильтров:</i> {data['location']}\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+# ========== СУЩЕСТВУЮЩИЕ ОБРАБОТЧИКИ (сохранены для полноты) ==========
+
+# Обработчики для одного фильтра (change_date и lifetime)
+@dp.message_handler(state=FilterStates.waiting_change_date)
+async def process_change_date(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        return
+    
+    try:
+        change_date = validate_date(message.text)
+        
+        async with state.proxy() as data:
+            data['change_date'] = change_date
+            filter_type = data['filter_type']
+            lifetime = data.get('lifetime', get_lifetime_by_type(filter_type))
+        
+        expiry_date = change_date + timedelta(days=lifetime)
+        expiry_date_nice = format_date_nice(expiry_date)
+        
+        await FilterStates.next()
+        
+        await message.answer(
+            f"⏱️ <b>Срок службы фильтра</b>\n\n"
+            f"🔧 <i>Фильтр:</i> {filter_type}\n"
+            f"📍 <i>Место:</i> {data['location']}\n"
+            f"📅 <i>Дата замены:</i> {format_date_nice(change_date)}\n"
+            f"🗓️ <i>Годен до:</i> {expiry_date_nice}\n\n"
+            f"📝 <b>Выберите или введите срок службы в днях:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+        
+    except ValueError as e:
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"❌ <b>Ошибка в дате!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=FilterStates.waiting_lifetime)
+async def process_lifetime(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard())
+        return
+    
+    lifetime_mapping = {
+        "3️⃣ 90 дней": 90,
+        "6️⃣ 180 дней": 180,
+        "1️⃣ 365 дней": 365
     }
     
-    if message.text in filter_mapping:
-        filter_name = filter_mapping[message.text]
-        if filter_name not in data['selected_filters']:
-            data['selected_filters'].append(filter_name)
+    try:
+        if message.text in lifetime_mapping:
+            lifetime = lifetime_mapping[message.text]
+        elif message.text == "📅 Другое количество":
             await message.answer(
-                f"✅ <b>Добавлен:</b> {filter_name}\n\n"
-                f"📊 Всего в списке: {len(data['selected_filters'])}",
+                "📅 <b>Введите срок службы в днях:</b>\n\n"
+                "💡 <i>Например: 30, 60, 90, 180, 365 и т.д.</i>",
                 parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
+                reply_markup=get_cancel_keyboard()
             )
+            return
         else:
-            await message.answer(
-                f"ℹ️ <b>Фильтр уже в списке:</b> {filter_name}",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-        return
-    
-    # Обработка текстового ввода (пользователь ввел свои фильтры)
-    if message.text and message.text not in ["✅ Готово", "🔄 Очистить список", "❌ Отмена"]:
-        # Разделяем ввод на отдельные фильтры
-        filter_text = message.text
-        additional_filters = []
+            lifetime = validate_lifetime(message.text)
         
-        # Пробуем разделить по запятым
-        if ',' in filter_text:
-            additional_filters = [f.strip() for f in filter_text.split(',') if f.strip()]
-        else:
-            # Или по переносам строк
-            additional_filters = [f.strip() for f in filter_text.split('\n') if f.strip()]
+        async with state.proxy() as data:
+            change_date = data['change_date']
+            filter_type = data['filter_type']
+            location = data['location']
+            
+            expiry_date = change_date + timedelta(days=lifetime)
+            
+            # Сохраняем в БД
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('''INSERT INTO filters 
+                            (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                            VALUES (?, ?, ?, ?, ?, ?)''',
+                            (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                conn.commit()
         
-        # Добавляем только уникальные фильтры
-        added_count = 0
-        for new_filter in additional_filters:
-            try:
-                validated_filter = validate_filter_name(new_filter)
-                if validated_filter and validated_filter not in data['selected_filters']:
-                    data['selected_filters'].append(validated_filter)
-                    added_count += 1
-            except ValueError as e:
-                await message.answer(
-                    f"❌ <b>Ошибка в фильтре '{new_filter}':</b>\n\n"
-                    f"💡 <i>{str(e)}</i>",
-                    parse_mode='HTML',
-                    reply_markup=get_multiple_filters_keyboard()
-                )
-                return
+        await message.answer(
+            f"🎉 <b>ФИЛЬТР УСПЕШНО ДОБАВЛЕН!</b>\n\n"
+            f"🔧 <b>Тип:</b> {filter_type}\n"
+            f"📍 <b>Место:</b> {location}\n"
+            f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n"
+            f"⏱️ <b>Срок службы:</b> {lifetime} дней\n"
+            f"🗓️ <b>Годен до:</b> {format_date_nice(expiry_date)}\n\n"
+            f"💫 <i>Теперь вы можете отслеживать срок его замены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
         
-        if added_count > 0:
-            await message.answer(
-                f"✅ <b>Добавлено фильтров:</b> {added_count}\n\n"
-                f"📊 Всего в списке: {len(data['selected_filters'])}",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-        else:
-            await message.answer(
-                "ℹ️ <b>Новых фильтров не добавлено</b>\n\n"
-                "💡 <i>Все введенные фильтры уже есть в списке</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-        return
-    
-    # Обновляем отображение списка
-    if data['selected_filters']:
-        filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
-        status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
-    else:
-        status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
-    
-    await message.answer(
-        f"📦 <b>Добавление фильтров</b>\n\n"
-        f"{status_text}\n\n"
-        f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
-        parse_mode='HTML',
-        reply_markup=get_multiple_filters_keyboard()
-    )
+        await state.finish()
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в сроке службы!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите корректное число дней:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
 
 # ========== НОВЫЕ ОБРАБОТЧИКИ: УДАЛЕНИЕ ФИЛЬТРОВ ==========
 
@@ -1330,59 +1841,6 @@ async def cmd_check(message: types.Message):
             response += f"\n... и еще {len(ok_filters) - 10} фильтров в норме"
 
     await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
-
-# ========== ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ: МЕСТО УСТАНОВКИ ==========
-
-# Общий обработчик для места установки
-@dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
-async def process_location(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard())
-        return
-        
-    if message.text == "📍 Указать место установки":
-        await message.answer(
-            "📍 <b>Введите место установки фильтра:</b>\n\n"
-            "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        return
-    
-    current_state = await state.get_state()
-    
-    if current_state == FilterStates.waiting_location.state:
-        # Для одного фильтра
-        async with state.proxy() as data:
-            data['location'] = safe_db_string(message.text)
-
-        await FilterStates.next()
-        today_nice = format_date_nice(datetime.now().date())
-        await message.answer(
-            f"📅 <b>Дата последней замены</b>\n\n"
-            f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
-            f"📍 <i>Место:</i> {data['location']}\n\n"
-            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
-            f"<i>Например: {today_nice}</i>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-    else:
-        # Для нескольких фильтров
-        async with state.proxy() as data:
-            data['location'] = safe_db_string(message.text)
-
-        await MultipleFiltersStates.next()
-        today_nice = format_date_nice(datetime.now().date())
-        await message.answer(
-            f"📅 <b>Дата последней замены для всех фильтров</b>\n\n"
-            f"📍 <i>Место для всех фильтров:</i> {data['location']}\n\n"
-            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
-            f"<i>Например: {today_nice}</i>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
 
 # ========== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ==========
 
