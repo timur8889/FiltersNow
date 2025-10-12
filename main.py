@@ -39,12 +39,17 @@ logging.basicConfig(
     ]
 )
 
-# Стандартные сроки службы фильтров (убраны механический, престиж, кристалл, угольный)
+# Стандартные сроки службы фильтров
 DEFAULT_LIFETIMES = {
     "магистральный sl10": 180,
     "магистральный sl20": 180,
     "гейзер": 365,
-    "аквафор": 365
+    "аквафор": 365,
+    "механический": 90,
+    "угольный": 180,
+    "минеральный": 365,
+    "ультрафильтрация": 365,
+    "обратный осмос": 365
 }
 
 # Ограничения
@@ -55,12 +60,12 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# ========== УЛУЧШЕНИЯ: БЕЗОПАСНОСТЬ БАЗЫ ДАННЫХ ==========
+# ========== БАЗА ДАННЫХ ==========
 @contextmanager
 def get_db_connection():
     """Контекстный менеджер для безопасной работы с БД"""
     conn = sqlite3.connect('filters.db')
-    conn.row_factory = sqlite3.Row  # Для доступа к колонкам по имени
+    conn.row_factory = sqlite3.Row
     try:
         yield conn
     except Exception as e:
@@ -69,21 +74,33 @@ def get_db_connection():
     finally:
         conn.close()
 
-def safe_db_string(value: str) -> str:
-    """Очистка строки для безопасного использования в БД"""
-    if not value:
-        return ""
-    return re.sub(r'[;\'"\\]', '', value.strip())
+def init_db():
+    """Инициализация базы данных"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute('''CREATE TABLE IF NOT EXISTS filters (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        filter_type TEXT,
+                        location TEXT,
+                        last_change DATE,
+                        expiry_date DATE,
+                        lifetime_days INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка инициализации БД: {e}")
 
 def get_user_filters(user_id):
-    """Безопасное получение фильтров пользователя"""
+    """Получение фильтров пользователя"""
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
         return [dict(row) for row in cur.fetchall()]
 
 def get_filter_by_id(filter_id, user_id):
-    """Получение фильтра по ID с проверкой пользователя"""
+    """Получение фильтра по ID"""
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
@@ -95,151 +112,10 @@ def check_filters_limit(user_id):
     filters = get_user_filters(user_id)
     return len(filters) >= MAX_FILTERS_PER_USER
 
-def get_all_users_stats():
-    """Получение статистики по всем пользователям (для админа)"""
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute('''SELECT COUNT(DISTINCT user_id) as total_users, 
-                              COUNT(*) as total_filters,
-                              SUM(CASE WHEN expiry_date <= date('now') THEN 1 ELSE 0 END) as expired_filters,
-                              SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
-                       FROM filters''')
-        result = cur.fetchone()
-        return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
-
-def get_all_users():
-    """Получение списка всех пользователей (для админа)"""
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute('''SELECT DISTINCT user_id, COUNT(*) as filter_count 
-                       FROM filters 
-                       GROUP BY user_id 
-                       ORDER BY filter_count DESC''')
-        return [dict(row) for row in cur.fetchall()]
-
-def clear_all_filters():
-    """Очистка всей базы данных (для админа)"""
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM filters")
-        conn.commit()
-        return cur.rowcount
-
-# ========== ЭКСПОРТ/ИМПОРТ EXCEL ==========
-def export_filters_to_excel(user_id):
-    """Экспорт фильтров пользователя в Excel файл"""
-    filters = get_user_filters(user_id)
-    
-    if not filters:
-        return None
-    
-    # Создаем DataFrame
-    data = []
-    for f in filters:
-        data.append({
-            'ID': f['id'],
-            'Тип фильтра': f['filter_type'],
-            'Место установки': f['location'],
-            'Дата замены': f['last_change'],
-            'Срок службы (дни)': f['lifetime_days'],
-            'Годен до': f['expiry_date']
-        })
-    
-    df = pd.DataFrame(data)
-    
-    # Создаем файл
-    filename = f"filters_export_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    filepath = os.path.join('exports', filename)
-    
-    # Создаем директорию если нет
-    os.makedirs('exports', exist_ok=True)
-    
-    # Сохраняем в Excel
-    with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='Фильтры', index=False)
-        
-        # Форматируем колонки
-        worksheet = writer.sheets['Фильтры']
-        worksheet.column_dimensions['A'].width = 8
-        worksheet.column_dimensions['B'].width = 25
-        worksheet.column_dimensions['C'].width = 20
-        worksheet.column_dimensions['D'].width = 12
-        worksheet.column_dimensions['E'].width = 15
-        worksheet.column_dimensions['F'].width = 12
-    
-    return filepath
-
-def import_filters_from_excel(file_path, user_id):
-    """Импорт фильтров из Excel файла"""
-    try:
-        # Читаем Excel файл
-        df = pd.read_excel(file_path)
-        
-        # Проверяем обязательные колонки
-        required_columns = ['Тип фильтра', 'Место установки', 'Дата замены', 'Срок службы (дни)']
-        for col in required_columns:
-            if col not in df.columns:
-                raise ValueError(f"Отсутствует обязательная колонка: {col}")
-        
-        imported_count = 0
-        errors = []
-        
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            
-            for index, row in df.iterrows():
-                try:
-                    # Валидация данных
-                    filter_type = safe_db_string(str(row['Тип фильтра']))
-                    location = safe_db_string(str(row['Место установки']))
-                    
-                    # Парсим дату
-                    if isinstance(row['Дата замены'], str):
-                        last_change = validate_date(row['Дата замены'])
-                    else:
-                        last_change = row['Дата замены'].date()
-                    
-                    # Получаем срок службы
-                    if pd.isna(row['Срок службы (дни)']):
-                        lifetime_days = get_lifetime_by_type(filter_type)
-                    else:
-                        lifetime_days = int(row['Срок службы (дни)'])
-                    
-                    # Проверяем лимит
-                    current_filters = len(get_user_filters(user_id))
-                    if current_filters + imported_count >= MAX_FILTERS_PER_USER:
-                        errors.append(f"Достигнут лимит фильтров. Импортировано: {imported_count}")
-                        break
-                    
-                    # Рассчитываем дату истечения срока
-                    expiry_date = last_change + timedelta(days=lifetime_days)
-                    
-                    # Добавляем в БД
-                    cur.execute('''INSERT INTO filters 
-                                (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
-                                VALUES (?, ?, ?, ?, ?, ?)''',
-                                (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
-                    
-                    imported_count += 1
-                    
-                except Exception as e:
-                    errors.append(f"Строка {index + 2}: {str(e)}")
-            
-            conn.commit()
-        
-        return imported_count, errors
-        
-    except Exception as e:
-        raise ValueError(f"Ошибка чтения файла: {str(e)}")
-
-# ========== УЛУЧШЕНИЯ: ВАЛИДАЦИЯ ВВОДА ==========
+# ========== ВАЛИДАЦИЯ ==========
 def validate_date(date_str: str):
-    """Валидация даты с улучшенной обработкой ошибок"""
+    """Валидация даты"""
     date_str = date_str.strip()
-    
-    # Убираем лишние символы, но оставляем точки, дефисы и слэши
-    date_str = re.sub(r'[^\d\.\-/]', '', date_str)
-    
     formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y', '%d/%m/%y', '%d/%m/%Y']
     
     for fmt in formats:
@@ -247,13 +123,8 @@ def validate_date(date_str: str):
             date_obj = datetime.strptime(date_str, fmt).date()
             today = datetime.now().date()
             
-            # Проверяем что дата не в будущем (максимум +1 день для запаса)
             if date_obj > today + timedelta(days=1):
                 raise ValueError("Дата не может быть в будущем")
-                
-            # Проверяем что дата не слишком старая (максимум 5 лет назад)
-            if date_obj < today - timedelta(days=5*365):
-                raise ValueError("Дата слишком старая")
                 
             return date_obj
         except ValueError:
@@ -267,31 +138,54 @@ def validate_lifetime(days_str: str):
         days = int(days_str)
         if days <= 0:
             raise ValueError("Срок службы должен быть положительным числом")
-        if days > 2000:  # Максимум ~5.5 лет
+        if days > 2000:
             raise ValueError("Слишком большой срок службы")
         return days
     except ValueError:
         raise ValueError("Введите корректное число дней")
 
-def validate_filter_name(name: str):
-    """Валидация названия фильтра"""
-    name = name.strip()
-    if not name:
-        raise ValueError("Название фильтра не может быть пустым")
-    if len(name) > 100:
-        raise ValueError("Название фильтра слишком длинное")
-    # Разрешаем буквы, цифры, пробелы, дефисы и точки
-    if re.search(r'[^\w\s\-\.]', name, re.UNICODE):
-        raise ValueError("Название содержит запрещенные символы")
-    return safe_db_string(name)
+def safe_db_string(value: str) -> str:
+    """Очистка строки для БД"""
+    if not value:
+        return ""
+    return re.sub(r'[;\'"\\]', '', value.strip())
 
 # ========== ОБНОВЛЕННЫЕ КЛАВИАТУРЫ ==========
+def get_main_keyboard(user_id=None):
+    """Главное меню с Excel кнопками"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("📊 Мои фильтры"),
+        types.KeyboardButton("➕ Добавить фильтр")
+    )
+    keyboard.row(
+        types.KeyboardButton("⏰ Сроки замены"),
+        types.KeyboardButton("⚙️ Управление")
+    )
+    keyboard.row(
+        types.KeyboardButton("📤 Экспорт Excel"),
+        types.KeyboardButton("📥 Импорт Excel")
+    )
+    if user_id and str(user_id) == str(ADMIN_ID):
+        keyboard.row(types.KeyboardButton("👑 Админ"))
+    return keyboard
+
+def get_management_keyboard():
+    """Меню управления"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("✏️ Редактировать фильтр"),
+        types.KeyboardButton("🗑️ Удалить фильтр")
+    )
+    keyboard.row(
+        types.KeyboardButton("📈 Статистика"),
+        types.KeyboardButton("🏠 Главное меню")
+    )
+    return keyboard
 
 def get_filter_type_keyboard():
-    """Клавиатура для выбора типа фильтра"""
+    """Выбор типа фильтра"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    
-    # Только оставшиеся фильтры
     keyboard.row(
         types.KeyboardButton("🔧 Магистральный SL10"),
         types.KeyboardButton("🔧 Магистральный SL20")
@@ -300,53 +194,44 @@ def get_filter_type_keyboard():
         types.KeyboardButton("💧 Гейзер"),
         types.KeyboardButton("💧 Аквафор")
     )
-    keyboard.row(types.KeyboardButton("📝 Другой тип"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
-    
-    return keyboard
-
-def get_multiple_filters_keyboard():
-    """Упрощенная клавиатура для нескольких фильтров"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    
-    keyboard.row(types.KeyboardButton("➕ Добавить фильтр"))
-    keyboard.row(types.KeyboardButton("✅ Готово"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
-    
-    return keyboard
-
-def get_add_filter_keyboard():
-    """Обновленная клавиатура добавления фильтра"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(
-        types.KeyboardButton("🔧 Один фильтр"),
-        types.KeyboardButton("📦 Несколько фильтров")
+        types.KeyboardButton("⚙️ Механический"),
+        types.KeyboardButton("🔮 Угольный")
     )
-    keyboard.row(types.KeyboardButton("📤 Экспорт в Excel"))
-    keyboard.row(types.KeyboardButton("📥 Импорт из Excel"))
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+    keyboard.row(
+        types.KeyboardButton("💎 Минеральный"),
+        types.KeyboardButton("🌀 Обратный осмос")
+    )
+    keyboard.row(types.KeyboardButton("📝 Другой тип"))
+    keyboard.row(types.KeyboardButton("🏠 Главное меню"))
     return keyboard
 
-def get_location_keyboard():
-    """Упрощенная клавиатура для места установки"""
+def get_cancel_keyboard():
+    """Клавиатура отмены"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(types.KeyboardButton("📍 Указать место установки"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    keyboard.add(types.KeyboardButton("❌ Отмена"))
     return keyboard
 
-def get_filters_list_keyboard(filters, action="delete"):
-    """Клавиатура со списком фильтров для удаления или редактирования"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    
-    for f in filters:
-        button_text = f"#{f['id']} {f['filter_type']} - {f['location']}"
-        keyboard.add(types.KeyboardButton(button_text))
-    
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+def get_back_keyboard():
+    """Клавиатура назад"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("↩️ Назад"))
     return keyboard
 
-def get_edit_filter_keyboard():
-    """Клавиатура для редактирования фильтра"""
+def get_lifetime_keyboard():
+    """Выбор срока службы"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    keyboard.row(
+        types.KeyboardButton("90 дней"),
+        types.KeyboardButton("180 дней"),
+        types.KeyboardButton("365 дней")
+    )
+    keyboard.row(types.KeyboardButton("📅 Другое количество"))
+    keyboard.row(types.KeyboardButton("🏠 Главное меню"))
+    return keyboard
+
+def get_edit_keyboard():
+    """Клавиатура редактирования"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.row(
         types.KeyboardButton("✏️ Тип фильтра"),
@@ -356,191 +241,45 @@ def get_edit_filter_keyboard():
         types.KeyboardButton("📅 Дата замены"),
         types.KeyboardButton("⏱️ Срок службы")
     )
-    keyboard.row(types.KeyboardButton("🔙 К списку фильтров"))
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
-    return keyboard
-
-def get_admin_keyboard():
-    """Клавиатура админ панели"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("📊 Общая статистика"),
-        types.KeyboardButton("👥 Пользователи")
-    )
-    keyboard.row(
-        types.KeyboardButton("🗑️ Очистить базу"),
-        types.KeyboardButton("🔙 Главное меню")
-    )
-    return keyboard
-
-def get_excel_keyboard():
-    """Клавиатура для работы с Excel"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("📤 Экспорт в Excel"),
-        types.KeyboardButton("📥 Импорт из Excel")
-    )
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+    keyboard.row(types.KeyboardButton("🏠 Главное меню"))
     return keyboard
 
 def get_confirmation_keyboard(filter_id=None, action="delete"):
-    """Клавиатура подтверждения удаления"""
+    """Клавиатура подтверждения"""
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     if action == "delete":
         keyboard.add(
             types.InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{filter_id}"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete")
-        )
-    elif action == "clear_db":
-        keyboard.add(
-            types.InlineKeyboardButton("✅ Да, очистить всю базу", callback_data="confirm_clear_db"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_clear_db")
+            types.InlineKeyboardButton("❌ Нет, отменить", callback_data="cancel_delete")
         )
     return keyboard
 
-# ========== ИСПРАВЛЕННЫЕ КЛАВИАТУРЫ ==========
-def get_main_keyboard(user_id=None):
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("📋 Мои фильтры"),
-        types.KeyboardButton("✨ Добавить фильтр")
-    )
-    keyboard.row(
-        types.KeyboardButton("⏳ Сроки замены"),
-        types.KeyboardButton("⚙️ Управление")
-    )
-    # Правильная проверка администратора
-    if user_id and str(user_id) == str(ADMIN_ID):
-        keyboard.row(types.KeyboardButton("👑 Админ панель"))
+def get_filters_list_keyboard(filters, action="edit"):
+    """Список фильтров для выбора"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_left = (expiry_date - datetime.now().date()).days
+        
+        if days_left <= 0:
+            icon = "🔴"
+        elif days_left <= 7:
+            icon = "🟡"
+        elif days_left <= 30:
+            icon = "🟠"
+        else:
+            icon = "✅"
+            
+        button_text = f"{icon} {f['filter_type']} - {f['location']}"
+        keyboard.add(types.KeyboardButton(button_text))
+    
+    keyboard.row(types.KeyboardButton("🏠 Главное меню"))
     return keyboard
 
-def get_management_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("✏️ Редактировать"),
-        types.KeyboardButton("🗑️ Удалить")
-    )
-    keyboard.row(
-        types.KeyboardButton("📊 Статистика"),
-        types.KeyboardButton("🔙 Главное меню")
-    )
-    return keyboard
-
-def get_cancel_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("❌ Отмена"))
-    return keyboard
-
-def get_back_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("↩️ Назад"))
-    return keyboard
-
-def get_lifetime_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    keyboard.row(
-        types.KeyboardButton("3️⃣ 90 дней"),
-        types.KeyboardButton("6️⃣ 180 дней"),
-        types.KeyboardButton("1️⃣ 365 дней")
-    )
-    keyboard.row(types.KeyboardButton("📅 Другое количество"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
-    return keyboard
-
-# ========== УЛУЧШЕНИЯ: ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
-def init_db():
-    """Безопасная инициализация базы данных с проверками"""
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            
-            # Проверяем существование таблицы и её структуру
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filters'")
-            table_exists = cur.fetchone()
-            
-            if not table_exists:
-                # Создаем таблицу с полной структурой
-                cur.execute('''CREATE TABLE filters (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            filter_type TEXT,
-                            location TEXT,
-                            last_change DATE,
-                            expiry_date DATE,
-                            lifetime_days INTEGER,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-                
-                # Создаем индексы
-                cur.execute('''CREATE INDEX idx_user_id ON filters(user_id)''')
-                cur.execute('''CREATE INDEX idx_expiry_date ON filters(expiry_date)''')
-                logging.info("База данных успешно создана")
-            else:
-                # Проверяем структуру существующей таблицы
-                cur.execute("PRAGMA table_info(filters)")
-                columns = [column[1] for column in cur.fetchall()]
-                required_columns = ['id', 'user_id', 'filter_type', 'location', 'last_change', 'expiry_date', 'lifetime_days', 'created_at', 'updated_at']
-                
-                logging.info("База данных уже существует, проверка структуры завершена")
-            
-            conn.commit()
-            
-    except Exception as e:
-        logging.error(f"Критическая ошибка инициализации БД: {e}")
-        if os.path.exists('filters.db'):
-            backup_name = f'filters_backup_critical_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-            shutil.copy2('filters.db', backup_name)
-            logging.info(f"Создана критическая резервная копия: {backup_name}")
-        raise
-
-# Функция резервного копирования базы данных
-def backup_database():
-    """Создание резервной копии базы данных с проверками"""
-    try:
-        if not os.path.exists('filters.db'):
-            logging.warning("База данных не найдена для резервного копирования")
-            return False
-            
-        backup_dir = "backups"
-        os.makedirs(backup_dir, exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_file = os.path.join(backup_dir, f"filters_backup_{timestamp}.db")
-        
-        # Проверяем размер базы данных
-        db_size = os.path.getsize('filters.db')
-        if db_size == 0:
-            logging.warning("База данных пуста, пропускаем резервное копирование")
-            return False
-            
-        shutil.copy2('filters.db', backup_file)
-        logging.info(f"Создана резервная копия: {backup_file} ({db_size} bytes)")
-        
-        # Удаляем старые резервные копии (оставляем последние 10)
-        backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup") and f.endswith(".db")])
-        for old_backup in backups[:-10]:
-            old_backup_path = os.path.join(backup_dir, old_backup)
-            try:
-                os.remove(old_backup_path)
-                logging.info(f"Удалена старая резервная копия: {old_backup}")
-            except Exception as e:
-                logging.error(f"Не удалось удалить старую резервную копию {old_backup}: {e}")
-        
-        return True
-        
-    except Exception as e:
-        logging.error(f"Ошибка при создании резервной копии: {e}")
-        return False
-
-# States
+# ========== STATES ==========
 class FilterStates(StatesGroup):
     waiting_filter_type = State()
-    waiting_location = State()
-    waiting_change_date = State()
-    waiting_lifetime = State()
-
-class MultipleFiltersStates(StatesGroup):
-    waiting_filters_list = State()
     waiting_location = State()
     waiting_change_date = State()
     waiting_lifetime = State()
@@ -556,13 +295,9 @@ class DeleteFilterStates(StatesGroup):
 class ExcelStates(StatesGroup):
     waiting_excel_file = State()
 
-# ========== УЛУЧШЕНИЯ: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-def parse_date(date_str):
-    """Улучшенный парсинг даты с валидацией"""
-    return validate_date(date_str)
-
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def format_date_nice(date):
-    return date.strftime('%d.%m.%y')
+    return date.strftime('%d.%m.%Y')
 
 def get_lifetime_by_type(filter_type):
     filter_type_lower = filter_type.lower()
@@ -571,355 +306,234 @@ def get_lifetime_by_type(filter_type):
             return days
     return 180
 
-def get_status_icon_and_text(days_until_expiry):
-    """Получение иконки и текста статуса"""
+def get_status_icon(days_until_expiry):
+    """Получение иконки статуса"""
     if days_until_expiry <= 0:
-        return "🔴", "ПРОСРОЧЕН"
+        return "🔴"
     elif days_until_expiry <= 7:
-        return "🟡", "СРОЧНО ЗАМЕНИТЬ"
+        return "🟡"
     elif days_until_expiry <= 30:
-        return "🟠", "СКОРО ЗАМЕНИТЬ"
+        return "🟠"
     else:
-        return "✅", "В НОРМЕ"
+        return "✅"
+
+def create_statistics_message(filters):
+    """Создание графической статистики"""
+    if not filters:
+        return "📊 <b>Статистика</b>\n\n📭 Нет данных для отображения"
+    
+    total = len(filters)
+    expired = 0
+    urgent = 0
+    warning = 0
+    normal = 0
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_left = (expiry_date - datetime.now().date()).days
+        
+        if days_left <= 0:
+            expired += 1
+        elif days_left <= 7:
+            urgent += 1
+        elif days_left <= 30:
+            warning += 1
+        else:
+            normal += 1
+    
+    # Создаем графические прогресс-бары
+    def create_bar(percentage, icon):
+        bars = int(percentage / 10)
+        return icon * bars + " " * (10 - bars)
+    
+    expired_pct = (expired / total) * 100
+    urgent_pct = (urgent / total) * 100
+    warning_pct = (warning / total) * 100
+    normal_pct = (normal / total) * 100
+    
+    message = (
+        "📊 <b>СТАТИСТИКА ФИЛЬТРОВ</b>\n\n"
+        f"🔧 Всего фильтров: <b>{total}</b>\n\n"
+        f"📈 <b>Состояние фильтров:</b>\n"
+        f"🔴 Просрочено: {expired} ({expired_pct:.1f}%)\n{create_bar(expired_pct, '🔴')}\n\n"
+        f"🟡 Срочно заменить (1-7 дн.): {urgent} ({urgent_pct:.1f}%)\n{create_bar(urgent_pct, '🟡')}\n\n"
+        f"🟠 Скоро заменить (8-30 дн.): {warning} ({warning_pct:.1f}%)\n{create_bar(warning_pct, '🟠')}\n\n"
+        f"✅ В норме (>30 дн.): {normal} ({normal_pct:.1f}%)\n{create_bar(normal_pct, '✅')}\n\n"
+        f"📅 <b>Ближайшая замена:</b>\n"
+    )
+    
+    # Добавляем ближайшие замены
+    soon_filters = sorted(filters, key=lambda x: datetime.strptime(str(x['expiry_date']), '%Y-%m-%d').date())[:3]
+    for i, f in enumerate(soon_filters, 1):
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_left = (expiry_date - datetime.now().date()).days
+        icon = get_status_icon(days_left)
+        message += f"{icon} {f['filter_type']} - {days_left} дн.\n"
+    
+    return message
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
-
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     await message.answer(
-        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
-        "💧 <i>Умный помощник для своевременной замены фильтров</i>\n\n"
-        "📦 <b>Основные возможности:</b>\n"
-        "• 📋 Просмотр всех ваших фильтров\n"
-        "• ✨ Добавление новых фильтров\n"
-        "• ⏳ Контроль сроков замены\n"
-        "• ⚙️ Полное управление базой\n"
-        "• 📊 Детальная статистика\n"
-        "• 🔔 Автоматические напоминания\n"
+        "🤖 <b>Фильтр-Трекер</b>\n\n"
+        "💧 Умный помощник для контроля замены фильтров\n\n"
+        "📋 <b>Возможности:</b>\n"
+        "• 📊 Просмотр всех фильтров\n"
+        "• ➕ Добавление новых фильтров\n"
+        "• ⏰ Контроль сроков замены\n"
+        "• ✏️ Редактирование данных\n"
+        "• 📈 Детальная статистика\n"
         "• 📤📥 Импорт/экспорт в Excel",
         parse_mode='HTML',
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
-# Обработка кнопки "Главное меню"
-@dp.message_handler(lambda message: message.text == "🔙 Главное меню")
-async def cmd_back(message: types.Message):
+@dp.message_handler(lambda message: message.text == "🏠 Главное меню")
+async def cmd_main_menu(message: types.Message):
     await message.answer(
-        "🏠 <b>Главное меню</b>\n\n"
-        "Выберите нужный раздел:",
+        "🏠 <b>Главное меню</b>\n\nВыберите действие:",
         parse_mode='HTML',
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
-# Обработка кнопки "Управление"
-@dp.message_handler(lambda message: message.text == "⚙️ Управление")
-async def cmd_management(message: types.Message):
-    await message.answer(
-        "🛠️ <b>Центр управления фильтрами</b>\n\n"
-        "Выберите действие:",
-        parse_mode='HTML',
-        reply_markup=get_management_keyboard()
-    )
-
-# Добавление фильтра - выбор типа добавления
-@dp.message_handler(lambda message: message.text == "✨ Добавить фильтр")
-async def cmd_add(message: types.Message):
-    # Проверяем лимит фильтров
+# ========== ДОБАВЛЕНИЕ ФИЛЬТРА ==========
+@dp.message_handler(lambda message: message.text == "➕ Добавить фильтр")
+async def cmd_add_filter(message: types.Message):
     if check_filters_limit(message.from_user.id):
         await message.answer(
             f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
-            f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
-            f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
+            f"Максимум: {MAX_FILTERS_PER_USER} фильтров\n"
+            f"Удалите некоторые фильтры перед добавлением новых",
             parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
         
+    await FilterStates.waiting_filter_type.set()
     await message.answer(
-        "🔧 <b>Выберите тип добавления:</b>\n\n"
-        "💡 <i>Можно добавить один фильтр или сразу несколько</i>",
+        "🔧 <b>Выберите тип фильтра:</b>",
         parse_mode='HTML',
-        reply_markup=get_add_filter_keyboard()
+        reply_markup=get_filter_type_keyboard()
     )
 
-# Обработка выбора типа добавления
-@dp.message_handler(lambda message: message.text in ["🔧 Один фильтр", "📦 Несколько фильтров", "📤 Экспорт в Excel", "📥 Импорт из Excel"])
-async def process_add_type(message: types.Message, state: FSMContext):
-    if message.text == "🔧 Один фильтр":
-        await FilterStates.waiting_filter_type.set()
-        await message.answer(
-            "🔧 <b>Выберите тип фильтра:</b>\n\n"
-            "💡 <i>Доступны все варианты фильтров</i>",
-            parse_mode='HTML',
-            reply_markup=get_filter_type_keyboard()
-        )
-    elif message.text == "📦 Несколько фильтров":
-        await cmd_multiple_filters(message, state)
-    elif message.text == "📤 Экспорт в Excel":
-        await cmd_export_excel(message)
-    elif message.text == "📥 Импорт из Excel":
-        await cmd_import_excel(message)
-
-# ========== ОБНОВЛЕННЫЙ РАЗДЕЛ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
-
-@dp.message_handler(lambda message: message.text == "📦 Несколько фильтров")
-async def cmd_multiple_filters(message: types.Message, state: FSMContext):
-    """Начало процесса добавления нескольких фильтров"""
-    # Проверяем лимит фильтров
-    if check_filters_limit(message.from_user.id):
-        await message.answer(
-            f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
-            f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
-            f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard(message.from_user.id)
-        )
-        return
-        
-    await MultipleFiltersStates.waiting_filters_list.set()
-    
-    # Инициализируем список выбранных фильтров
-    async with state.proxy() as data:
-        data['selected_filters'] = []
-    
-    await message.answer(
-        "📦 <b>Добавление нескольких фильтров</b>\n\n"
-        "💡 <i>Используйте кнопки ниже для добавления фильтров:</i>\n\n"
-        "• <b>➕ Добавить фильтр</b> - выбрать из списка типов\n"
-        "• <b>✅ Готово</b> - завершить добавление\n\n"
-        "📝 <b>Текущий список:</b>\n"
-        "<i>Пока пусто</i>",
-        parse_mode='HTML',
-        reply_markup=get_multiple_filters_keyboard()
-    )
-
-@dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
-async def process_multiple_filters_selection(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        if 'selected_filters' not in data:
-            data['selected_filters'] = []
-    
-    # Обработка кнопки отмены
-    if message.text == "❌ Отмена":
+@dp.message_handler(state=FilterStates.waiting_filter_type)
+async def process_filter_type(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
         await state.finish()
-        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        await cmd_main_menu(message)
         return
-    
-    # Обработка кнопки "Готово"
-    if message.text == "✅ Готово":
-        if not data['selected_filters']:
-            await message.answer(
-                "❌ <b>Список фильтров пуст!</b>\n\n"
-                "💡 <i>Добавьте хотя бы один фильтр перед завершением</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-            return
         
-        # Проверяем общий лимит фильтров
-        current_filters_count = len(get_user_filters(message.from_user.id))
-        if current_filters_count + len(data['selected_filters']) > MAX_FILTERS_PER_USER:
-            await message.answer(
-                f"❌ <b>Превышен лимит фильтров!</b>\n\n"
-                f"📊 <i>Текущее количество: {current_filters_count}</i>\n"
-                f"📦 <i>Пытаетесь добавить: {len(data['selected_filters'])}</i>\n"
-                f"💡 <i>Максимум: {MAX_FILTERS_PER_USER}</i>\n\n"
-                f"🔄 <i>Удалите некоторые фильтры или уменьшите список</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-            return
-        
-        await MultipleFiltersStates.waiting_location.set()
-        
-        # Формируем красивый список фильтров
-        filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
-        
-        await message.answer(
-            f"✅ <b>Список фильтров сохранен!</b>\n\n"
-            f"📦 <b>Будет добавлено фильтров:</b> {len(data['selected_filters'])}\n\n"
-            f"🔧 <b>Список фильтров:</b>\n{filters_text}\n\n"
-            f"📍 <b>Укажите место установки для всех фильтров:</b>\n\n"
-            f"💡 <i>Все фильтры будут установлены в одном месте</i>",
-            parse_mode='HTML',
-            reply_markup=get_location_keyboard()
-        )
-        return
-    
-    # Обработка кнопки "Добавить фильтр"
-    if message.text == "➕ Добавить фильтр":
-        await message.answer(
-            "🔧 <b>Выберите тип фильтра:</b>\n\n"
-            "💡 <i>Доступны все варианты фильтров</i>",
-            parse_mode='HTML',
-            reply_markup=get_filter_type_keyboard()
-        )
-        return
-    
-    # Обработка выбора типа фильтра из списка
     filter_mapping = {
         "🔧 Магистральный SL10": "Магистральный SL10",
         "🔧 Магистральный SL20": "Магистральный SL20",
         "💧 Гейзер": "Гейзер",
-        "💧 Аквафор": "Аквафор"
+        "💧 Аквафор": "Аквафор",
+        "⚙️ Механический": "Механический",
+        "🔮 Угольный": "Угольный",
+        "💎 Минеральный": "Минеральный",
+        "🌀 Обратный осмос": "Обратный осмос"
     }
     
     if message.text in filter_mapping:
-        filter_name = filter_mapping[message.text]
-        if filter_name not in data['selected_filters']:
-            data['selected_filters'].append(filter_name)
-            
-            # Формируем текущий список для отображения
-            if data['selected_filters']:
-                filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
-                status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
-            else:
-                status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
-            
-            await message.answer(
-                f"✅ <b>Добавлен:</b> {filter_name}\n\n"
-                f"{status_text}\n\n"
-                f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-        else:
-            await message.answer(
-                f"ℹ️ <b>Фильтр уже в списке:</b> {filter_name}",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-        return
-    
-    # Обработка текстового ввода (пользователь ввел свой фильтр)
-    if message.text and message.text not in ["✅ Готово", "➕ Добавить фильтр", "❌ Отмена"]:
-        try:
-            validated_filter = validate_filter_name(message.text)
-            if validated_filter not in data['selected_filters']:
-                data['selected_filters'].append(validated_filter)
-                
-                # Формируем обновленный список
-                filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
-                
-                await message.answer(
-                    f"✅ <b>Добавлен:</b> {validated_filter}\n\n"
-                    f"📊 Всего в списке: {len(data['selected_filters'])}\n\n"
-                    f"🔧 <b>Текущий список:</b>\n{filters_text}",
-                    parse_mode='HTML',
-                    reply_markup=get_multiple_filters_keyboard()
-                )
-            else:
-                await message.answer(
-                    f"ℹ️ <b>Фильтр уже в списке:</b> {validated_filter}",
-                    parse_mode='HTML',
-                    reply_markup=get_multiple_filters_keyboard()
-                )
-        except ValueError as e:
-            await message.answer(
-                f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
-                f"💡 <i>{str(e)}</i>",
-                parse_mode='HTML',
-                reply_markup=get_multiple_filters_keyboard()
-            )
-        return
-    
-    # Обновляем отображение списка при любом другом сообщении
-    if data['selected_filters']:
-        filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
-        status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
-    else:
-        status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
-    
-    await message.answer(
-        f"📦 <b>Добавление фильтров</b>\n\n"
-        f"{status_text}\n\n"
-        f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
-        parse_mode='HTML',
-        reply_markup=get_multiple_filters_keyboard()
-    )
-
-# ========== ДОБАВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
-
-@dp.message_handler(state=MultipleFiltersStates.waiting_location)
-async def process_multiple_location(message: types.Message, state: FSMContext):
-    """Обработка места установки для нескольких фильтров"""
-    if message.text == "❌ Отмена":
-        await state.finish()
-        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard(message.from_user.id))
-        return
-    
-    try:
-        location = validate_filter_name(message.text)
-        async with state.proxy() as data:
-            data['location'] = location
-        
-        await MultipleFiltersStates.waiting_change_date.set()
+        filter_type = filter_mapping[message.text]
+    elif message.text == "📝 Другой тип":
         await message.answer(
-            f"📍 <b>Место установки:</b> {location}\n\n"
-            f"📅 <b>Теперь укажите дату замены:</b>\n\n"
-            f"💡 <i>Формат: ДД.ММ.ГГ или ДД.ММ.ГГГГ</i>",
+            "📝 <b>Введите название фильтра:</b>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
-        
-    except ValueError as e:
-        await message.answer(
-            f"❌ <b>Ошибка в названии места:</b>\n\n"
-            f"💡 <i>{str(e)}</i>",
-            parse_mode='HTML'
-        )
+        return
+    else:
+        filter_type = safe_db_string(message.text)
+    
+    async with state.proxy() as data:
+        data['filter_type'] = filter_type
+    
+    await FilterStates.waiting_location.set()
+    await message.answer(
+        f"🔧 <b>Тип фильтра:</b> {filter_type}\n\n"
+        f"📍 <b>Введите место установки:</b>\n\n"
+        f"Пример: Кухня, Ванная, Офис и т.д.",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
 
-@dp.message_handler(state=MultipleFiltersStates.waiting_change_date)
-async def process_multiple_change_date(message: types.Message, state: FSMContext):
-    """Обработка даты замены для нескольких фильтров"""
+@dp.message_handler(state=FilterStates.waiting_location)
+async def process_location(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        await message.answer("❌ Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
+        
+    location = safe_db_string(message.text)
     
+    async with state.proxy() as data:
+        data['location'] = location
+    
+    await FilterStates.waiting_change_date.set()
+    await message.answer(
+        f"📍 <b>Место установки:</b> {location}\n\n"
+        f"📅 <b>Введите дату последней замены:</b>\n\n"
+        f"Формат: <i>ДД.ММ.ГГГГ</i>\n"
+        f"Пример: <i>15.01.2024</i>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+
+@dp.message_handler(state=FilterStates.waiting_change_date)
+async def process_change_date(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+        
     try:
         change_date = validate_date(message.text)
+        
         async with state.proxy() as data:
             data['change_date'] = change_date
+            filter_type = data['filter_type']
+            
+            # Автоматически определяем срок службы по типу фильтра
+            auto_lifetime = get_lifetime_by_type(filter_type)
+            data['lifetime_days'] = auto_lifetime
         
-        await MultipleFiltersStates.waiting_lifetime.set()
+        await FilterStates.waiting_lifetime.set()
         await message.answer(
             f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n\n"
-            f"⏱️ <b>Теперь укажите срок службы:</b>\n\n"
-            f"💡 <i>Можно выбрать из стандартных или ввести своё значение</i>",
+            f"⏱️ <b>Срок службы:</b> {auto_lifetime} дней\n\n"
+            f"✅ <i>Срок установлен автоматически</i>\n"
+            f"🔄 <b>Хотите изменить срок службы?</b>",
             parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
         
     except ValueError as e:
         await message.answer(
-            f"❌ <b>Ошибка в дате:</b>\n\n"
-            f"💡 <i>{str(e)}</i>",
+            f"❌ <b>Ошибка в дате:</b>\n\n{str(e)}",
             parse_mode='HTML'
         )
 
-@dp.message_handler(state=MultipleFiltersStates.waiting_lifetime)
-async def process_multiple_lifetime(message: types.Message, state: FSMContext):
-    """Обработка срока службы для нескольких фильтров"""
-    if message.text == "❌ Отмена":
+@dp.message_handler(state=FilterStates.waiting_lifetime)
+async def process_lifetime(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
         await state.finish()
-        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        await cmd_main_menu(message)
         return
-    
+        
     try:
-        # Обработка стандартных значений срока службы
         lifetime_mapping = {
-            "3️⃣ 90 дней": 90,
-            "6️⃣ 180 дней": 180,
-            "1️⃣ 365 дней": 365
+            "90 дней": 90,
+            "180 дней": 180,
+            "365 дней": 365
         }
         
         if message.text in lifetime_mapping:
             lifetime_days = lifetime_mapping[message.text]
         elif message.text == "📅 Другое количество":
             await message.answer(
-                "⏱️ <b>Введите количество дней:</b>\n\n"
-                "💡 <i>Например: 120, 200, 365</i>",
+                "⏱️ <b>Введите количество дней:</b>\n\nПример: 120",
                 parse_mode='HTML',
                 reply_markup=get_cancel_keyboard()
             )
@@ -928,331 +542,273 @@ async def process_multiple_lifetime(message: types.Message, state: FSMContext):
             lifetime_days = validate_lifetime(message.text)
         
         async with state.proxy() as data:
-            selected_filters = data['selected_filters']
+            filter_type = data['filter_type']
             location = data['location']
             change_date = data['change_date']
             
-            # Сохраняем все фильтры в БД
+            # Сохраняем в БД
+            expiry_date = change_date + timedelta(days=lifetime_days)
+            
             with get_db_connection() as conn:
                 cur = conn.cursor()
-                added_count = 0
-                
-                for filter_type in selected_filters:
-                    expiry_date = change_date + timedelta(days=lifetime_days)
-                    
-                    cur.execute('''INSERT INTO filters 
-                                (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
-                                VALUES (?, ?, ?, ?, ?, ?)''',
-                                (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime_days))
-                    added_count += 1
-                
+                cur.execute('''INSERT INTO filters 
+                            (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                            VALUES (?, ?, ?, ?, ?, ?)''',
+                            (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime_days))
                 conn.commit()
         
         await state.finish()
         
-        filters_text = "\n".join([f"• {f}" for f in selected_filters])
-        
         await message.answer(
-            f"✅ <b>УСПЕШНО ДОБАВЛЕНО!</b>\n\n"
-            f"📦 <b>Добавлено фильтров:</b> {added_count}\n"
-            f"📍 <b>Место установки:</b> {location}\n"
+            f"✅ <b>ФИЛЬТР ДОБАВЛЕН!</b>\n\n"
+            f"🔧 <b>Тип:</b> {filter_type}\n"
+            f"📍 <b>Место:</b> {location}\n"
             f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n"
-            f"⏱️ <b>Срок службы:</b> {lifetime_days} дней\n\n"
-            f"🔧 <b>Список фильтров:</b>\n{filters_text}\n\n"
-            f"💡 <i>Следующая замена: {format_date_nice(expiry_date)}</i>",
+            f"⏱️ <b>Срок службы:</b> {lifetime_days} дней\n"
+            f"📅 <b>Следующая замена:</b> {format_date_nice(expiry_date)}\n\n"
+            f"💡 <i>Фильтр будет автоматически отслеживаться</i>",
             parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         
     except ValueError as e:
         await message.answer(
-            f"❌ <b>Ошибка в сроке службы:</b>\n\n"
-            f"💡 <i>{str(e)}</i>",
+            f"❌ <b>Ошибка в сроке службы:</b>\n\n{str(e)}",
             parse_mode='HTML'
         )
 
-# ========== ЭКСПОРТ/ИМПОРТ EXCEL ==========
+# ========== УПРАВЛЕНИЕ ФИЛЬТРАМИ ==========
+@dp.message_handler(lambda message: message.text == "⚙️ Управление")
+async def cmd_management(message: types.Message):
+    await message.answer(
+        "⚙️ <b>Управление фильтрами</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=get_management_keyboard()
+    )
 
-@dp.message_handler(lambda message: message.text == "📤 Экспорт в Excel")
-async def cmd_export_excel(message: types.Message):
-    """Экспорт фильтров в Excel"""
+# ========== РЕДАКТИРОВАНИЕ ФИЛЬТРА ==========
+@dp.message_handler(lambda message: message.text == "✏️ Редактировать фильтр")
+async def cmd_edit_filter(message: types.Message):
     filters = get_user_filters(message.from_user.id)
     
     if not filters:
         await message.answer(
-            "📭 <b>Нет фильтров для экспорта</b>\n\n"
-            "💫 <i>Добавьте фильтры перед использованием этой функции</i>",
+            "📭 <b>Нет фильтров для редактирования</b>",
             parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
     
-    try:
-        # Создаем Excel файл
-        filepath = export_filters_to_excel(message.from_user.id)
-        
-        if filepath:
-            # Отправляем файл пользователю
-            with open(filepath, 'rb') as file:
-                await message.answer_document(
-                    file,
-                    caption="📤 <b>ЭКСПОРТ ФИЛЬТРОВ В EXCEL</b>\n\n"
-                           f"✅ <b>Экспортировано фильтров:</b> {len(filters)}\n"
-                           f"📅 <b>Дата экспорта:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                           f"💡 <i>Файл содержит все ваши фильтры с датами замены</i>",
-                    parse_mode='HTML'
-                )
-            
-            # Удаляем временный файл
-            try:
-                os.remove(filepath)
-            except:
-                pass
-        else:
-            await message.answer(
-                "❌ <b>Ошибка при создании файла</b>",
-                parse_mode='HTML'
-            )
-            
-    except Exception as e:
-        logging.error(f"Ошибка экспорта в Excel: {e}")
-        await message.answer(
-            "❌ <b>Ошибка при экспорте в Excel</b>\n\n"
-            f"💡 <i>{str(e)}</i>",
-            parse_mode='HTML'
-        )
+    await EditFilterStates.waiting_filter_selection.set()
+    await message.answer(
+        "✏️ <b>Выберите фильтр для редактирования:</b>",
+        parse_mode='HTML',
+        reply_markup=get_filters_list_keyboard(filters, "edit")
+    )
 
-@dp.message_handler(lambda message: message.text == "📥 Импорт из Excel")
-async def cmd_import_excel(message: types.Message):
-    """Начало импорта из Excel"""
-    await ExcelStates.waiting_excel_file.set()
+@dp.message_handler(state=EditFilterStates.waiting_filter_selection)
+async def process_edit_filter_selection(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.finish()
+        await cmd_main_menu(message)
+        return
+    
+    filters = get_user_filters(message.from_user.id)
+    selected_filter = None
+    
+    # Ищем выбранный фильтр
+    for f in filters:
+        display_text = f"{get_status_icon((datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - datetime.now().date()).days)} {f['filter_type']} - {f['location']}"
+        if message.text == display_text:
+            selected_filter = f
+            break
+    
+    if not selected_filter:
+        await message.answer(
+            "❌ <b>Фильтр не найден</b>\n\nПожалуйста, выберите фильтр из списка:",
+            parse_mode='HTML',
+            reply_markup=get_filters_list_keyboard(filters, "edit")
+        )
+        return
+    
+    async with state.proxy() as data:
+        data['editing_filter'] = selected_filter
+    
+    await EditFilterStates.waiting_field_selection.set()
+    
+    expiry_date = datetime.strptime(str(selected_filter['expiry_date']), '%Y-%m-%d').date()
+    days_left = (expiry_date - datetime.now().date()).days
     
     await message.answer(
-        "📥 <b>ИМПОРТ ФИЛЬТРОВ ИЗ EXCEL</b>\n\n"
-        "💡 <b>Инструкция:</b>\n"
-        "1. Подготовьте Excel файл со следующими колонками:\n"
-        "   • <b>Тип фильтра</b> (обязательно)\n"
-        "   • <b>Место установки</b> (обязательно)\n"
-        "   • <b>Дата замены</b> (обязательно, формат ДД.ММ.ГГ)\n"
-        "   • <b>Срок службы (дни)</b> (опционально)\n\n"
-        "2. Отправьте Excel файл боту\n\n"
-        "⚠️ <b>Внимание:</b>\n"
-        "• Максимальное количество фильтров: 50\n"
-        "• Существующие фильтры не будут удалены\n"
-        "• Проверьте данные перед импортом\n\n"
-        "📎 <b>Отправьте Excel файл:</b>",
+        f"✏️ <b>Редактирование фильтра</b>\n\n"
+        f"🔧 <b>Тип:</b> {selected_filter['filter_type']}\n"
+        f"📍 <b>Место:</b> {selected_filter['location']}\n"
+        f"📅 <b>Дата замены:</b> {format_date_nice(datetime.strptime(str(selected_filter['last_change']), '%Y-%m-%d').date())}\n"
+        f"⏱️ <b>Срок службы:</b> {selected_filter['lifetime_days']} дней\n"
+        f"📅 <b>Годен до:</b> {format_date_nice(expiry_date)}\n"
+        f"⏰ <b>Осталось дней:</b> {days_left}\n\n"
+        f"<b>Что хотите изменить?</b>",
+        parse_mode='HTML',
+        reply_markup=get_edit_keyboard()
+    )
+
+@dp.message_handler(state=EditFilterStates.waiting_field_selection)
+async def process_edit_field_selection(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.finish()
+        await cmd_main_menu(message)
+        return
+    
+    field_mapping = {
+        "✏️ Тип фильтра": "filter_type",
+        "📍 Место установки": "location", 
+        "📅 Дата замены": "last_change",
+        "⏱️ Срок службы": "lifetime_days"
+    }
+    
+    if message.text not in field_mapping:
+        await message.answer(
+            "❌ <b>Пожалуйста, выберите поле для редактирования из списка:</b>",
+            parse_mode='HTML',
+            reply_markup=get_edit_keyboard()
+        )
+        return
+    
+    async with state.proxy() as data:
+        data['editing_field'] = field_mapping[message.text]
+    
+    await EditFilterStates.waiting_new_value.set()
+    
+    field_prompts = {
+        "filter_type": "✏️ <b>Введите новый тип фильтра:</b>",
+        "location": "📍 <b>Введите новое место установки:</b>",
+        "last_change": "📅 <b>Введите новую дату замены (ДД.ММ.ГГГГ):</b>",
+        "lifetime_days": "⏱️ <b>Введите новый срок службы в днях:</b>"
+    }
+    
+    await message.answer(
+        field_prompts[field_mapping[message.text]],
         parse_mode='HTML',
         reply_markup=get_cancel_keyboard()
     )
 
-@dp.message_handler(content_types=types.ContentType.DOCUMENT, state=ExcelStates.waiting_excel_file)
-async def process_excel_file(message: types.Message, state: FSMContext):
-    """Обработка Excel файла для импорта"""
-    # Проверка отмены операции
+@dp.message_handler(state=EditFilterStates.waiting_new_value)
+async def process_edit_new_value(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("🚫 Импорт отменен", reply_markup=get_main_keyboard(message.from_user.id))
+        await message.answer("❌ Редактирование отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
     try:
-        # Проверяем что это Excel файл
-        if not message.document.file_name.endswith(('.xlsx', '.xls')):
-            await message.answer(
-                "❌ <b>Неверный формат файла!</b>\n\n"
-                "💡 <i>Поддерживаются только файлы Excel (.xlsx, .xls)</i>",
-                parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
-            )
-            return
+        async with state.proxy() as data:
+            filter_data = data['editing_filter']
+            field = data['editing_field']
+            
+            # Валидация в зависимости от поля
+            if field == "last_change":
+                new_value = validate_date(message.text)
+            elif field == "lifetime_days":
+                new_value = validate_lifetime(message.text)
+            else:
+                new_value = safe_db_string(message.text)
+            
+            # Обновляем в БД
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                
+                if field == "last_change":
+                    # При изменении даты замены пересчитываем дату истечения
+                    cur.execute('''UPDATE filters SET last_change = ?, expiry_date = date(?, '+' || lifetime_days || ' days') 
+                                WHERE id = ? AND user_id = ?''',
+                                (new_value, new_value, filter_data['id'], message.from_user.id))
+                elif field == "lifetime_days":
+                    # При изменении срока службы пересчитываем дату истечения
+                    cur.execute('''UPDATE filters SET lifetime_days = ?, expiry_date = date(last_change, '+' || ? || ' days') 
+                                WHERE id = ? AND user_id = ?''',
+                                (new_value, new_value, filter_data['id'], message.from_user.id))
+                else:
+                    cur.execute(f'UPDATE filters SET {field} = ? WHERE id = ? AND user_id = ?',
+                                (new_value, filter_data['id'], message.from_user.id))
+                
+                conn.commit()
         
-        # Скачиваем файл
-        file_info = await bot.get_file(message.document.file_id)
-        downloaded_file = await bot.download_file(file_info.file_path)
-        
-        # Сохраняем временный файл
-        temp_file = f"temp_import_{message.from_user.id}.xlsx"
-        with open(temp_file, 'wb') as file:
-            file.write(downloaded_file.getvalue())
-        
-        # Импортируем данные
-        imported_count, errors = import_filters_from_excel(temp_file, message.from_user.id)
-        
-        # Удаляем временный файл
-        try:
-            os.remove(temp_file)
-        except:
-            pass
-        
-        # Формируем ответ
-        response = f"✅ <b>ИМПОРТ ЗАВЕРШЕН</b>\n\n"
-        response += f"📦 <b>Успешно импортировано:</b> {imported_count} фильтров\n\n"
-        
-        if errors:
-            response += f"⚠️ <b>Ошибки при импорте:</b>\n"
-            for error in errors[:5]:  # Показываем только первые 5 ошибок
-                response += f"• {error}\n"
-            if len(errors) > 5:
-                response += f"... и еще {len(errors) - 5} ошибок\n"
-        
-        await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
         await state.finish()
-        
-    except Exception as e:
         await message.answer(
-            f"❌ <b>Ошибка при импорте файла!</b>\n\n"
-            f"💡 <i>{str(e)}</i>",
+            f"✅ <b>ФИЛЬТР ОБНОВЛЕН!</b>\n\n"
+            f"🔄 <b>Изменено поле:</b> {field}\n"
+            f"📝 <b>Новое значение:</b> {new_value}",
             parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в данных:</b>\n\n{str(e)}",
+            parse_mode='HTML'
         )
 
-# ========== ОБРАБОТЧИКИ УПРАВЛЕНИЯ ==========
-
-@dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
-async def cmd_list_filters(message: types.Message):
-    """Показать все фильтры пользователя"""
+# ========== УДАЛЕНИЕ ФИЛЬТРА ==========
+@dp.message_handler(lambda message: message.text == "🗑️ Удалить фильтр")
+async def cmd_delete_filter(message: types.Message):
     filters = get_user_filters(message.from_user.id)
     
     if not filters:
         await message.answer(
-            "📭 <b>У вас пока нет фильтров</b>\n\n"
-            "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
+            "📭 <b>Нет фильтров для удаления</b>",
             parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
     
-    response = "🔧 <b>ВАШИ ФИЛЬТРЫ</b>\n\n"
-    
-    for i, f in enumerate(filters, 1):
-        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-        days_until_expiry = (expiry_date - datetime.now().date()).days
-        
-        icon, status = get_status_icon_and_text(days_until_expiry)
-        
-        response += (
-            f"{icon} <b>Фильтр #{f['id']}</b>\n"
-            f"🔧 Тип: {f['filter_type']}\n"
-            f"📍 Место: {f['location']}\n"
-            f"📅 Замена: {format_date_nice(datetime.strptime(str(f['last_change']), '%Y-%m-%d').date())}\n"
-            f"⏱️ Срок: {f['lifetime_days']} дней\n"
-            f"📅 Годен до: {format_date_nice(expiry_date)}\n"
-            f"⏰ Осталось дней: {days_until_expiry}\n"
-            f"🔔 Статус: <b>{status}</b>\n\n"
-        )
-    
-    await message.answer(response, parse_mode='HTML')
+    await DeleteFilterStates.waiting_filter_selection.set()
+    await message.answer(
+        "🗑️ <b>Выберите фильтр для удаления:</b>",
+        parse_mode='HTML',
+        reply_markup=get_filters_list_keyboard(filters, "delete")
+    )
 
-@dp.message_handler(lambda message: message.text == "⏳ Сроки замены")
-async def cmd_expiry_dates(message: types.Message):
-    """Показать фильтры с истекающим сроком"""
-    filters = get_user_filters(message.from_user.id)
-    
-    if not filters:
-        await message.answer(
-            "📭 <b>У вас пока нет фильтров</b>\n\n"
-            "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard(message.from_user.id)
-        )
+@dp.message_handler(state=DeleteFilterStates.waiting_filter_selection)
+async def process_delete_filter_selection(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Главное меню":
+        await state.finish()
+        await cmd_main_menu(message)
         return
     
-    urgent_filters = []
-    warning_filters = []
-    normal_filters = []
+    filters = get_user_filters(message.from_user.id)
+    selected_filter = None
     
+    # Ищем выбранный фильтр
     for f in filters:
-        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-        days_until_expiry = (expiry_date - datetime.now().date()).days
-        
-        if days_until_expiry <= 7:
-            urgent_filters.append((f, days_until_expiry))
-        elif days_until_expiry <= 30:
-            warning_filters.append((f, days_until_expiry))
-        else:
-            normal_filters.append((f, days_until_expiry))
+        display_text = f"{get_status_icon((datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - datetime.now().date()).days)} {f['filter_type']} - {f['location']}"
+        if message.text == display_text:
+            selected_filter = f
+            break
     
-    response = "⏰ <b>СРОКИ ЗАМЕНЫ ФИЛЬТРОВ</b>\n\n"
-    
-    if urgent_filters:
-        response += "🔴 <b>СРОЧНО ЗАМЕНИТЬ (до 7 дней):</b>\n"
-        for f, days in urgent_filters:
-            response += f"• {f['filter_type']} - {f['location']} ({days} дн.)\n"
-        response += "\n"
-    
-    if warning_filters:
-        response += "🟠 <b>СКОРО ЗАМЕНИТЬ (до 30 дней):</b>\n"
-        for f, days in warning_filters:
-            response += f"• {f['filter_type']} - {f['location']} ({days} дн.)\n"
-        response += "\n"
-    
-    if normal_filters:
-        response += "✅ <b>В НОРМЕ (более 30 дней):</b>\n"
-        for f, days in normal_filters:
-            response += f"• {f['filter_type']} - {f['location']} ({days} дн.)\n"
-    
-    await message.answer(response, parse_mode='HTML')
-
-# ========== АДМИН ПАНЕЛЬ ==========
-
-@dp.message_handler(lambda message: message.text == "👑 Админ панель" and str(message.from_user.id) == str(ADMIN_ID))
-async def cmd_admin_panel(message: types.Message):
-    """Панель администратора"""
-    await message.answer(
-        "👑 <b>АДМИН ПАНЕЛЬ</b>\n\n"
-        "Выберите действие:",
-        parse_mode='HTML',
-        reply_markup=get_admin_keyboard()
-    )
-
-@dp.message_handler(lambda message: message.text == "📊 Общая статистика" and str(message.from_user.id) == str(ADMIN_ID))
-async def cmd_admin_stats(message: types.Message):
-    """Общая статистика системы"""
-    stats = get_all_users_stats()
-    
-    response = (
-        "📊 <b>ОБЩАЯ СТАТИСТИКА СИСТЕМЫ</b>\n\n"
-        f"👥 <b>Всего пользователей:</b> {stats['total_users']}\n"
-        f"🔧 <b>Всего фильтров:</b> {stats['total_filters']}\n"
-        f"🔴 <b>Просрочено фильтров:</b> {stats['expired_filters']}\n"
-        f"🟡 <b>Скоро истекает (7 дней):</b> {stats['expiring_soon']}\n"
-        f"📈 <b>Среднее на пользователя:</b> {stats['total_filters'] / max(1, stats['total_users']):.1f}"
-    )
-    
-    await message.answer(response, parse_mode='HTML')
-
-@dp.message_handler(lambda message: message.text == "👥 Пользователи" and str(message.from_user.id) == str(ADMIN_ID))
-async def cmd_admin_users(message: types.Message):
-    """Список пользователей"""
-    users = get_all_users()
-    
-    if not users:
-        await message.answer("📭 <b>Нет пользователей в системе</b>", parse_mode='HTML')
+    if not selected_filter:
+        await message.answer(
+            "❌ <b>Фильтр не найден</b>\n\nПожалуйста, выберите фильтр из списка:",
+            parse_mode='HTML',
+            reply_markup=get_filters_list_keyboard(filters, "delete")
+        )
         return
     
-    response = "👥 <b>СПИСОК ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
+    expiry_date = datetime.strptime(str(selected_filter['expiry_date']), '%Y-%m-%d').date()
+    days_left = (expiry_date - datetime.now().date()).days
     
-    for i, user in enumerate(users, 1):
-        response += f"{i}. ID: {user['user_id']} - Фильтров: {user['filter_count']}\n"
-    
-    await message.answer(response, parse_mode='HTML')
-
-@dp.message_handler(lambda message: message.text == "🗑️ Очистить базу" and str(message.from_user.id) == str(ADMIN_ID))
-async def cmd_clear_database(message: types.Message):
-    """Очистка всей базы данных"""
     await message.answer(
-        "⚠️ <b>ОПАСНОЕ ДЕЙСТВИЕ</b>\n\n"
-        "Вы уверены, что хотите очистить ВСЮ базу данных?\n\n"
-        "❌ <b>Это действие нельзя отменить!</b>\n"
-        "🗑️ <b>Будут удалены все фильтры всех пользователей</b>",
+        f"🗑️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
+        f"🔧 <b>Тип:</b> {selected_filter['filter_type']}\n"
+        f"📍 <b>Место:</b> {selected_filter['location']}\n"
+        f"📅 <b>Годен до:</b> {format_date_nice(expiry_date)}\n"
+        f"⏰ <b>Осталось дней:</b> {days_left}\n\n"
+        f"<b>Вы уверены, что хотите удалить этот фильтр?</b>",
         parse_mode='HTML',
-        reply_markup=get_confirmation_keyboard(action="clear_db")
+        reply_markup=get_confirmation_keyboard(selected_filter['id'])
     )
-
-# ========== ОБРАБОТЧИКИ CALLBACK-ЗАПРОСОВ ==========
+    await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_'))
 async def process_confirm_delete(callback_query: types.CallbackQuery):
-    """Подтверждение удаления фильтра"""
     filter_id = int(callback_query.data.split('_')[-1])
     
     with get_db_connection() as conn:
@@ -1268,63 +824,276 @@ async def process_confirm_delete(callback_query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == 'cancel_delete')
 async def process_cancel_delete(callback_query: types.CallbackQuery):
-    """Отмена удаления фильтра"""
     await callback_query.message.edit_text(
-        "🚫 <b>Удаление отменено</b>",
+        "❌ <b>Удаление отменено</b>",
         parse_mode='HTML'
     )
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == 'confirm_clear_db')
-async def process_confirm_clear_db(callback_query: types.CallbackQuery):
-    """Подтверждение очистки базы данных"""
-    if str(callback_query.from_user.id) != str(ADMIN_ID):
-        await callback_query.answer("❌ Недостаточно прав", show_alert=True)
+# ========== СТАТИСТИКА ==========
+@dp.message_handler(lambda message: message.text == "📈 Статистика")
+async def cmd_statistics(message: types.Message):
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>Нет данных для статистики</b>\n\nДобавьте фильтры для просмотра статистики",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
         return
     
-    deleted_count = clear_all_filters()
+    stats_message = create_statistics_message(filters)
+    await message.answer(stats_message, parse_mode='HTML')
+
+# ========== ПРОСМОТР ФИЛЬТРОВ ==========
+@dp.message_handler(lambda message: message.text == "📊 Мои фильтры")
+async def cmd_list_filters(message: types.Message):
+    filters = get_user_filters(message.from_user.id)
     
-    await callback_query.message.edit_text(
-        f"✅ <b>База данных очищена</b>\n\n"
-        f"🗑️ Удалено записей: {deleted_count}",
-        parse_mode='HTML'
-    )
-    await callback_query.answer()
-
-@dp.callback_query_handler(lambda c: c.data == 'cancel_clear_db')
-async def process_cancel_clear_db(callback_query: types.CallbackQuery):
-    """Отмена очистки базы данных"""
-    await callback_query.message.edit_text(
-        "🚫 <b>Очистка базы отменена</b>",
-        parse_mode='HTML'
-    )
-    await callback_query.answer()
-
-# ========== ОБРАБОТКА ОТМЕНЫ ==========
-
-@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
-async def cmd_cancel(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
+            "💫 Добавьте первый фильтр с помощью кнопки '➕ Добавить фильтр'",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
         return
     
-    await state.finish()
-    await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard(message.from_user.id))
+    response = "🔧 <b>ВАШИ ФИЛЬТРЫ</b>\n\n"
+    
+    for i, f in enumerate(filters, 1):
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - datetime.now().date()).days
+        
+        icon = get_status_icon(days_until_expiry)
+        
+        response += (
+            f"{icon} <b>Фильтр #{f['id']}</b>\n"
+            f"🔧 {f['filter_type']}\n"
+            f"📍 {f['location']}\n"
+            f"📅 Замена: {format_date_nice(datetime.strptime(str(f['last_change']), '%Y-%m-%d').date())}\n"
+            f"⏱️ Срок: {f['lifetime_days']} дней\n"
+            f"📅 Годен до: {format_date_nice(expiry_date)}\n"
+            f"⏰ Осталось: {days_until_expiry} дней\n\n"
+        )
+    
+    await message.answer(response, parse_mode='HTML')
 
-# ========== ОБРАБОТКА ДРУГИХ СООБЩЕНИЙ ==========
+@dp.message_handler(lambda message: message.text == "⏰ Сроки замены")
+async def cmd_expiry_dates(message: types.Message):
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    urgent_filters = []
+    warning_filters = []
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - datetime.now().date()).days
+        
+        if days_until_expiry <= 7:
+            urgent_filters.append((f, days_until_expiry))
+        elif days_until_expiry <= 30:
+            warning_filters.append((f, days_until_expiry))
+    
+    response = "⏰ <b>СРОКИ ЗАМЕНЫ ФИЛЬТРОВ</b>\n\n"
+    
+    if urgent_filters:
+        response += "🔴 <b>СРОЧНО ЗАМЕНИТЬ (до 7 дней):</b>\n"
+        for f, days in urgent_filters:
+            response += f"• {f['filter_type']} - {f['location']} ({days} дн.)\n"
+        response += "\n"
+    
+    if warning_filters:
+        response += "🟠 <b>СКОРО ЗАМЕНИТЬ (до 30 дней):</b>\n"
+        for f, days in warning_filters:
+            response += f"• {f['filter_type']} - {f['location']} ({days} дн.)\n"
+    
+    if not urgent_filters and not warning_filters:
+        response += "✅ <b>Все фильтры в норме</b>\n\nСледующая замена более чем через 30 дней"
+    
+    await message.answer(response, parse_mode='HTML')
 
-@dp.message_handler()
-async def handle_other_messages(message: types.Message):
+# ========== EXCEL ФУНКЦИОНАЛ ==========
+@dp.message_handler(lambda message: message.text == "📤 Экспорт Excel")
+async def cmd_export_excel(message: types.Message):
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>Нет фильтров для экспорта</b>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    try:
+        # Создаем DataFrame
+        data = []
+        for f in filters:
+            expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+            days_left = (expiry_date - datetime.now().date()).days
+            
+            data.append({
+                'ID': f['id'],
+                'Тип фильтра': f['filter_type'],
+                'Место установки': f['location'],
+                'Дата замены': f['last_change'],
+                'Срок службы (дни)': f['lifetime_days'],
+                'Годен до': f['expiry_date'],
+                'Осталось дней': days_left,
+                'Статус': 'Срочно заменить' if days_left <= 7 else 'Скоро заменить' if days_left <= 30 else 'В норме'
+            })
+        
+        df = pd.DataFrame(data)
+        
+        # Создаем файл
+        filename = f"filters_export_{message.from_user.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        os.makedirs('exports', exist_ok=True)
+        filepath = os.path.join('exports', filename)
+        
+        df.to_excel(filepath, index=False, engine='openpyxl')
+        
+        # Отправляем файл
+        with open(filepath, 'rb') as file:
+            await message.answer_document(
+                file,
+                caption="📤 <b>ЭКСПОРТ ФИЛЬТРОВ</b>\n\n"
+                       f"✅ Экспортировано: {len(filters)} фильтров\n"
+                       f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                parse_mode='HTML'
+            )
+        
+        # Удаляем временный файл
+        try:
+            os.remove(filepath)
+        except:
+            pass
+            
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>Ошибка при экспорте:</b>\n\n{str(e)}",
+            parse_mode='HTML'
+        )
+
+@dp.message_handler(lambda message: message.text == "📥 Импорт Excel")
+async def cmd_import_excel(message: types.Message):
+    await ExcelStates.waiting_excel_file.set()
     await message.answer(
-        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
-        "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
+        "📥 <b>ИМПОРТ ИЗ EXCEL</b>\n\n"
+        "📎 <b>Отправьте Excel файл со следующими колонками:</b>\n"
+        "• Тип фильтра\n"
+        "• Место установки\n"
+        "• Дата замены (ДД.ММ.ГГГГ)\n"
+        "• Срок службы (дни)\n\n"
+        "💡 <i>Файл должен быть в формате .xlsx</i>",
         parse_mode='HTML',
-        reply_markup=get_main_keyboard(message.from_user.id)
+        reply_markup=get_cancel_keyboard()
     )
+
+@dp.message_handler(content_types=types.ContentType.DOCUMENT, state=ExcelStates.waiting_excel_file)
+async def process_excel_file(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Импорт отменен", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    try:
+        if not message.document.file_name.endswith(('.xlsx', '.xls')):
+            await message.answer("❌ Поддерживаются только файлы Excel (.xlsx, .xls)")
+            return
+        
+        # Скачиваем файл
+        file_info = await bot.get_file(message.document.file_id)
+        downloaded_file = await bot.download_file(file_info.file_path)
+        
+        # Сохраняем временный файл
+        temp_file = f"temp_import_{message.from_user.id}.xlsx"
+        with open(temp_file, 'wb') as file:
+            file.write(downloaded_file.getvalue())
+        
+        # Читаем Excel
+        df = pd.read_excel(temp_file)
+        required_columns = ['Тип фильтра', 'Место установки', 'Дата замены']
+        
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Отсутствует колонка: {col}")
+        
+        imported_count = 0
+        errors = []
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            for index, row in df.iterrows():
+                try:
+                    filter_type = safe_db_string(str(row['Тип фильтра']))
+                    location = safe_db_string(str(row['Место установки']))
+                    
+                    if isinstance(row['Дата замены'], str):
+                        last_change = validate_date(row['Дата замены'])
+                    else:
+                        last_change = row['Дата замены'].date()
+                    
+                    if pd.isna(row.get('Срок службы (дни)', pd.NA)):
+                        lifetime_days = get_lifetime_by_type(filter_type)
+                    else:
+                        lifetime_days = int(row['Срок службы (дни)'])
+                    
+                    # Проверяем лимит
+                    current_filters = len(get_user_filters(message.from_user.id))
+                    if current_filters >= MAX_FILTERS_PER_USER:
+                        errors.append(f"Достигнут лимит фильтров")
+                        break
+                    
+                    expiry_date = last_change + timedelta(days=lifetime_days)
+                    
+                    cur.execute('''INSERT INTO filters 
+                                (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                                VALUES (?, ?, ?, ?, ?, ?)''',
+                                (message.from_user.id, filter_type, location, last_change, expiry_date, lifetime_days))
+                    
+                    imported_count += 1
+                    
+                except Exception as e:
+                    errors.append(f"Строка {index + 2}: {str(e)}")
+            
+            conn.commit()
+        
+        # Удаляем временный файл
+        try:
+            os.remove(temp_file)
+        except:
+            pass
+        
+        response = f"✅ <b>ИМПОРТ ЗАВЕРШЕН</b>\n\n📦 Импортировано: {imported_count} фильтров\n"
+        if errors:
+            response += f"\n⚠️ Ошибки: {len(errors)}\n"
+            for error in errors[:3]:
+                response += f"• {error}\n"
+        
+        await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+        await state.finish()
+        
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>Ошибка импорта:</b>\n\n{str(e)}",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
 
 # ========== ФОНОВЫЕ ЗАДАЧИ ==========
 async def check_expired_filters():
-    """Фоновая задача для проверки просроченных фильтров"""
+    """Проверка просроченных фильтров"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -1340,12 +1109,12 @@ async def check_expired_filters():
                 
                 await bot.send_message(
                     user_id,
-                    f"🔔 <b>Напоминание о замене фильтра</b>\n\n"
+                    f"🔔 <b>НАПОМИНАНИЕ О ЗАМЕНЕ</b>\n\n"
                     f"🔧 {filter_type}\n"
                     f"📍 {location}\n"
                     f"📅 Срок истекает: {expiry_date_nice}\n"
                     f"⏳ Осталось дней: {days_until_expiry}\n\n"
-                    f"⚠️ <i>Рекомендуется заменить в ближайшее время</i>",
+                    f"⚠️ Рекомендуется заменить в ближайшее время",
                     parse_mode='HTML'
                 )
                 await asyncio.sleep(0.1)
@@ -1353,35 +1122,24 @@ async def check_expired_filters():
                 logging.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
                     
     except Exception as e:
-        logging.error(f"Ошибка при проверке просроченных фильтров: {e}")
+        logging.error(f"Ошибка при проверке фильтров: {e}")
 
 async def schedule_daily_check():
-    """Планировщик ежедневных проверок"""
+    """Ежедневная проверка"""
     while True:
         try:
             await check_expired_filters()
-            await asyncio.sleep(60 * 60)  # Ждем 1 час
+            await asyncio.sleep(3600)  # Каждый час
         except Exception as e:
             logging.error(f"Ошибка в фоновой задаче: {e}")
             await asyncio.sleep(300)
 
 async def on_startup(dp):
-    """Действия при запуске бота"""
+    """Запуск бота"""
     logging.info("Бот запущен")
+    init_db()
     asyncio.create_task(schedule_daily_check())
 
 # Запуск бота
 if __name__ == '__main__':
-    # Проверка обязательных переменных
-    if not API_TOKEN:
-        logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
-        exit(1)
-    
-    init_db()
-    
-    # Запуск с обработчиком startup
-    executor.start_polling(
-        dp, 
-        skip_updates=True,
-        on_startup=on_startup
-    )
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
