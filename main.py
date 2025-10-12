@@ -5,6 +5,7 @@ import asyncio
 import shutil
 import traceback
 import re
+import sys
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from aiogram import Bot, Dispatcher, types
@@ -26,6 +27,16 @@ if not API_TOKEN:
     logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
     exit(1)
 
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
 # Стандартные сроки службы фильтров
 DEFAULT_LIFETIMES = {
     "магистральный sl10": 180,
@@ -38,8 +49,10 @@ DEFAULT_LIFETIMES = {
     "кристалл": 365
 }
 
+# Ограничения
+MAX_FILTERS_PER_USER = 50
+
 # Инициализация бота
-logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
@@ -58,6 +71,12 @@ def get_db_connection():
     finally:
         conn.close()
 
+def safe_db_string(value: str) -> str:
+    """Очистка строки для безопасного использования в БД"""
+    if not value:
+        return ""
+    return re.sub(r'[;\'"\\]', '', value.strip())
+
 def get_user_filters(user_id):
     """Безопасное получение фильтров пользователя"""
     with get_db_connection() as conn:
@@ -65,22 +84,27 @@ def get_user_filters(user_id):
         cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
         return [dict(row) for row in cur.fetchall()]
 
+def check_filters_limit(user_id):
+    """Проверка лимита фильтров"""
+    filters = get_user_filters(user_id)
+    return len(filters) >= MAX_FILTERS_PER_USER
+
 # ========== УЛУЧШЕНИЯ: ВАЛИДАЦИЯ ВВОДА ==========
 def validate_date(date_str: str):
     """Валидация даты с улучшенной обработкой ошибок"""
     date_str = date_str.strip()
     
-    # Убираем лишние символы
-    date_str = re.sub(r'[^\d\.\-]', '', date_str)
+    # Убираем лишние символы, но оставляем точки, дефисы и слэши
+    date_str = re.sub(r'[^\d\.\-/]', '', date_str)
     
-    formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y']
+    formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y', '%d/%m/%y', '%d/%m/%Y']
     
     for fmt in formats:
         try:
             date_obj = datetime.strptime(date_str, fmt).date()
+            today = datetime.now().date()
             
             # Проверяем что дата не в будущем (максимум +1 день для запаса)
-            today = datetime.now().date()
             if date_obj > today + timedelta(days=1):
                 raise ValueError("Дата не может быть в будущем")
                 
@@ -113,9 +137,10 @@ def validate_filter_name(name: str):
         raise ValueError("Название фильтра не может быть пустым")
     if len(name) > 100:
         raise ValueError("Название фильтра слишком длинное")
+    # Разрешаем буквы, цифры, пробелы, дефисы и точки
     if re.search(r'[^\w\s\-\.]', name, re.UNICODE):
         raise ValueError("Название содержит запрещенные символы")
-    return name
+    return safe_db_string(name)
 
 # ========== УЛУЧШЕНИЯ: КЛАВИАТУРЫ ДЛЯ МНОЖЕСТВЕННОГО ДОБАВЛЕНИЯ ==========
 def get_multiple_filters_keyboard():
@@ -180,7 +205,7 @@ def get_add_filter_keyboard():
     keyboard.row(types.KeyboardButton("🔙 Главное меню"))
     return keyboard
 
-# ========== СУЩЕСТВУЮЩИЕ КЛАВИАТУРЫ (остаются без изменений) ==========
+# ========== СУЩЕСТВУЮЩИЕ КЛАВИАТУРЫ ==========
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row(
@@ -278,30 +303,63 @@ def get_reset_confirmation_keyboard():
     )
     return keyboard
 
-# Инициализация БД
+# ========== УЛУЧШЕНИЯ: ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 def init_db():
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute('''CREATE TABLE IF NOT EXISTS filters (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    filter_type TEXT,
-                    location TEXT,
-                    last_change DATE,
-                    expiry_date DATE,
-                    lifetime_days INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    """Безопасная инициализация базы данных"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute('''CREATE TABLE IF NOT EXISTS filters (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        filter_type TEXT,
+                        location TEXT,
+                        last_change DATE,
+                        expiry_date DATE,
+                        lifetime_days INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
+            # Индексы для ускорения запросов
+            cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
+            cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка инициализации БД: {e}")
+        # Создаем резервную копию при ошибке
+        if os.path.exists('filters.db'):
+            backup_name = f'filters_backup_error_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+            os.rename('filters.db', backup_name)
+            logging.info(f"Создана резервная копия при ошибке: {backup_name}")
         
-        # Индексы для ускорения запросов
-        cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
-        cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
-        conn.commit()
+        # Повторная попытка создания БД
+        try:
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('''CREATE TABLE IF NOT EXISTS filters (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER,
+                            filter_type TEXT,
+                            location TEXT,
+                            last_change DATE,
+                            expiry_date DATE,
+                            lifetime_days INTEGER,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                conn.commit()
+                logging.info("База данных успешно создана после ошибки")
+        except Exception as e2:
+            logging.error(f"Критическая ошибка при создании БД: {e2}")
+            raise
 
 # Функция резервного копирования базы данных
 def backup_database():
     """Создание резервной копии базы данных"""
     try:
+        if not os.path.exists('filters.db'):
+            logging.warning("База данных не найдена для резервного копирования")
+            return
+            
         backup_dir = "backups"
         os.makedirs(backup_dir, exist_ok=True)
         
@@ -314,7 +372,8 @@ def backup_database():
         # Удаляем старые резервные копии (оставляем последние 7)
         backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup")])
         for old_backup in backups[:-7]:
-            os.remove(os.path.join(backup_dir, old_backup))
+            old_backup_path = os.path.join(backup_dir, old_backup)
+            os.remove(old_backup_path)
             logging.info(f"Удалена старая резервная копия: {old_backup}")
             
     except Exception as e:
@@ -456,10 +515,12 @@ async def schedule_daily_check():
         try:
             await check_expired_filters()
             # Создаем резервную копию раз в день в 3:00
-            if datetime.now().hour == 3:
+            if datetime.now().hour == 3 and datetime.now().minute == 0:
                 backup_database()
+                await asyncio.sleep(60)  # Ждем минуту чтобы не повторять
         except Exception as e:
             logging.error(f"Ошибка в фоновой задаче: {e}")
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
         
         # Ожидаем 1 час до следующей проверки
         await asyncio.sleep(60 * 60)
@@ -509,6 +570,14 @@ async def cmd_back(message: types.Message):
         reply_markup=get_main_keyboard()
     )
 
+# Обработка кнопки "Назад"
+@dp.message_handler(lambda message: message.text == "↩️ Назад")
+async def cmd_back_simple(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        await state.finish()
+    await message.answer("↩️ Возврат в главное меню", reply_markup=get_main_keyboard())
+
 # Обработка кнопки "Управление"
 @dp.message_handler(lambda message: message.text == "⚙️ Управление")
 async def cmd_management(message: types.Message):
@@ -523,6 +592,17 @@ async def cmd_management(message: types.Message):
 @dp.message_handler(lambda message: message.text == "✨ Добавить фильтр")
 @dp.message_handler(commands=['add'])
 async def cmd_add(message: types.Message):
+    # Проверяем лимит фильтров
+    if check_filters_limit(message.from_user.id):
+        await message.answer(
+            f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
+            f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
+            f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return
+        
     await message.answer(
         "🔧 <b>Выберите тип добавления:</b>\n\n"
         "💡 <i>Можно добавить один фильтр или сразу несколько</i>",
@@ -603,6 +683,20 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
             await message.answer(
                 "❌ <b>Список фильтров пуст!</b>\n\n"
                 "💡 <i>Добавьте хотя бы один фильтр перед завершением</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+            return
+        
+        # Проверяем общий лимит фильтров
+        current_filters_count = len(get_user_filters(message.from_user.id))
+        if current_filters_count + len(data['selected_filters']) > MAX_FILTERS_PER_USER:
+            await message.answer(
+                f"❌ <b>Превышен лимит фильтров!</b>\n\n"
+                f"📊 <i>Текущее количество: {current_filters_count}</i>\n"
+                f"📦 <i>Пытаетесь добавить: {len(data['selected_filters'])}</i>\n"
+                f"💡 <i>Максимум: {MAX_FILTERS_PER_USER}</i>\n\n"
+                f"🔄 <i>Удалите некоторые фильтры или уменьшите список</i>",
                 parse_mode='HTML',
                 reply_markup=get_multiple_filters_keyboard()
             )
@@ -752,7 +846,7 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
         reply_markup=get_multiple_filters_keyboard()
     )
 
-# ========== СУЩЕСТВУЮЩИЕ ОБРАБОТЧИКИ (с улучшенной безопасностью) ==========
+# ========== ОБРАБОТЧИКИ С УЛУЧШЕННОЙ БЕЗОПАСНОСТЬЮ ==========
 
 # Добавление одного фильтра
 @dp.message_handler(state=FilterStates.waiting_filter_type)
@@ -812,10 +906,10 @@ async def process_location(message: types.Message, state: FSMContext):
     
     current_state = await state.get_state()
     
-    if current_state == "FilterStates:waiting_location":
+    if current_state == FilterStates.waiting_location.state:
         # Для одного фильтра
         async with state.proxy() as data:
-            data['location'] = message.text
+            data['location'] = safe_db_string(message.text)
 
         await FilterStates.next()
         today_nice = format_date_nice(datetime.now().date())
@@ -831,7 +925,7 @@ async def process_location(message: types.Message, state: FSMContext):
     else:
         # Для нескольких фильтров
         async with state.proxy() as data:
-            data['location'] = message.text
+            data['location'] = safe_db_string(message.text)
 
         await MultipleFiltersStates.next()
         today_nice = format_date_nice(datetime.now().date())
@@ -858,7 +952,7 @@ async def process_date(message: types.Message, state: FSMContext):
         
         current_state = await state.get_state()
         
-        if current_state == "FilterStates:waiting_change_date":
+        if current_state == FilterStates.waiting_change_date.state:
             # Для одного фильтра
             async with state.proxy() as data:
                 data['change_date'] = change_date
@@ -875,6 +969,9 @@ async def process_date(message: types.Message, state: FSMContext):
             # Для нескольких фильтров
             async with state.proxy() as data:
                 data['change_date'] = change_date
+                # Устанавливаем значение по умолчанию для lifetime
+                if 'lifetime' not in data:
+                    data['lifetime'] = 180
                 
             await MultipleFiltersStates.next()
             await message.answer(
@@ -907,7 +1004,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
     try:
         current_state = await state.get_state()
         
-        if current_state == "FilterStates:waiting_lifetime":
+        if current_state == FilterStates.waiting_lifetime.state:
             # Для одного фильтра
             async with state.proxy() as data:
                 change_date = data['change_date']
@@ -934,7 +1031,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                     cur.execute('''INSERT INTO filters 
                                 (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
                                 VALUES (?, ?, ?, ?, ?, ?)''',
-                               (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                               (message.from_user.id, safe_db_string(filter_type), safe_db_string(location), change_date, expiry_date, lifetime))
                     conn.commit()
 
                 days_until_expiry = (expiry_date - datetime.now().date()).days
@@ -990,7 +1087,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
                         cur.execute('''INSERT INTO filters 
                                     (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
                                     VALUES (?, ?, ?, ?, ?, ?)''',
-                                   (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                                   (message.from_user.id, safe_db_string(filter_type), safe_db_string(location), change_date, expiry_date, lifetime))
                         added_count += 1
                         
                         days_until_expiry = (expiry_date - datetime.now().date()).days
@@ -1033,8 +1130,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             reply_markup=get_lifetime_keyboard()
         )
 
-# Остальные обработчики остаются без изменений, но используют улучшенные функции
-# Список фильтров
+# Остальные обработчики с улучшенной безопасностью
 @dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
 @dp.message_handler(commands=['list'])
 async def cmd_list(message: types.Message):
@@ -1049,4 +1145,113 @@ async def cmd_list(message: types.Message):
         )
         return
 
-    resp
+    response = "📋 <b>ВАШИ ФИЛЬТРЫ</b>\n\n"
+    today = datetime.now().date()
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        status_icon, status_text = get_status_icon_and_text(days_until_expiry)
+        
+        last_change_nice = format_date_nice(datetime.strptime(str(f['last_change']), '%Y-%m-%d').date())
+        expiry_date_nice = format_date_nice(expiry_date)
+        
+        response += (
+            f"{status_icon} <b>ФИЛЬТР #{f['id']}</b>\n"
+            f"   🔧 {f['filter_type']}\n"
+            f"   📍 {f['location']}\n"
+            f"   📅 Заменен: {last_change_nice}\n"
+            f"   ⏱️ Срок: {f['lifetime_days']} дн.\n"
+            f"   🗓️ Годен до: {expiry_date_nice}\n"
+            f"   ⏳ Осталось: {days_until_expiry} дн.\n"
+            f"   📊 Статус: {status_text}\n\n"
+        )
+
+    await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
+
+# Проверка сроков
+@dp.message_handler(lambda message: message.text == "⏳ Сроки замены")
+@dp.message_handler(commands=['check'])
+async def cmd_check(message: types.Message):
+    filters = get_user_filters(message.from_user.id)
+
+    if not filters:
+        await message.answer(
+            "📭 <b>Нет фильтров для проверки</b>\n\n"
+            "💫 <i>Добавьте фильтры для отслеживания сроков</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    today = datetime.now().date()
+    expired_filters = []
+    expiring_soon = []
+    warning_filters = []
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        expiry_date_nice = format_date_nice(expiry_date)
+        
+        if days_until_expiry <= 0:
+            expired_filters.append(f"🔴 {f['filter_type']} ({f['location']}) - просрочен {abs(days_until_expiry)} дн. назад (до {expiry_date_nice})")
+        elif days_until_expiry <= 7:
+            expiring_soon.append(f"🟡 {f['filter_type']} ({f['location']}) - осталось {days_until_expiry} дн. (до {expiry_date_nice})")
+        elif days_until_expiry <= 30:
+            warning_filters.append(f"🟠 {f['filter_type']} ({f['location']}) - осталось {days_until_expiry} дн. (до {expiry_date_nice})")
+
+    response = "⏳ <b>КОНТРОЛЬ СРОКОВ</b>\n\n"
+    
+    if expired_filters:
+        response += "🚨 <b>ПРОСРОЧЕНЫ:</b>\n" + "\n".join(expired_filters) + "\n\n"
+    
+    if expiring_soon:
+        response += "⚠️ <b>СРОЧНО ИСТЕКАЮТ:</b>\n" + "\n".join(expiring_soon) + "\n\n"
+    
+    if warning_filters:
+        response += "🔔 <b>СКОРО ИСТЕКАЮТ:</b>\n" + "\n".join(warning_filters) + "\n\n"
+    
+    if not expired_filters and not expiring_soon and not warning_filters:
+        response += "✅ <b>ВСЕ ФИЛЬТРЫ В НОРМЕ!</b>\n\n"
+        response += "💫 <i>Следующая проверка через 30+ дней</i>"
+
+    await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard())
+
+# Обработка отмены
+@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    
+    await state.finish()
+    await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard())
+
+# Обработка других сообщений
+@dp.message_handler()
+async def handle_other_messages(message: types.Message):
+    await message.answer(
+        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
+        "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+
+# Запуск бота
+if __name__ == '__main__':
+    # Проверка обязательных переменных
+    if not API_TOKEN:
+        logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        exit(1)
+    
+    init_db()
+    
+    # Запуск с обработчиком startup
+    executor.start_polling(
+        dp, 
+        skip_updates=True,
+        on_startup=on_startup
+    )
