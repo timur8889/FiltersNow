@@ -432,14 +432,14 @@ async def cancel_handler(message: types.Message, state: FSMContext):
         reply_markup=get_main_keyboard()
     )
 
-# Мидлварь для проверки ограничения запросов
+# Мидлварь для проверки ограничения запросов (исправленная версия для aiogram 2.x)
 @dp.middleware_handler()
 async def rate_limit_middleware(handler, event, data):
     """Мидлварь для ограничения запросов"""
     if hasattr(event, 'from_user') and event.from_user:
         user_id = event.from_user.id
         if is_rate_limited(user_id):
-            if hasattr(event, 'message'):
+            if hasattr(event, 'message') and event.message:
                 await safe_send_message(event.message.chat.id, "⚠️ Слишком много запросов. Подождите немного.")
             return
     return await handler(event, data)
@@ -1673,6 +1673,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 @dp.message_handler()
 async def handle_other_messages(message: types.Message):
     if is_rate_limited(message.from_user.id):
+        await safe_send_message(message.chat.id, "⚠️ Слишком много запросов. Подождите немного.")
         return
         
     await safe_send_message(
@@ -1688,7 +1689,7 @@ if __name__ == '__main__':
     init_db()
     
     # Запуск с обработчиком startup
-    executor.start_polling(
+    executor.start_pooling(
         dp, 
         skip_updates=True,
         on_startup=on_startup
