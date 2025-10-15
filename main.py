@@ -6,9 +6,8 @@ import asyncio
 import aiohttp
 from datetime import datetime, timedelta
 from telegram import Update, ChatPermissions
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.utils.helpers import escape_markdown
 
 # Настройка логирования
 logging.basicConfig(
@@ -268,7 +267,7 @@ class MiniGames:
     def __init__(self, economy_system: EconomySystem):
         self.economy = economy_system
     
-    async def coin_flip(self, user_id: int, username: str, bet: int, choice: str) -> dict:
+    def coin_flip(self, user_id: int, username: str, bet: int, choice: str) -> dict:
         """Игра в орлянку"""
         try:
             if bet <= 0:
@@ -360,7 +359,9 @@ class SuperGroupBot:
         self.api_system = ExternalAPIs()
         
         # Инициализация бота
-        self.application = Application.builder().token(token).build()
+        self.updater = Updater(token=token, use_context=True)
+        self.dispatcher = self.updater.dispatcher
+        
         self.setup_handlers()
         
         logger.info("🤖 Супер-бот инициализирован!")
@@ -369,37 +370,37 @@ class SuperGroupBot:
         """Настройка всех обработчиков команд"""
         
         # Основные команды
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CommandHandler("rules", self.rules_command))
+        self.dispatcher.add_handler(CommandHandler("start", self.start_command))
+        self.dispatcher.add_handler(CommandHandler("help", self.help_command))
+        self.dispatcher.add_handler(CommandHandler("rules", self.rules_command))
         
         # Команды кармы
-        self.application.add_handler(CommandHandler("karma", self.karma_command))
-        self.application.add_handler(CommandHandler("thank", self.thank_command))
-        self.application.add_handler(CommandHandler("top", self.top_command))
+        self.dispatcher.add_handler(CommandHandler("karma", self.karma_command))
+        self.dispatcher.add_handler(CommandHandler("thank", self.thank_command))
+        self.dispatcher.add_handler(CommandHandler("top", self.top_command))
         
         # Команды экономики
-        self.application.add_handler(CommandHandler("balance", self.balance_command))
-        self.application.add_handler(CommandHandler("transfer", self.transfer_command))
-        self.application.add_handler(CommandHandler("daily", self.daily_command))
+        self.dispatcher.add_handler(CommandHandler("balance", self.balance_command))
+        self.dispatcher.add_handler(CommandHandler("transfer", self.transfer_command))
+        self.dispatcher.add_handler(CommandHandler("daily", self.daily_command))
         
         # Команды игр
-        self.application.add_handler(CommandHandler("coinflip", self.coin_flip_command))
+        self.dispatcher.add_handler(CommandHandler("coinflip", self.coin_flip_command))
         
         # Команды API
-        self.application.add_handler(CommandHandler("weather", self.weather_command))
-        self.application.add_handler(CommandHandler("exchange", self.exchange_command))
+        self.dispatcher.add_handler(CommandHandler("weather", self.weather_command))
+        self.dispatcher.add_handler(CommandHandler("exchange", self.exchange_command))
         
         # Обработчики сообщений
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        self.application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, self.welcome_new_members))
-        self.application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, self.goodbye_member))
+        self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self.handle_message))
+        self.dispatcher.add_handler(MessageHandler(Filters.status_update.new_chat_members, self.welcome_new_members))
+        self.dispatcher.add_handler(MessageHandler(Filters.status_update.left_chat_member, self.goodbye_member))
         
         # Обработчик ошибок
-        self.application.add_error_handler(self.error_handler)
+        self.dispatcher.add_error_handler(self.error_handler)
     
     # ========== ОСНОВНЫЕ КОМАНДЫ ==========
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def start_command(self, update: Update, context: CallbackContext):
         """Команда /start"""
         try:
             user = update.effective_user
@@ -416,13 +417,13 @@ class SuperGroupBot:
 
 📋 Используйте /help для списка всех команд
             """
-            await update.message.reply_text(welcome_text)
+            update.message.reply_text(welcome_text)
             logger.info(f"Пользователь {user.id} запустил бота")
         except Exception as e:
             logger.error(f"Ошибка в start_command: {e}")
-            await update.message.reply_text("❌ Произошла ошибка!")
+            update.message.reply_text("❌ Произошла ошибка!")
 
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def help_command(self, update: Update, context: CallbackContext):
         """Команда /help"""
         try:
             help_text = """
@@ -453,12 +454,12 @@ class SuperGroupBot:
 ⚡ **Для админов:**
 /warn @username - Выдать предупреждение
             """
-            await update.message.reply_text(help_text)
+            update.message.reply_text(help_text)
         except Exception as e:
             logger.error(f"Ошибка в help_command: {e}")
-            await update.message.reply_text("❌ Произошла ошибка!")
+            update.message.reply_text("❌ Произошла ошибка!")
 
-    async def rules_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def rules_command(self, update: Update, context: CallbackContext):
         """Команда /rules"""
         try:
             rules_text = """
@@ -472,30 +473,30 @@ class SuperGroupBot:
 
 ⚠️ Нарушение правил ведет к предупреждениям, муту или бану.
             """
-            await update.message.reply_text(rules_text)
+            update.message.reply_text(rules_text)
         except Exception as e:
             logger.error(f"Ошибка в rules_command: {e}")
-            await update.message.reply_text("❌ Произошла ошибка!")
+            update.message.reply_text("❌ Произошла ошибка!")
 
     # ========== КОМАНДЫ КАРМЫ ==========
-    async def karma_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def karma_command(self, update: Update, context: CallbackContext):
         """Команда /karma - показать карму"""
         try:
             user = update.effective_user
             karma = self.karma_system.get_karma(user.id)
             
-            await update.message.reply_text(
+            update.message.reply_text(
                 f"⭐ {user.first_name}, ваша карма: {karma} очков"
             )
         except Exception as e:
             logger.error(f"Ошибка в karma_command: {e}")
-            await update.message.reply_text("❌ Ошибка получения кармы!")
+            update.message.reply_text("❌ Ошибка получения кармы!")
 
-    async def thank_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def thank_command(self, update: Update, context: CallbackContext):
         """Команда /thank - поблагодарить пользователя"""
         try:
             if not context.args:
-                await update.message.reply_text("❌ Укажите пользователя: /thank @username")
+                update.message.reply_text("❌ Укажите пользователя: /thank @username")
                 return
             
             target_username = context.args[0].replace('@', '')
@@ -506,60 +507,60 @@ class SuperGroupBot:
             target_user_id = hash(target_username) % 1000000  # Фиктивный ID
             
             if self.karma_system.add_karma(target_user_id, target_username, from_user.id):
-                await update.message.reply_text(
+                update.message.reply_text(
                     f"⭐ Вы поблагодарили @{target_username}! Карма увеличена."
                 )
             else:
-                await update.message.reply_text("❌ Ошибка при добавлении кармы!")
+                update.message.reply_text("❌ Ошибка при добавлении кармы!")
                 
         except Exception as e:
             logger.error(f"Ошибка в thank_command: {e}")
-            await update.message.reply_text("❌ Ошибка при добавлении кармы!")
+            update.message.reply_text("❌ Ошибка при добавлении кармы!")
 
-    async def top_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def top_command(self, update: Update, context: CallbackContext):
         """Команда /top - топ пользователей по карме"""
         try:
             top_users = self.karma_system.get_top_users(10)
             
             if not top_users:
-                await update.message.reply_text("📊 Пока нет данных о карме!")
+                update.message.reply_text("📊 Пока нет данных о карме!")
                 return
             
             top_text = "🏆 **Топ пользователей по карме:**\n\n"
             for i, (username, karma) in enumerate(top_users, 1):
                 top_text += f"{i}. @{username}: {karma} ⭐\n"
             
-            await update.message.reply_text(top_text)
+            update.message.reply_text(top_text)
         except Exception as e:
             logger.error(f"Ошибка в top_command: {e}")
-            await update.message.reply_text("❌ Ошибка получения топа!")
+            update.message.reply_text("❌ Ошибка получения топа!")
 
     # ========== КОМАНДЫ ЭКОНОМИКИ ==========
-    async def balance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def balance_command(self, update: Update, context: CallbackContext):
         """Команда /balance - показать баланс"""
         try:
             user = update.effective_user
             balance = self.economy_system.get_balance(user.id, user.username or user.first_name)
             
-            await update.message.reply_text(
+            update.message.reply_text(
                 f"💰 {user.first_name}, ваш баланс: {balance} монет"
             )
         except Exception as e:
             logger.error(f"Ошибка в balance_command: {e}")
-            await update.message.reply_text("❌ Ошибка получения баланса!")
+            update.message.reply_text("❌ Ошибка получения баланса!")
 
-    async def transfer_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def transfer_command(self, update: Update, context: CallbackContext):
         """Команда /transfer - перевести деньги"""
         try:
             if len(context.args) < 2:
-                await update.message.reply_text("❌ Использование: /transfer @username сумма")
+                update.message.reply_text("❌ Использование: /transfer @username сумма")
                 return
             
             target_username = context.args[0].replace('@', '')
             amount = int(context.args[1])
             
             if amount <= 0:
-                await update.message.reply_text("❌ Сумма должна быть положительной!")
+                update.message.reply_text("❌ Сумма должна быть положительной!")
                 return
             
             from_user = update.effective_user
@@ -567,88 +568,93 @@ class SuperGroupBot:
             target_user_id = hash(target_username) % 1000000
             
             if self.economy_system.transfer_money(from_user.id, target_user_id, amount, target_username):
-                await update.message.reply_text(
+                update.message.reply_text(
                     f"✅ Вы перевели {amount} монет пользователю @{target_username}"
                 )
             else:
-                await update.message.reply_text("❌ Недостаточно средств или ошибка перевода!")
+                update.message.reply_text("❌ Недостаточно средств или ошибка перевода!")
                 
         except ValueError:
-            await update.message.reply_text("❌ Неверная сумма!")
+            update.message.reply_text("❌ Неверная сумма!")
         except Exception as e:
             logger.error(f"Ошибка в transfer_command: {e}")
-            await update.message.reply_text("❌ Ошибка перевода!")
+            update.message.reply_text("❌ Ошибка перевода!")
 
-    async def daily_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def daily_command(self, update: Update, context: CallbackContext):
         """Команда /daily - ежедневный бонус"""
         try:
             user = update.effective_user
             result = self.economy_system.daily_bonus(user.id, user.username or user.first_name)
             
-            await update.message.reply_text(result['message'])
+            update.message.reply_text(result['message'])
         except Exception as e:
             logger.error(f"Ошибка в daily_command: {e}")
-            await update.message.reply_text("❌ Ошибка выдачи бонуса!")
+            update.message.reply_text("❌ Ошибка выдачи бонуса!")
 
     # ========== КОМАНДЫ ИГР ==========
-    async def coin_flip_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def coin_flip_command(self, update: Update, context: CallbackContext):
         """Команда /coinflip - игра в орлянку"""
         try:
             if len(context.args) < 2:
-                await update.message.reply_text("❌ Использование: /coinflip сумма орёл/решка")
+                update.message.reply_text("❌ Использование: /coinflip сумма орёл/решка")
                 return
             
             amount = int(context.args[0])
             choice = context.args[1].lower()
             user = update.effective_user
             
-            result = await self.games_system.coin_flip(user.id, user.username or user.first_name, amount, choice)
-            await update.message.reply_text(result['message'])
+            result = self.games_system.coin_flip(user.id, user.username or user.first_name, amount, choice)
+            update.message.reply_text(result['message'])
             
         except ValueError:
-            await update.message.reply_text("❌ Неверная сумма!")
+            update.message.reply_text("❌ Неверная сумма!")
         except Exception as e:
             logger.error(f"Ошибка в coin_flip_command: {e}")
-            await update.message.reply_text("❌ Ошибка в игре!")
+            update.message.reply_text("❌ Ошибка в игре!")
 
     # ========== КОМАНДЫ API ==========
-    async def weather_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def weather_command(self, update: Update, context: CallbackContext):
         """Команда /weather - погода"""
         try:
             city = context.args[0] if context.args else "Москва"
             
-            # Показываем временный ответ
-            temp_message = await update.message.reply_text("⏳ Запрашиваю данные о погоде...")
+            async def get_weather_async():
+                return await self.api_system.get_weather(city)
             
-            weather = await self.api_system.get_weather(city)
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=temp_message.message_id,
-                text=weather
-            )
+            # Запускаем асинхронную функцию в отдельном потоке
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            weather = loop.run_until_complete(get_weather_async())
+            loop.close()
+            
+            update.message.reply_text(weather)
             
         except Exception as e:
             logger.error(f"Ошибка в weather_command: {e}")
-            await update.message.reply_text("❌ Ошибка получения погоды!")
+            update.message.reply_text("❌ Ошибка получения погоды!")
 
-    async def exchange_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def exchange_command(self, update: Update, context: CallbackContext):
         """Команда /exchange - курсы валют"""
         try:
-            temp_message = await update.message.reply_text("⏳ Запрашиваю курсы валют...")
+            async def get_exchange_async():
+                return await self.api_system.get_exchange_rates()
             
-            exchange = await self.api_system.get_exchange_rates()
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=temp_message.message_id,
-                text=exchange
-            )
+            # Запускаем асинхронную функцию в отдельном потоке
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            exchange = loop.run_until_complete(get_exchange_async())
+            loop.close()
+            
+            update.message.reply_text(exchange)
             
         except Exception as e:
             logger.error(f"Ошибка в exchange_command: {e}")
-            await update.message.reply_text("❌ Ошибка получения курсов!")
+            update.message.reply_text("❌ Ошибка получения курсов!")
 
     # ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def handle_message(self, update: Update, context: CallbackContext):
         """Обработка обычных сообщений"""
         try:
             message_text = update.message.text.lower()
@@ -657,13 +663,26 @@ class SuperGroupBot:
             # Проверка на плохие слова
             for bad_word in self.config.BAD_WORDS:
                 if bad_word in message_text:
-                    await update.message.delete()
-                    warning = await update.message.reply_text(
+                    update.message.delete()
+                    warning = update.message.reply_text(
                         f"⚠️ {user.first_name}, пожалуйста, соблюдайте правила группы!"
                     )
-                    # Удаляем предупреждение через 10 секунд
-                    await asyncio.sleep(10)
-                    await warning.delete()
+                    
+                    # Удаляем предупреждение через 10 секунд (в отдельном потоке)
+                    def delete_warning():
+                        import time
+                        time.sleep(10)
+                        try:
+                            context.bot.delete_message(
+                                chat_id=update.effective_chat.id,
+                                message_id=warning.message_id
+                            )
+                        except:
+                            pass
+                    
+                    import threading
+                    thread = threading.Thread(target=delete_warning)
+                    thread.start()
                     return
             
             # Автоматическое добавление кармы за длинные сообщения
@@ -673,7 +692,7 @@ class SuperGroupBot:
         except Exception as e:
             logger.error(f"Ошибка в handle_message: {e}")
 
-    async def welcome_new_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def welcome_new_members(self, update: Update, context: CallbackContext):
         """Приветствие новых участников"""
         try:
             for member in update.message.new_chat_members:
@@ -686,29 +705,29 @@ class SuperGroupBot:
 
 🎁 Не забудь забрать ежедневный бонус: /daily
                 """
-                await update.message.reply_text(welcome_text)
+                update.message.reply_text(welcome_text)
         except Exception as e:
             logger.error(f"Ошибка в welcome_new_members: {e}")
 
-    async def goodbye_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def goodbye_member(self, update: Update, context: CallbackContext):
         """Прощание с вышедшими участниками"""
         try:
             left_member = update.message.left_chat_member
             if left_member:
-                await update.message.reply_text(
+                update.message.reply_text(
                     f"😢 {left_member.first_name} покинул(а) нас..."
                 )
         except Exception as e:
             logger.error(f"Ошибка в goodbye_member: {e}")
 
     # ========== ОБРАБОТЧИК ОШИБОК ==========
-    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def error_handler(self, update: Update, context: CallbackContext):
         """Обработчик ошибок"""
         try:
             logger.error(f"Ошибка: {context.error}", exc_info=context.error)
             
             if update and update.effective_message:
-                await update.effective_message.reply_text(
+                update.effective_message.reply_text(
                     "❌ Произошла непредвиденная ошибка. Разработчики уже уведомлены."
                 )
         except Exception as e:
@@ -723,7 +742,8 @@ class SuperGroupBot:
             print("⚠️  Убедитесь, что вы заменили BOT_TOKEN на реальный токен!")
             print("📝 Логи записываются в файл bot.log")
             
-            self.application.run_polling()
+            self.updater.start_polling()
+            self.updater.idle()
             
         except Exception as e:
             logger.critical(f"Критическая ошибка при запуске бота: {e}")
@@ -756,7 +776,7 @@ def main():
     print("=" * 50)
     
     # Проверка токена
-    if Config.BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    if Config.BOT_TOKEN == "7609696966:AAHnliq6n9G5v6tM9tM9tM9tM9tM9tM9tM9":
         print("❌ ОШИБКА: Вы не заменили BOT_TOKEN!")
         print("📝 Получите токен у @BotFather и замените в коде")
         return
