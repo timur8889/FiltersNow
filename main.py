@@ -5,9 +5,8 @@ import random
 import asyncio
 import aiohttp
 from datetime import datetime, timedelta
-from telegram import Update, ChatPermissions
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-from telegram.utils.helpers import escape_markdown
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,11 +19,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+# Конфигурация - ВАЖНО: ЗАМЕНИТЕ НА ВАШ РЕАЛЬНЫЙ ТОКЕН!
 class Config:
-    BOT_TOKEN = "8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME"  # ЗАМЕНИТЕ на ваш токен!
-    ADMIN_IDS = [5024165375]  # ЗАМЕНИТЕ на ID администраторов
-    BAD_WORDS = ['спам', 'реклама', 'оскорбление']  # Добавьте свои плохие слова
+    BOT_TOKEN = "8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME"  # ⚠️ ЗАМЕНИТЕ ЭТОТ ТОКЕН!
+    ADMIN_IDS = [5024165375]  
+    BAD_WORDS = ['спам', 'реклама', 'оскорбление']
 
 # ========== СИСТЕМА КАРМЫ ==========
 class KarmaSystem:
@@ -69,13 +68,11 @@ class KarmaSystem:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Обновляем карму
             cursor.execute('''
                 INSERT OR REPLACE INTO karma (user_id, username, karma, last_thank)
                 VALUES (?, ?, COALESCE((SELECT karma FROM karma WHERE user_id = ?), 0) + 1, ?)
             ''', (user_id, username, user_id, datetime.now()))
             
-            # Записываем благодарность
             cursor.execute(
                 'INSERT INTO thanks (from_user, to_user, timestamp) VALUES (?, ?, ?)',
                 (from_user, user_id, datetime.now())
@@ -162,7 +159,6 @@ class EconomySystem:
             result = cursor.fetchone()
             
             if not result:
-                # Создаем запись для нового пользователя
                 cursor.execute(
                     'INSERT INTO economy (user_id, username, balance) VALUES (?, ?, ?)',
                     (user_id, username, 100)
@@ -177,6 +173,24 @@ class EconomySystem:
             logger.error(f"Ошибка получения баланса: {e}")
             return 0
     
+    def add_money(self, user_id: int, username: str, amount: int) -> bool:
+        """Добавить деньги пользователю"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO economy (user_id, username, balance)
+                VALUES (?, ?, COALESCE((SELECT balance FROM economy WHERE user_id = ?), 100) + ?)
+            ''', (user_id, username, user_id, amount))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления денег: {e}")
+            return False
+    
     def transfer_money(self, from_user: int, to_user: int, amount: int, to_username: str = "") -> bool:
         """Перевод денег между пользователями"""
         try:
@@ -186,7 +200,6 @@ class EconomySystem:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Проверяем баланс отправителя
             cursor.execute(
                 'SELECT balance FROM economy WHERE user_id = ?', (from_user,)
             )
@@ -196,26 +209,22 @@ class EconomySystem:
                 conn.close()
                 return False
             
-            # Проверяем получателя
             cursor.execute(
                 'SELECT balance FROM economy WHERE user_id = ?', (to_user,)
             )
             to_balance = cursor.fetchone()
             
             if not to_balance:
-                # Создаем запись для получателя
                 cursor.execute(
                     'INSERT INTO economy (user_id, username, balance) VALUES (?, ?, ?)',
                     (to_user, to_username, amount)
                 )
             else:
-                # Обновляем баланс получателя
                 cursor.execute(
                     'UPDATE economy SET balance = balance + ? WHERE user_id = ?',
                     (amount, to_user)
                 )
             
-            # Обновляем баланс отправителя
             cursor.execute(
                 'UPDATE economy SET balance = balance - ? WHERE user_id = ?',
                 (amount, from_user)
@@ -248,7 +257,6 @@ class EconomySystem:
                     conn.close()
                     return {'success': False, 'message': '❌ Вы уже получали бонус сегодня!'}
             
-            # Выдаем бонус
             cursor.execute('''
                 INSERT OR REPLACE INTO economy (user_id, username, balance, last_daily)
                 VALUES (?, ?, COALESCE((SELECT balance FROM economy WHERE user_id = ?), 100) + ?, ?)
@@ -280,24 +288,20 @@ class MiniGames:
             if choice not in ['орёл', 'орел', 'решка']:
                 return {'success': False, 'message': '❌ Выберите "орёл" или "решка"!'}
             
-            # Нормализуем выбор
             if choice in ['орёл', 'орел']:
                 choice = 'орёл'
             else:
                 choice = 'решка'
             
-            # Подбрасываем монетку
             result = random.choice(['орёл', 'решка'])
             win = result == choice
             
             if win:
-                # Удваиваем выигрыш
-                win_amount = bet * 2
-                # Обновляем баланс (ставка уже включена в выигрыш)
-                self.economy.transfer_money(user_id, user_id, bet + win_amount, username)
+                win_amount = bet
+                self.economy.add_money(user_id, username, win_amount)
                 message = f'🎉 Поздравляем! Выпал {result}. Вы выиграли {win_amount} монет!'
             else:
-                # Ставка уже списана при проверке баланса
+                self.economy.add_money(user_id, username, -bet)
                 message = f'😔 Увы! Выпал {result}. Вы проиграли {bet} монет.'
             
             return {
@@ -310,41 +314,62 @@ class MiniGames:
             logger.error(f"Ошибка в игре coin_flip: {e}")
             return {'success': False, 'message': '❌ Ошибка в игре!'}
 
-# ========== СИСТЕМА ВНЕШНИХ API ==========
-class ExternalAPIs:
+# ========== СИСТЕМА ВИЗУАЛЬНЫХ МЕНЮ ==========
+class MenuSystem:
     @staticmethod
-    async def get_weather(city: str) -> str:
-        """Получение погоды (заглушка)"""
-        try:
-            # В реальной реализации здесь будет запрос к API погоды
-            await asyncio.sleep(1)  # Имитация задержки сети
-            
-            weather_data = {
-                'москва': '🌡 Москва: +15°C, облачно',
-                'санкт-петербург': '🌡 Санкт-Петербург: +12°C, дождь',
-                'новосибирск': '🌡 Новосибирск: +8°C, ясно'
-            }
-            
-            city_lower = city.lower()
-            if city_lower in weather_data:
-                return weather_data[city_lower]
-            else:
-                return f'🌡 Погода для {city}: +20°C, солнечно'
-        except Exception as e:
-            logger.error(f"Ошибка получения погоды: {e}")
-            return "❌ Ошибка получения данных о погоде"
-
+    def get_main_menu():
+        """Главное меню"""
+        keyboard = [
+            [InlineKeyboardButton("⭐ Карма", callback_data="menu_karma"),
+             InlineKeyboardButton("💰 Экономика", callback_data="menu_economy")],
+            [InlineKeyboardButton("🎮 Игры", callback_data="menu_games"),
+             InlineKeyboardButton("🌤 Полезное", callback_data="menu_utils")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="menu_stats"),
+             InlineKeyboardButton("📋 Помощь", callback_data="menu_help")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
     @staticmethod
-    async def get_exchange_rates() -> str:
-        """Получение курсов валют (заглушка)"""
-        try:
-            await asyncio.sleep(1)  # Имитация задержки сети
-            
-            # В реальной реализации здесь будет запрос к API курсов валют
-            return "💱 Курсы валют:\nUSD: 90.50 RUB\nEUR: 98.20 RUB\nCNY: 12.50 RUB"
-        except Exception as e:
-            logger.error(f"Ошибка получения курсов: {e}")
-            return "❌ Ошибка получения курсов валют"
+    def get_karma_menu():
+        """Меню кармы"""
+        keyboard = [
+            [InlineKeyboardButton("📊 Моя карма", callback_data="karma_my")],
+            [InlineKeyboardButton("🏆 Топ кармы", callback_data="karma_top")],
+            [InlineKeyboardButton("⭐ Благодарить", callback_data="karma_thank")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu_main")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_economy_menu():
+        """Меню экономики"""
+        keyboard = [
+            [InlineKeyboardButton("💰 Баланс", callback_data="economy_balance")],
+            [InlineKeyboardButton("🎁 Ежедневный бонус", callback_data="economy_daily")],
+            [InlineKeyboardButton("💸 Перевести", callback_data="economy_transfer")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu_main")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_games_menu():
+        """Меню игр"""
+        keyboard = [
+            [InlineKeyboardButton("🎯 Орлянка", callback_data="game_coinflip")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu_main")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def get_utils_menu():
+        """Меню полезных функций"""
+        keyboard = [
+            [InlineKeyboardButton("🌤 Погода", callback_data="utils_weather")],
+            [InlineKeyboardButton("💱 Курсы валют", callback_data="utils_exchange")],
+            [InlineKeyboardButton("📜 Правила", callback_data="utils_rules")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="menu_main")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
 
 # ========== ОСНОВНОЙ КЛАСС БОТА ==========
 class SuperGroupBot:
@@ -356,7 +381,7 @@ class SuperGroupBot:
         self.karma_system = KarmaSystem()
         self.economy_system = EconomySystem()
         self.games_system = MiniGames(self.economy_system)
-        self.api_system = ExternalAPIs()
+        self.menu_system = MenuSystem()
         
         # Инициализация бота
         self.updater = Updater(token=token, use_context=True)
@@ -373,6 +398,7 @@ class SuperGroupBot:
         self.dispatcher.add_handler(CommandHandler("start", self.start_command))
         self.dispatcher.add_handler(CommandHandler("help", self.help_command))
         self.dispatcher.add_handler(CommandHandler("rules", self.rules_command))
+        self.dispatcher.add_handler(CommandHandler("menu", self.menu_command))
         
         # Команды кармы
         self.dispatcher.add_handler(CommandHandler("karma", self.karma_command))
@@ -387,74 +413,94 @@ class SuperGroupBot:
         # Команды игр
         self.dispatcher.add_handler(CommandHandler("coinflip", self.coin_flip_command))
         
-        # Команды API
-        self.dispatcher.add_handler(CommandHandler("weather", self.weather_command))
-        self.dispatcher.add_handler(CommandHandler("exchange", self.exchange_command))
-        
         # Обработчики сообщений
         self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self.handle_message))
         self.dispatcher.add_handler(MessageHandler(Filters.status_update.new_chat_members, self.welcome_new_members))
         self.dispatcher.add_handler(MessageHandler(Filters.status_update.left_chat_member, self.goodbye_member))
+        
+        # Обработчики инлайн-кнопок
+        self.dispatcher.add_handler(CallbackQueryHandler(self.button_handler))
         
         # Обработчик ошибок
         self.dispatcher.add_error_handler(self.error_handler)
     
     # ========== ОСНОВНЫЕ КОМАНДЫ ==========
     def start_command(self, update: Update, context: CallbackContext):
-        """Команда /start"""
+        """Команда /start с красивым меню"""
         try:
             user = update.effective_user
+            
             welcome_text = f"""
-👋 Привет, {user.first_name}!
+🎉 *Добро пожаловать, {user.first_name}\!*
 
-🤖 Я - многофункциональный бот для этой группы с кучей возможностей:
+🤖 *Super Group Bot* \- твой надежный помощник в этой группе\!
 
-⭐ **Карма**: Получайте карму за полезные сообщения
-💰 **Экономика**: Зарабатывайте монеты и играйте в игры
-🎮 **Игры**: coinflip - подбрось монетку на деньги
-🌤 **Полезное**: Погода, курсы валют
-📊 **Статистика**: Топ пользователей
+✨ *Что я умею:*
+⭐ *Карма* \- система репутации
+💰 *Экономика* \- зарабатывай и трать монеты
+🎮 *Игры* \- развлекайся с друзьями
+🌤 *Полезное* \- погода, курсы и многое другое
 
-📋 Используйте /help для списка всех команд
+👇 *Выбери раздел в меню ниже или используй команды:*
+/help \- Все команды
+/menu \- Открыть меню
             """
-            update.message.reply_text(welcome_text)
+            
+            update.message.reply_text(
+                welcome_text,
+                reply_markup=self.menu_system.get_main_menu(),
+                parse_mode='MarkdownV2'
+            )
             logger.info(f"Пользователь {user.id} запустил бота")
         except Exception as e:
             logger.error(f"Ошибка в start_command: {e}")
             update.message.reply_text("❌ Произошла ошибка!")
 
+    def menu_command(self, update: Update, context: CallbackContext):
+        """Команда /menu - показать главное меню"""
+        try:
+            menu_text = """
+🎯 *Главное меню*
+
+Выберите раздел для управления ботом:
+            """
+            update.message.reply_text(
+                menu_text,
+                reply_markup=self.menu_system.get_main_menu(),
+                parse_mode='MarkdownV2'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка в menu_command: {e}")
+            update.message.reply_text("❌ Ошибка отображения меню!")
+
     def help_command(self, update: Update, context: CallbackContext):
         """Команда /help"""
         try:
             help_text = """
-📋 **Доступные команды:**
+📋 *Доступные команды:*
 
-👤 **Основные:**
-/start - Начать работу
-/help - Эта справка  
-/rules - Правила группы
+👤 *Основные:*
+/start \- Начать работу
+/menu \- Открыть меню
+/help \- Эта справка  
+/rules \- Правила группы
 
-⭐ **Система кармы:**
-/karma - Ваша карма
-/thank @username - Дать карму пользователю
-/top - Топ пользователей по карме
+⭐ *Система кармы:*
+/karma \- Ваша карма
+/thank @username \- Дать карму
+/top \- Топ пользователей
 
-💰 **Экономика:**
-/balance - Ваш баланс
-/daily - Ежедневный бонус
-/transfer @username сумма - Перевести деньги
+💰 *Экономика:*
+/balance \- Ваш баланс
+/daily \- Ежедневный бонус
+/transfer @username сумма \- Перевести деньги
 
-🎮 **Игры:**
-/coinflip сумма орёл/решка - Подбросить монетку
+🎮 *Игры:*
+/coinflip сумма орёл/решка \- Подбросить монетку
 
-🌤 **Полезное:**
-/weather город - Погода
-/exchange - Курсы валют
-
-⚡ **Для админов:**
-/warn @username - Выдать предупреждение
+💡 *Совет:* Используй /menu для удобного управления через кнопки\!
             """
-            update.message.reply_text(help_text)
+            update.message.reply_text(help_text, parse_mode='MarkdownV2')
         except Exception as e:
             logger.error(f"Ошибка в help_command: {e}")
             update.message.reply_text("❌ Произошла ошибка!")
@@ -463,20 +509,162 @@ class SuperGroupBot:
         """Команда /rules"""
         try:
             rules_text = """
-📜 **Правила группы:**
+📜 *Правила группы:*
 
-1. 🤝 Уважайте всех участников
-2. 🚫 Запрещен спам и реклама  
-3. ❌ Не размещайте запрещенный контент
-4. 💬 Соблюдайте тематику обсуждений
-5. ⭐ Полезные сообщения получают карму
+1\. 🤝 Уважайте всех участников
+2\. 🚫 Запрещен спам и реклама  
+3\. ❌ Не размещайте запрещенный контент
+4\. 💬 Соблюдайте тематику обсуждений
+5\. ⭐ Полезные сообщения получают карму
 
-⚠️ Нарушение правил ведет к предупреждениям, муту или бану.
+⚠️ Нарушение правил ведет к предупреждениям, муту или бану\.
             """
-            update.message.reply_text(rules_text)
+            update.message.reply_text(rules_text, parse_mode='MarkdownV2')
         except Exception as e:
             logger.error(f"Ошибка в rules_command: {e}")
             update.message.reply_text("❌ Произошла ошибка!")
+
+    # ========== ОБРАБОТЧИК ИНЛАЙН-КНОПОК ==========
+    def button_handler(self, update: Update, context: CallbackContext):
+        """Обработчик нажатий на инлайн-кнопки"""
+        query = update.callback_query
+        query.answer()
+        
+        user = query.from_user
+        data = query.data
+        
+        try:
+            if data == "menu_main":
+                query.edit_message_text(
+                    "🎯 *Главное меню*\n\nВыберите раздел:",
+                    reply_markup=self.menu_system.get_main_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "menu_karma":
+                query.edit_message_text(
+                    "⭐ *Система Кармы*\n\nУправление репутацией:",
+                    reply_markup=self.menu_system.get_karma_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "menu_economy":
+                query.edit_message_text(
+                    "💰 *Экономика*\n\nУправление финансами:",
+                    reply_markup=self.menu_system.get_economy_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "menu_games":
+                query.edit_message_text(
+                    "🎮 *Игры*\n\nВыберите игру:",
+                    reply_markup=self.menu_system.get_games_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "menu_utils":
+                query.edit_message_text(
+                    "🌤 *Полезные функции*\n\nДополнительные возможности:",
+                    reply_markup=self.menu_system.get_utils_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "karma_my":
+                karma = self.karma_system.get_karma(user.id)
+                query.edit_message_text(
+                    f"⭐ *Ваша карма*\n\n{user.first_name}, ваша карма: *{karma}* очков\n\nПовышайте карму полезными сообщениями\!",
+                    reply_markup=self.menu_system.get_karma_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "karma_top":
+                top_users = self.karma_system.get_top_users(5)
+                if top_users:
+                    top_text = "🏆 *Топ кармы:*\n\n"
+                    for i, (username, karma) in enumerate(top_users, 1):
+                        top_text += f"{i}\. @{username}: *{karma}* ⭐\n"
+                else:
+                    top_text = "📊 Пока нет данных о карме\!\n\nБудьте первым\!\!"
+                
+                query.edit_message_text(
+                    top_text,
+                    reply_markup=self.menu_system.get_karma_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "economy_balance":
+                balance = self.economy_system.get_balance(user.id, user.first_name)
+                query.edit_message_text(
+                    f"💰 *Ваш баланс*\n\n{user.first_name}, ваш баланс: *{balance}* монет\n\nЗарабатывайте деньги ежедневными бонусами\!",
+                    reply_markup=self.menu_system.get_economy_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "economy_daily":
+                result = self.economy_system.daily_bonus(user.id, user.first_name)
+                query.edit_message_text(
+                    result['message'],
+                    reply_markup=self.menu_system.get_economy_menu()
+                )
+            
+            elif data == "utils_rules":
+                rules_text = """
+📜 *Правила группы:*
+
+1\. 🤝 Уважайте всех участников
+2\. 🚫 Запрещен спам и реклама  
+3\. ❌ Не размещайте запрещенный контент
+4\. 💬 Соблюдайте тематику обсуждений
+5\. ⭐ Полезные сообщения получают карму
+
+⚠️ Нарушение правил ведет к предупреждениям, муту или бану\.
+                """
+                query.edit_message_text(
+                    rules_text,
+                    reply_markup=self.menu_system.get_utils_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data in ["karma_thank", "economy_transfer", "game_coinflip", "utils_weather", "utils_exchange"]:
+                help_texts = {
+                    "karma_thank": "💡 Чтобы поблагодарить пользователя, используйте команду:\n`/thank @username`",
+                    "economy_transfer": "💡 Чтобы перевести деньги, используйте команду:\n`/transfer @username сумма`",
+                    "game_coinflip": "💡 Чтобы сыграть в орлянку, используйте команду:\n`/coinflip сумма орёл/решка`",
+                    "utils_weather": "💡 Чтобы узнать погоду, используйте команду:\n`/weather город`",
+                    "utils_exchange": "💡 Чтобы узнать курсы валют, используйте команду:\n`/exchange`"
+                }
+                
+                query.edit_message_text(
+                    help_texts[data],
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "menu_stats":
+                karma = self.karma_system.get_karma(user.id)
+                balance = self.economy_system.get_balance(user.id, user.first_name)
+                
+                stats_text = f"""
+📊 *Ваша статистика*
+
+👤 *Пользователь:* {user.first_name}
+⭐ *Карма:* {karma} очков
+💰 *Баланс:* {balance} монет
+📅 *В системе с:* {datetime.now().strftime('%d.%m.%Y')}
+
+🎯 *Продолжайте в том же духе\!*
+                """
+                query.edit_message_text(
+                    stats_text,
+                    reply_markup=self.menu_system.get_main_menu(),
+                    parse_mode='MarkdownV2'
+                )
+            
+            elif data == "menu_help":
+                self.help_command(update, context)
+                
+        except Exception as e:
+            logger.error(f"Ошибка в button_handler: {e}")
+            query.edit_message_text("❌ Произошла ошибка при обработке запроса!")
 
     # ========== КОМАНДЫ КАРМЫ ==========
     def karma_command(self, update: Update, context: CallbackContext):
@@ -502,9 +690,8 @@ class SuperGroupBot:
             target_username = context.args[0].replace('@', '')
             from_user = update.effective_user
             
-            # В реальной реализации здесь нужно получить user_id из username
-            # Для демонстрации используем фиктивный ID
-            target_user_id = hash(target_username) % 1000000  # Фиктивный ID
+            # Фиктивный ID для демонстрации
+            target_user_id = hash(target_username) % 1000000
             
             if self.karma_system.add_karma(target_user_id, target_username, from_user.id):
                 update.message.reply_text(
@@ -564,7 +751,6 @@ class SuperGroupBot:
                 return
             
             from_user = update.effective_user
-            # Фиктивный ID получателя для демонстрации
             target_user_id = hash(target_username) % 1000000
             
             if self.economy_system.transfer_money(from_user.id, target_user_id, amount, target_username):
@@ -612,47 +798,6 @@ class SuperGroupBot:
             logger.error(f"Ошибка в coin_flip_command: {e}")
             update.message.reply_text("❌ Ошибка в игре!")
 
-    # ========== КОМАНДЫ API ==========
-    def weather_command(self, update: Update, context: CallbackContext):
-        """Команда /weather - погода"""
-        try:
-            city = context.args[0] if context.args else "Москва"
-            
-            async def get_weather_async():
-                return await self.api_system.get_weather(city)
-            
-            # Запускаем асинхронную функцию в отдельном потоке
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            weather = loop.run_until_complete(get_weather_async())
-            loop.close()
-            
-            update.message.reply_text(weather)
-            
-        except Exception as e:
-            logger.error(f"Ошибка в weather_command: {e}")
-            update.message.reply_text("❌ Ошибка получения погоды!")
-
-    def exchange_command(self, update: Update, context: CallbackContext):
-        """Команда /exchange - курсы валют"""
-        try:
-            async def get_exchange_async():
-                return await self.api_system.get_exchange_rates()
-            
-            # Запускаем асинхронную функцию в отдельном потоке
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            exchange = loop.run_until_complete(get_exchange_async())
-            loop.close()
-            
-            update.message.reply_text(exchange)
-            
-        except Exception as e:
-            logger.error(f"Ошибка в exchange_command: {e}")
-            update.message.reply_text("❌ Ошибка получения курсов!")
-
     # ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
     def handle_message(self, update: Update, context: CallbackContext):
         """Обработка обычных сообщений"""
@@ -668,7 +813,7 @@ class SuperGroupBot:
                         f"⚠️ {user.first_name}, пожалуйста, соблюдайте правила группы!"
                     )
                     
-                    # Удаляем предупреждение через 10 секунд (в отдельном потоке)
+                    # Удаляем предупреждение через 10 секунд
                     def delete_warning():
                         import time
                         time.sleep(10)
@@ -704,6 +849,7 @@ class SuperGroupBot:
 Получить помощь: /help
 
 🎁 Не забудь забрать ежедневный бонус: /daily
+💡 Используй /menu для удобного управления
                 """
                 update.message.reply_text(welcome_text)
         except Exception as e:
@@ -739,66 +885,4 @@ class SuperGroupBot:
         try:
             logger.info("🚀 Запускаю бота...")
             print("🤖 Бот запускается...")
-            print("⚠️  Убедитесь, что вы заменили BOT_TOKEN на реальный токен!")
-            print("📝 Логи записываются в файл bot.log")
-            
-            self.updater.start_polling()
-            self.updater.idle()
-            
-        except Exception as e:
-            logger.critical(f"Критическая ошибка при запуске бота: {e}")
-            print(f"❌ Критическая ошибка: {e}")
-
-# ========== ТЕСТИРОВАНИЕ И ЗАПУСК ==========
-def test_bot_initialization():
-    """Тест инициализации бота"""
-    print("🧪 Тестирую инициализацию бота...")
-    
-    try:
-        # Тестовый токен
-        test_token = "TEST_TOKEN"
-        bot = SuperGroupBot(test_token)
-        
-        print("✅ Инициализация бота прошла успешно")
-        print("✅ Все системы загружены")
-        print("✅ Обработчики команд настроены")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Ошибка инициализации: {e}")
-        return False
-
-def main():
-    """Основная функция запуска"""
-    print("=" * 50)
-    print("🤖 SUPER GROUP BOT - ЗАПУСК")
-    print("=" * 50)
-    
-    # Проверка токена
-    if Config.BOT_TOKEN == "7609696966:AAHnliq6n9G5v6tM9tM9tM9tM9tM9tM9tM9":
-        print("❌ ОШИБКА: Вы не заменили BOT_TOKEN!")
-        print("📝 Получите токен у @BotFather и замените в коде")
-        return
-    
-    # Запуск тестов
-    if not test_bot_initialization():
-        print("❌ Тесты не пройдены, бот не запускается")
-        return
-    
-    print("✅ Все тесты пройдены успешно!")
-    print("🚀 Запускаю основного бота...")
-    
-    try:
-        # Создаем и запускаем бота
-        bot = SuperGroupBot(Config.BOT_TOKEN)
-        bot.run()
-        
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен пользователем")
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        logger.critical(f"Критическая ошибка: {e}")
-
-if __name__ == "__main__":
-    main()
+            print("📝 Логи записываются в файл
