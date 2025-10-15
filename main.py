@@ -388,8 +388,9 @@ class AutoContentBot:
     async def health_check(self):
         """Проверка здоровья бота"""
         try:
-            # Проверяем соединение с Telegram
-            await self.bot.get_me()
+            # Проверяем соединение с Telegram - используем простой вызов без await
+            me = await self.bot.get_me()
+            logger.info(f"Бот подключен: @{me.username}")
             
             # Проверяем базу данных
             cursor = self.conn.cursor()
@@ -397,17 +398,25 @@ class AutoContentBot:
             
             # Проверяем доступность канала
             try:
-                await self.bot.get_chat(self.CHANNEL_ID)
-            except TelegramError:
-                logger.error("Канал недоступен")
+                chat = await self.bot.get_chat(self.CHANNEL_ID)
+                logger.info(f"Канал доступен: {chat.title}")
+            except TelegramError as e:
+                logger.error(f"Канал недоступен: {e}")
                 return False
             
-            logger.info("Бот здоров - все системы работают")
+            logger.info("✅ Бот здоров - все системы работают")
             return True
             
         except Exception as e:
-            logger.error(f"Проблема со здоровьем бота: {e}")
-            await self.notify_admin(f"🚨 Проблема со здоровьем бота: {e}")
+            logger.error(f"❌ Проблема со здоровьем бота: {e}")
+            if self.ADMIN_ID:
+                try:
+                    await self.bot.send_message(
+                        chat_id=self.ADMIN_ID,
+                        text=f"🚨 Проблема со здоровьем бота: {e}"
+                    )
+                except:
+                    pass  # Если не можем отправить уведомление, просто логируем
             return False
 
     async def manual_post(self, content_type: str = None):
@@ -444,24 +453,33 @@ class AutoContentBot:
         logger.info("🤖 Автоматический бот для канала запущен!")
         
         # Проверка здоровья при запуске
-        if not await self.health_check():
+        health_ok = await self.health_check()
+        if not health_ok:
             logger.error("Бот не прошел проверку здоровья при запуске")
-            return
+            # Не прерываем выполнение, но логируем ошибку
+            if self.ADMIN_ID:
+                await self.notify_admin("⚠️ Бот запущен с проблемами здоровья")
         
-        # Первая публикация при запуске
-        welcome_message = (
-            "🎉 Бот запущен! Автоматические публикации активированы.\n\n"
-            "📅 Контент будет публиковаться по расписанию:\n"
-            "• Утром - мотивационные цитаты\n"
-            "• Днем - интересные факты и новости\n"
-            "• Вечером - полезные советы\n\n"
-            "Оставайтесь на связи! ✨"
-        )
-        await self.send_message_to_channel(welcome_message)
+        try:
+            # Первая публикация при запуске
+            welcome_message = (
+                "🎉 Бот запущен! Автоматические публикации активированы.\n\n"
+                "📅 Контент будет публиковаться по расписанию:\n"
+                "• Утром - мотивационные цитаты\n"
+                "• Днем - интересные факты и новости\n"
+                "• Вечером - полезные советы\n\n"
+                "Оставайтесь на связи! ✨"
+            )
+            await self.send_message_to_channel(welcome_message)
+        except Exception as e:
+            logger.error(f"Не удалось отправить приветственное сообщение: {e}")
         
         # Отправляем статистику администратору
         if self.ADMIN_ID:
-            await self.send_stats_to_admin()
+            try:
+                await self.send_stats_to_admin()
+            except Exception as e:
+                logger.error(f"Не удалось отправить статистику: {e}")
         
         # Запускаем планировщик
         await self.post_scheduled_content()
@@ -494,7 +512,7 @@ class AutoContentBot:
                     await self.send_message_to_channel(weekly_summary)
                     await asyncio.sleep(3600)
                 
-                # Ежечасная проверка здоровья
+                # Ежечасная проверка здоровья (раз в 6 часов)
                 elif current_hour % 6 == 0:  # Каждые 6 часов
                     await self.health_check()
                     await asyncio.sleep(3600)
@@ -504,7 +522,8 @@ class AutoContentBot:
                     
             except Exception as e:
                 logger.error(f"Ошибка в основном цикле: {e}")
-                await self.notify_admin(f"❌ Ошибка в основном цикле: {e}")
+                if self.ADMIN_ID:
+                    await self.notify_admin(f"❌ Ошибка в основном цикле: {e}")
                 await asyncio.sleep(300)  # Ждем 5 минут при ошибке
 
 async def main():
@@ -515,10 +534,12 @@ async def main():
         await bot.run()
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
-        await bot.notify_admin("⏹️ Бот остановлен пользователем")
+        if hasattr(bot, 'ADMIN_ID') and bot.ADMIN_ID:
+            await bot.notify_admin("⏹️ Бот остановлен пользователем")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
-        await bot.notify_admin(f"🚨 Критическая ошибка: {e}")
+        if hasattr(bot, 'ADMIN_ID') and bot.ADMIN_ID:
+            await bot.notify_admin(f"🚨 Критическая ошибка: {e}")
     finally:
         if hasattr(bot, 'conn'):
             bot.conn.close()
