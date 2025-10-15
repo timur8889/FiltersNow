@@ -8,6 +8,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 import sqlite3
 import os
+from typing import Optional, List, Tuple
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,10 +21,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class Config:
+    """Конфигурация бота"""
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME")
+    CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@timur_onion")
+    
+    # Интервалы проверки
+    MAIN_LOOP_INTERVAL = 1800  # 30 минут
+    CLEANUP_INTERVAL_DAYS = 30
+    
+    # Таймауты для API
+    REQUEST_TIMEOUT = 10
+    
+    # ID администратора для уведомлений
+    ADMIN_ID = os.getenv("ADMIN_ID")
+
 class AutoContentBot:
     def __init__(self):
-        self.BOT_TOKEN = "8278600298:AAGPjUhyU5HxXOaLRvu-FSRldBW_UCmwOME"  # Замените на ваш токен
-        self.CHANNEL_ID = "@timur_onion"  # Замените на username вашего канала
+        self.BOT_TOKEN = Config.BOT_TOKEN
+        self.CHANNEL_ID = Config.CHANNEL_ID
+        self.ADMIN_ID = Config.ADMIN_ID
         self.bot = Bot(token=self.BOT_TOKEN)
         
         # Инициализация базы данных
@@ -49,7 +66,7 @@ class AutoContentBot:
         self.tips = [
             "💡 Совет: Начинайте день с самого сложного задания — это повысит продуктивность!",
             "💡 Совет: Регулярные перерывы улучшают концентрацию и креативность",
-            "💡 Совет Читайте вслух для улучшения запоминания информации",
+            "💡 Совет: Читайте вслух для улучшения запоминания информации",
             "💡 Совет: Пейте воду перед едой для улучшения метаболизма",
             "💡 Совет: 20 минут на свежем воздухе в день улучшают настроение и сон"
         ]
@@ -66,6 +83,21 @@ class AutoContentBot:
                 publish_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Таблица для статистики
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                posts_today INTEGER DEFAULT 0,
+                last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Инициализируем статистику если нужно
+        cursor.execute("SELECT COUNT(*) FROM bot_stats")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO bot_stats (posts_today) VALUES (0)")
+            
         self.conn.commit()
 
     def is_content_used(self, content):
@@ -84,39 +116,52 @@ class AutoContentBot:
             "INSERT INTO published_content (content_type, content) VALUES (?, ?)",
             (content_type, content)
         )
+        
+        # Обновляем статистику
+        cursor.execute("UPDATE bot_stats SET posts_today = posts_today + 1")
         self.conn.commit()
 
     async def get_random_quote(self):
         """Получает случайную цитату из внешнего API"""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get('https://api.quotable.io/random', timeout=10) as response:
+                async with session.get('https://api.quotable.io/random', timeout=Config.REQUEST_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
                         quote = f"\"{data['content']}\" — {data['author']}"
                         if not self.is_content_used(quote):
                             return quote
+                    else:
+                        logger.warning(f"API цитат вернуло статус {response.status}")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при получении цитаты")
         except Exception as e:
             logger.warning(f"Не удалось получить цитату из API: {e}")
         
         # Резервный вариант
-        return random.choice([q for q in self.quotes if not self.is_content_used(q)])
+        unused_quotes = [q for q in self.quotes if not self.is_content_used(q)]
+        return random.choice(unused_quotes) if unused_quotes else random.choice(self.quotes)
 
     async def get_random_fact(self):
         """Получает случайный факт"""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get('https://uselessfacts.jsph.pl/random.json?language=en', timeout=10) as response:
+                async with session.get('https://uselessfacts.jsph.pl/random.json?language=en', timeout=Config.REQUEST_TIMEOUT) as response:
                     if response.status == 200:
                         data = await response.json()
                         fact = f"🤔 Интересный факт:\n\n{data['text']}"
                         if not self.is_content_used(fact):
                             return fact
+                    else:
+                        logger.warning(f"API фактов вернуло статус {response.status}")
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут при получении факта")
         except Exception as e:
             logger.warning(f"Не удалось получить факт из API: {e}")
         
         # Резервный вариант
-        return random.choice([f for f in self.facts if not self.is_content_used(f)])
+        unused_facts = [f for f in self.facts if not self.is_content_used(f)]
+        return random.choice(unused_facts) if unused_facts else random.choice(self.facts)
 
     async def get_news_summary(self):
         """Получает краткие новости (заглушка - можно подключить News API)"""
@@ -126,7 +171,8 @@ class AutoContentBot:
             "🚀 Новости науки: Исследования показывают интересные результаты",
             "💼 Бизнес-новости: Инновации двигают экономику вперед"
         ]
-        return random.choice(news_items)
+        unused_news = [n for n in news_items if not self.is_content_used(n)]
+        return random.choice(unused_news) if unused_news else random.choice(news_items)
 
     async def send_message_to_channel(self, message, message_type="text"):
         """Отправляет сообщение в канал"""
@@ -140,11 +186,27 @@ class AutoContentBot:
             
             self.mark_content_used("auto_post", message)
             logger.info(f"Сообщение отправлено в канал: {message[:50]}...")
+            
+            # Отправляем уведомление администратору
+            await self.notify_admin(f"✅ Опубликован новый пост в канале")
+            
             return True
             
         except TelegramError as e:
             logger.error(f"Ошибка отправки в канал: {e}")
+            await self.notify_admin(f"❌ Ошибка отправки в канал: {e}")
             return False
+
+    async def notify_admin(self, message: str):
+        """Отправляет уведомление администратору"""
+        if self.ADMIN_ID:
+            try:
+                await self.bot.send_message(
+                    chat_id=self.ADMIN_ID,
+                    text=message
+                )
+            except Exception as e:
+                logger.error(f"Не удалось отправить уведомление администратору: {e}")
 
     async def get_daily_content_schedule(self):
         """Возвращает расписание контента на день"""
@@ -201,7 +263,8 @@ class AutoContentBot:
             return f"🎯 {theme}\n\n{content}"
         
         elif content_type == "tip":
-            content = random.choice([t for t in self.tips if not self.is_content_used(t)])
+            unused_tips = [t for t in self.tips if not self.is_content_used(t)]
+            content = random.choice(unused_tips) if unused_tips else random.choice(self.tips)
             return f"💡 {theme}\n\n{content}"
         
         elif content_type == "news":
@@ -237,6 +300,7 @@ class AutoContentBot:
                     
         except Exception as e:
             logger.error(f"Ошибка в планировщике: {e}")
+            await self.notify_admin(f"❌ Ошибка в планировщике: {e}")
 
     async def delayed_post(self, delay, content_type, theme):
         """Отложенная публикация"""
@@ -247,6 +311,7 @@ class AutoContentBot:
                 await self.send_message_to_channel(content)
         except Exception as e:
             logger.error(f"Ошибка в отложенной публикации: {e}")
+            await self.notify_admin(f"❌ Ошибка в отложенной публикации: {e}")
 
     async def cleanup_old_content(self):
         """Очищает старые записи из базы данных"""
@@ -255,14 +320,133 @@ class AutoContentBot:
             cursor.execute(
                 "DELETE FROM published_content WHERE publish_date < datetime('now', '-30 days')"
             )
+            deleted_count = cursor.rowcount
+            
+            # Сбрасываем ежедневную статистику если прошли сутки
+            cursor.execute("""
+                UPDATE bot_stats 
+                SET posts_today = 0, last_reset = CURRENT_TIMESTAMP 
+                WHERE last_reset < datetime('now', '-1 day')
+            """)
+            
             self.conn.commit()
-            logger.info("Старые записи очищены")
+            logger.info(f"Старые записи очищены: удалено {deleted_count} записей")
+            
         except Exception as e:
             logger.error(f"Ошибка очистки БД: {e}")
+
+    async def get_bot_stats(self):
+        """Получает статистику бота"""
+        cursor = self.conn.cursor()
+        
+        # Общее количество постов
+        cursor.execute("SELECT COUNT(*) FROM published_content")
+        total_posts = cursor.fetchone()[0]
+        
+        # Посты за сегодня
+        cursor.execute("SELECT posts_today FROM bot_stats")
+        posts_today = cursor.fetchone()[0]
+        
+        # Распределение по типам контента
+        cursor.execute("""
+            SELECT content_type, COUNT(*) 
+            FROM published_content 
+            GROUP BY content_type
+        """)
+        content_stats = cursor.fetchall()
+        
+        return {
+            "total_posts": total_posts,
+            "posts_today": posts_today,
+            "content_stats": dict(content_stats)
+        }
+
+    async def send_stats_to_admin(self):
+        """Отправляет статистику администратору"""
+        try:
+            stats = await self.get_bot_stats()
+            
+            stats_message = (
+                "📊 <b>Статистика бота</b>\n\n"
+                f"📈 Всего публикаций: <b>{stats['total_posts']}</b>\n"
+                f"📅 Публикаций сегодня: <b>{stats['posts_today']}</b>\n\n"
+                "<b>Распределение по типам:</b>\n"
+            )
+            
+            for content_type, count in stats["content_stats"].items():
+                stats_message += f"• {content_type}: {count}\n"
+            
+            await self.bot.send_message(
+                chat_id=self.ADMIN_ID,
+                text=stats_message,
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки статистики: {e}")
+
+    async def health_check(self):
+        """Проверка здоровья бота"""
+        try:
+            # Проверяем соединение с Telegram
+            await self.bot.get_me()
+            
+            # Проверяем базу данных
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT 1")
+            
+            # Проверяем доступность канала
+            try:
+                await self.bot.get_chat(self.CHANNEL_ID)
+            except TelegramError:
+                logger.error("Канал недоступен")
+                return False
+            
+            logger.info("Бот здоров - все системы работают")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Проблема со здоровьем бота: {e}")
+            await self.notify_admin(f"🚨 Проблема со здоровьем бота: {e}")
+            return False
+
+    async def manual_post(self, content_type: str = None):
+        """Ручная публикация поста"""
+        try:
+            if not content_type:
+                content_type = random.choice(["quote", "fact", "tip", "news"])
+            
+            content_types_map = {
+                "quote": ("💭 Случайная цитата", "quote"),
+                "fact": ("🤔 Случайный факт", "fact"),
+                "tip": ("💡 Случайный совет", "tip"),
+                "news": ("📰 Новости", "news")
+            }
+            
+            theme, actual_type = content_types_map.get(content_type, ("📝 Случайный пост", "quote"))
+            content = await self.generate_content(actual_type, theme)
+            
+            if content:
+                success = await self.send_message_to_channel(content)
+                if success:
+                    await self.notify_admin(f"✅ Ручная публикация успешна: {content_type}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Ошибка ручной публикации: {e}")
+            await self.notify_admin(f"❌ Ошибка ручной публикации: {e}")
+            return False
 
     async def run(self):
         """Основной цикл бота"""
         logger.info("🤖 Автоматический бот для канала запущен!")
+        
+        # Проверка здоровья при запуске
+        if not await self.health_check():
+            logger.error("Бот не прошел проверку здоровья при запуске")
+            return
         
         # Первая публикация при запуске
         welcome_message = (
@@ -275,13 +459,18 @@ class AutoContentBot:
         )
         await self.send_message_to_channel(welcome_message)
         
+        # Отправляем статистику администратору
+        if self.ADMIN_ID:
+            await self.send_stats_to_admin()
+        
         # Запускаем планировщик
         await self.post_scheduled_content()
         
         # Основной цикл
         while True:
             try:
-                current_hour = datetime.now().hour
+                current_time = datetime.now()
+                current_hour = current_time.hour
                 
                 # Каждый день в 6 утра обновляем расписание
                 if current_hour == 6:
@@ -289,8 +478,13 @@ class AutoContentBot:
                     await self.cleanup_old_content()
                     await asyncio.sleep(3600)  # Ждем 1 час
                 
+                # Каждый день в 9 утра отправляем статистику
+                elif current_hour == 9 and self.ADMIN_ID:
+                    await self.send_stats_to_admin()
+                    await asyncio.sleep(3600)
+                
                 # Каждое воскресенье в 23:00 делаем итоги недели
-                elif datetime.now().weekday() == 6 and current_hour == 23:
+                elif current_time.weekday() == 6 and current_hour == 23:
                     weekly_summary = (
                         "📊 Итоги недели!\n\n"
                         "Спасибо, что остаетесь с нами! 🙏\n"
@@ -300,11 +494,17 @@ class AutoContentBot:
                     await self.send_message_to_channel(weekly_summary)
                     await asyncio.sleep(3600)
                 
+                # Ежечасная проверка здоровья
+                elif current_hour % 6 == 0:  # Каждые 6 часов
+                    await self.health_check()
+                    await asyncio.sleep(3600)
+                
                 else:
-                    await asyncio.sleep(1800)  # Проверяем каждые 30 минут
+                    await asyncio.sleep(Config.MAIN_LOOP_INTERVAL)  # Проверяем каждые 30 минут
                     
             except Exception as e:
                 logger.error(f"Ошибка в основном цикле: {e}")
+                await self.notify_admin(f"❌ Ошибка в основном цикле: {e}")
                 await asyncio.sleep(300)  # Ждем 5 минут при ошибке
 
 async def main():
@@ -315,8 +515,10 @@ async def main():
         await bot.run()
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
+        await bot.notify_admin("⏹️ Бот остановлен пользователем")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
+        await bot.notify_admin(f"🚨 Критическая ошибка: {e}")
     finally:
         if hasattr(bot, 'conn'):
             bot.conn.close()
