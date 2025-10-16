@@ -359,6 +359,150 @@ class ChannelBot:
         """
         update.message.reply_text(help_text, parse_mode="HTML")
 
+    def post_to_channel(self, update: Update, context):
+        """Отправка сообщения в канал"""
+        if not self.is_admin(update):
+            update.message.reply_text("❌ Эта команда только для администраторов!")
+            return
+
+        if context.args:
+            message_text = " ".join(context.args)
+        else:
+            if update.message.reply_to_message:
+                message_text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+            else:
+                update.message.reply_text(
+                    "📝 Укажите текст сообщения после команды /post\n"
+                    "Или ответьте на сообщение командой /post"
+                )
+                return
+
+        try:
+            context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=message_text,
+                parse_mode="HTML"
+            )
+            update.message.reply_text("✅ Сообщение успешно отправлено в канал!")
+            logger.info(f"Post sent to channel by {update.effective_user.id}")
+        except Exception as e:
+            error_msg = f"❌ Ошибка при отправке: {e}"
+            update.message.reply_text(error_msg)
+            logger.error(f"Error posting to channel: {e}")
+
+    def schedule_post(self, update: Update, context):
+        """Планирование поста"""
+        if not self.is_admin(update):
+            update.message.reply_text("❌ Эта команда только для администраторов!")
+            return
+
+        if not context.args:
+            update.message.reply_text(
+                "⏰ Формат: /schedule \"текст сообщения\" HH:MM DD.MM.YYYY\n"
+                "Пример: /schedule \"Привет мир!\" 14:30 25.12.2024"
+            )
+            return
+
+        try:
+            message_parts = " ".join(context.args).split('"')
+            if len(message_parts) < 3:
+                raise ValueError("Неверный формат сообщения")
+            
+            message_text = message_parts[1]
+            time_date = message_parts[2].strip().split()
+            
+            if len(time_date) < 2:
+                raise ValueError("Укажите время и дату")
+            
+            time_str = time_date[0]
+            date_str = time_date[1] if len(time_date) > 1 else datetime.now().strftime("%d.%m.%Y")
+            
+            scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
+            
+            if scheduled_time <= datetime.now():
+                update.message.reply_text("❌ Укажите время в будущем!")
+                return
+            
+            post_id = self.db.add_scheduled_post(
+                update.effective_chat.id,
+                message_text,
+                scheduled_time
+            )
+            
+            update.message.reply_text(
+                f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y %H:%M')}\n"
+                f"ID поста: {post_id}"
+            )
+            
+        except ValueError as e:
+            update.message.reply_text(f"❌ Ошибка формата: {e}")
+        except Exception as e:
+            update.message.reply_text(f"❌ Ошибка: {e}")
+
+    def list_scheduled_posts(self, update: Update, context):
+        """Показать список запланированных постов"""
+        if not self.is_admin(update):
+            update.message.reply_text("❌ Эта команда только для администраторов!")
+            return
+
+        posts = self.db.get_all_scheduled_posts()
+        
+        if not posts:
+            update.message.reply_text("📭 Нет запланированных постов")
+            return
+        
+        posts_text = "📅 Запланированные посты:\n\n"
+        for post in posts:
+            post_time = datetime.strptime(post[4], "%Y-%m-%d %H:%M:%S")
+            posts_text += f"🆔 {post[0]}: {post[2][:50]}...\n"
+            posts_text += f"⏰ {post_time.strftime('%d.%m.%Y %H:%M')}\n\n"
+        
+        update.message.reply_text(posts_text)
+
+    def show_stats(self, update: Update, context):
+        """Показать статистику"""
+        if not self.is_admin(update):
+            update.message.reply_text("❌ Эта команда только для администраторов!")
+            return
+
+        posts = self.db.get_all_scheduled_posts()
+        stats_text = (
+            f"📊 Статистика бота:\n"
+            f"• Запланировано постов: {len(posts)}\n"
+            f"• Канал: {CHANNEL_ID}\n"
+            f"• Время сервера: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        update.message.reply_text(stats_text)
+
+    def handle_photo(self, update: Update, context):
+        """Обработка фотографий"""
+        if not self.is_admin(update):
+            return
+
+        keyboard = [
+            [InlineKeyboardButton("📢 Опубликовать в канал", callback_data="publish_photo")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        context.user_data['last_photo'] = update.message.photo[-1].file_id
+        context.user_data['last_caption'] = update.message.caption
+        
+        update.message.reply_text(
+            "📸 Фото получено! Выберите действие:",
+            reply_markup=reply_markup
+        )
+
+    def handle_document(self, update: Update, context):
+        """Обработка документов"""
+        if not self.is_admin(update):
+            return
+
+        update.message.reply_text(
+            "📎 Документ получен. Для публикации в канал используйте:\n"
+            "/post с текстом и прикрепленным документом"
+        )
+
     def handle_message(self, update: Update, context):
         """Обработка текстовых сообщений с кнопок"""
         if not self.is_admin(update):
@@ -439,7 +583,6 @@ class ChannelBot:
                 reply_markup=self.get_admin_keyboard()
             )
 
-    # Остальные методы остаются без изменений, но добавляем обработку новых callback_data
     def button_handler(self, update: Update, context):
         """Обработка нажатий на кнопки"""
         query = update.callback_query
@@ -459,6 +602,8 @@ class ChannelBot:
         elif data == "delete_post":
             query.edit_message_text("🗑️ Удаляем пост...")
             # Логика удаления
+        elif data == "publish_photo":
+            self.publish_photo_handler(query, context)
         else:
             # Старые обработчики
             if data == "create_post":
@@ -499,8 +644,29 @@ class ChannelBot:
         elif data == "cancel_schedule":
             query.edit_message_text("❌ Планирование отменено")
 
-    # Остальные методы (post_to_channel, schedule_post, list_scheduled_posts, show_stats, 
-    # handle_photo, handle_document, is_admin) остаются без изменений
+    def publish_photo_handler(self, query, context):
+        """Обработчик публикации фото"""
+        photo_id = context.user_data.get('last_photo')
+        caption = context.user_data.get('last_caption', '')
+        
+        if photo_id:
+            try:
+                context.bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=photo_id,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+                query.edit_message_text("✅ Фото опубликовано в канале!")
+            except Exception as e:
+                query.edit_message_text(f"❌ Ошибка: {e}")
+        else:
+            query.edit_message_text("❌ Фото не найдено")
+
+    def is_admin(self, update: Update) -> bool:
+        """Проверка прав администратора"""
+        user_id = update.effective_user.id
+        return user_id in ADMIN_IDS
 
     def run(self):
         """Запуск бота"""
