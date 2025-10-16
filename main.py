@@ -9,6 +9,9 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ReplyKeyboardMarkup, KeyboardButton
 import os
 from typing import Dict, List
+import atexit
+import signal
+import sys
 
 # Настройка логирования
 logging.basicConfig(
@@ -40,18 +43,19 @@ class Database:
                 chat_id INTEGER,
                 message_text TEXT,
                 media_path TEXT,
+                media_type TEXT,
                 scheduled_time DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         self.conn.commit()
 
-    def add_scheduled_post(self, chat_id: int, message_text: str, scheduled_time: datetime, media_path: str = None):
+    def add_scheduled_post(self, chat_id: int, message_text: str, scheduled_time: datetime, media_path: str = None, media_type: str = None):
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO scheduled_posts (chat_id, message_text, media_path, scheduled_time)
-            VALUES (?, ?, ?, ?)
-        ''', (chat_id, message_text, media_path, scheduled_time))
+            INSERT INTO scheduled_posts (chat_id, message_text, media_path, media_type, scheduled_time)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (chat_id, message_text, media_path, media_type, scheduled_time))
         self.conn.commit()
         return cursor.lastrowid
 
@@ -74,6 +78,17 @@ class Database:
         cursor.execute('SELECT * FROM scheduled_posts ORDER BY scheduled_time ASC')
         return cursor.fetchall()
 
+    def get_post_by_id(self, post_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM scheduled_posts WHERE id = ?', (post_id,))
+        return cursor.fetchone()
+
+    def close_connection(self):
+        """Закрытие соединения с БД"""
+        if self.conn:
+            self.conn.close()
+            logger.info("Соединение с БД закрыто")
+
 # Основной класс бота для PTB v13.x
 class ChannelBot:
     def __init__(self, token: str):
@@ -82,6 +97,7 @@ class ChannelBot:
         self.db = Database()
         self.setup_handlers()
         self.setup_scheduler()
+        self.running = True
 
     def setup_handlers(self):
         """Настройка обработчиков для PTB v13"""
@@ -94,6 +110,7 @@ class ChannelBot:
         self.dispatcher.add_handler(CommandHandler("stats", self.show_stats))
         self.dispatcher.add_handler(CommandHandler("menu", self.show_main_menu))
         self.dispatcher.add_handler(CommandHandler("cancel", self.cancel_action))
+        self.dispatcher.add_handler(CommandHandler("delete_post", self.delete_post_command))
         
         # Обработчики кнопок
         self.dispatcher.add_handler(CallbackQueryHandler(self.button_handler))
@@ -112,6 +129,8 @@ class ChannelBot:
     def setup_scheduler(self):
         """Настройка планировщика для проверки отложенных постов"""
         def check_pending_posts():
+            if not self.running:
+                return
             try:
                 pending_posts = self.db.get_pending_posts()
                 for post in pending_posts:
@@ -127,7 +146,7 @@ class ChannelBot:
         schedule.every(1).minutes.do(check_pending_posts)
         
         def run_scheduler():
-            while True:
+            while self.running:
                 schedule.run_pending()
                 time.sleep(1)
         
@@ -138,21 +157,31 @@ class ChannelBot:
         """Отправка запланированного поста"""
         try:
             bot = self.updater.bot
-            if post[3]:  # Если есть медиа
-                if post[3].endswith(('.jpg', '.jpeg', '.png')):
-                    bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=open(post[3], 'rb'),
-                        caption=post[2],
-                        parse_mode="HTML"
-                    )
+            media_path = post[3]
+            media_type = post[5] if len(post) > 5 else None
+            
+            if media_path and os.path.exists(media_path):
+                if media_type == 'photo' or media_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    with open(media_path, 'rb') as photo:
+                        bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=photo,
+                            caption=post[2],
+                            parse_mode="HTML"
+                        )
                 else:
-                    bot.send_document(
-                        chat_id=CHANNEL_ID,
-                        document=open(post[3], 'rb'),
-                        caption=post[2],
-                        parse_mode="HTML"
-                    )
+                    with open(media_path, 'rb') as document:
+                        bot.send_document(
+                            chat_id=CHANNEL_ID,
+                            document=document,
+                            caption=post[2],
+                            parse_mode="HTML"
+                        )
+                # Удаляем временный файл после отправки
+                try:
+                    os.remove(media_path)
+                except Exception as e:
+                    logger.warning(f"Could not delete media file {media_path}: {e}")
             else:
                 bot.send_message(
                     chat_id=CHANNEL_ID,
@@ -161,6 +190,26 @@ class ChannelBot:
                 )
         except Exception as e:
             logger.error(f"Error sending scheduled post: {e}")
+
+    def validate_schedule_time(self, scheduled_time: datetime) -> bool:
+        """Проверка корректности времени планирования"""
+        min_time = datetime.now() + timedelta(minutes=5)
+        max_time = datetime.now() + timedelta(days=365)  # 1 год максимум
+        return min_time <= scheduled_time <= max_time
+
+    def validate_message_length(self, text: str) -> bool:
+        """Проверка длины сообщения"""
+        return len(text) <= 4096  # Лимит Telegram
+
+    def check_bot_channel_permissions(self):
+        """Проверка прав бота в канале"""
+        try:
+            chat = self.updater.bot.get_chat(CHANNEL_ID)
+            logger.info(f"Бот имеет доступ к каналу: {chat.title}")
+            return True
+        except Exception as e:
+            logger.error(f"Бот не имеет доступа к каналу: {e}")
+            return False
 
     def get_main_keyboard(self):
         """Основная клавиатура меню"""
@@ -274,10 +323,35 @@ class ChannelBot:
         ]
         return InlineKeyboardMarkup(keyboard)
 
+    def get_post_management_keyboard(self, post_id: int):
+        """Inline клавиатура для управления конкретным постом"""
+        keyboard = [
+            [
+                InlineKeyboardButton("📢 Опубликовать сейчас", callback_data=f"publish_{post_id}"),
+                InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{post_id}")
+            ],
+            [
+                InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_{post_id}"),
+                InlineKeyboardButton("⏰ Изменить время", callback_data=f"reschedule_{post_id}")
+            ]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
     # Основные команды
     def start(self, update: Update, context):
         """Обработчик команды /start"""
         user = update.effective_user
+        
+        # Проверка прав бота в канале при первом запуске
+        if not hasattr(self, 'channel_checked'):
+            if self.check_bot_channel_permissions():
+                self.channel_checked = True
+            else:
+                update.message.reply_text(
+                    "❌ Бот не имеет доступа к каналу! Пожалуйста, добавьте бота как администратора в канал.",
+                    reply_markup=self.get_main_keyboard()
+                )
+                return
         
         welcome_text = f"""
 🎉 Добро пожаловать, {user.first_name}!
@@ -339,7 +413,7 @@ class ChannelBot:
 
 📅 <b>Планирование:</b>
 • «📅 Запланировать» - создать отложенный пост
-• Формат: «текст» HH:MM DD.MM.YYYY
+• Формат: /schedule "текст" HH:MM DD.MM.YYYY
 
 🖼️ <b>Медиа:</b>
 • Отправьте фото/документ с подписью
@@ -348,6 +422,7 @@ class ChannelBot:
 📊 <b>Управление:</b>
 • «📋 Список постов» - все запланированные
 • «📊 Статистика» - аналитика канала
+• /delete_post ID - удалить запланированный пост
 
 ⚡ <b>Быстрые команды:</b>
 /post - опубликовать сейчас
@@ -369,13 +444,18 @@ class ChannelBot:
             message_text = " ".join(context.args)
         else:
             if update.message.reply_to_message:
-                message_text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+                message_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
             else:
                 update.message.reply_text(
                     "📝 Укажите текст сообщения после команды /post\n"
                     "Или ответьте на сообщение командой /post"
                 )
                 return
+
+        # Валидация длины сообщения
+        if not self.validate_message_length(message_text):
+            update.message.reply_text("❌ Сообщение слишком длинное! Максимум 4096 символов.")
+            return
 
         try:
             context.bot.send_message(
@@ -406,7 +486,7 @@ class ChannelBot:
         try:
             message_parts = " ".join(context.args).split('"')
             if len(message_parts) < 3:
-                raise ValueError("Неверный формат сообщения")
+                raise ValueError("Неверный формат сообщения. Используйте кавычки для текста.")
             
             message_text = message_parts[1]
             time_date = message_parts[2].strip().split()
@@ -419,8 +499,18 @@ class ChannelBot:
             
             scheduled_time = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
             
-            if scheduled_time <= datetime.now():
-                update.message.reply_text("❌ Укажите время в будущем!")
+            # Валидация времени
+            if not self.validate_schedule_time(scheduled_time):
+                update.message.reply_text(
+                    "❌ Некорректное время планирования!\n"
+                    "• Минимум: через 5 минут\n"
+                    "• Максимум: 1 год вперед"
+                )
+                return
+            
+            # Валидация длины сообщения
+            if not self.validate_message_length(message_text):
+                update.message.reply_text("❌ Сообщение слишком длинное! Максимум 4096 символов.")
                 return
             
             post_id = self.db.add_scheduled_post(
@@ -431,7 +521,8 @@ class ChannelBot:
             
             update.message.reply_text(
                 f"✅ Пост запланирован на {scheduled_time.strftime('%d.%m.%Y %H:%M')}\n"
-                f"ID поста: {post_id}"
+                f"🆔 ID поста: {post_id}\n"
+                f"📝 Текст: {message_text[:100]}{'...' if len(message_text) > 100 else ''}"
             )
             
         except ValueError as e:
@@ -454,10 +545,42 @@ class ChannelBot:
         posts_text = "📅 Запланированные посты:\n\n"
         for post in posts:
             post_time = datetime.strptime(post[4], "%Y-%m-%d %H:%M:%S")
+            time_left = post_time - datetime.now()
+            hours_left = int(time_left.total_seconds() // 3600)
+            minutes_left = int((time_left.total_seconds() % 3600) // 60)
+            
             posts_text += f"🆔 {post[0]}: {post[2][:50]}...\n"
-            posts_text += f"⏰ {post_time.strftime('%d.%m.%Y %H:%M')}\n\n"
+            posts_text += f"⏰ {post_time.strftime('%d.%m.%Y %H:%M')}\n"
+            posts_text += f"⏳ Осталось: {hours_left}ч {minutes_left}м\n\n"
         
+        posts_text += "ℹ️ Используйте /delete_post ID для удаления"
         update.message.reply_text(posts_text)
+
+    def delete_post_command(self, update: Update, context):
+        """Удаление запланированного поста"""
+        if not self.is_admin(update):
+            update.message.reply_text("❌ Эта команда только для администраторов!")
+            return
+
+        if not context.args:
+            update.message.reply_text("❌ Укажите ID поста: /delete_post ID")
+            return
+
+        try:
+            post_id = int(context.args[0])
+            post = self.db.get_post_by_id(post_id)
+            
+            if not post:
+                update.message.reply_text("❌ Пост с таким ID не найден")
+                return
+            
+            self.db.delete_scheduled_post(post_id)
+            update.message.reply_text(f"✅ Пост {post_id} удален из планировщика")
+            
+        except ValueError:
+            update.message.reply_text("❌ ID поста должен быть числом")
+        except Exception as e:
+            update.message.reply_text(f"❌ Ошибка при удалении: {e}")
 
     def show_stats(self, update: Update, context):
         """Показать статистику"""
@@ -466,27 +589,43 @@ class ChannelBot:
             return
 
         posts = self.db.get_all_scheduled_posts()
+        now = datetime.now()
+        
+        # Статистика по времени
+        upcoming_posts = [p for p in posts if datetime.strptime(p[4], "%Y-%m-%d %H:%M:%S") > now]
+        past_posts = [p for p in posts if datetime.strptime(p[4], "%Y-%m-%d %H:%M:%S") <= now]
+        
         stats_text = (
-            f"📊 Статистика бота:\n"
-            f"• Запланировано постов: {len(posts)}\n"
-            f"• Канал: {CHANNEL_ID}\n"
-            f"• Время сервера: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            f"📊 <b>Статистика бота</b>\n\n"
+            f"• 📅 Всего постов в БД: {len(posts)}\n"
+            f"• ⏳ Ожидают публикации: {len(upcoming_posts)}\n"
+            f"• ✅ Опубликовано: {len(past_posts)}\n"
+            f"• 📢 Канал: {CHANNEL_ID}\n"
+            f"• 🕒 Время сервера: {now.strftime('%d.%m.%Y %H:%M:%S')}\n"
+            f"• 🤖 Статус бота: {'🟢 Активен' if self.running else '🔴 Остановлен'}"
         )
         
-        update.message.reply_text(stats_text)
+        update.message.reply_text(stats_text, parse_mode="HTML")
 
     def handle_photo(self, update: Update, context):
         """Обработка фотографий"""
         if not self.is_admin(update):
             return
 
+        # Сохраняем информацию о фото
+        photo_file = update.message.photo[-1].get_file()
+        photo_path = f"temp_photo_{update.message.message_id}.jpg"
+        photo_file.download(photo_path)
+        
+        context.user_data['last_photo_path'] = photo_path
+        context.user_data['last_photo_id'] = update.message.photo[-1].file_id
+        context.user_data['last_caption'] = update.message.caption or ""
+        
         keyboard = [
             [InlineKeyboardButton("📢 Опубликовать в канал", callback_data="publish_photo")],
+            [InlineKeyboardButton("📅 Запланировать публикацию", callback_data="schedule_photo")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        context.user_data['last_photo'] = update.message.photo[-1].file_id
-        context.user_data['last_caption'] = update.message.caption
         
         update.message.reply_text(
             "📸 Фото получено! Выберите действие:",
@@ -498,9 +637,24 @@ class ChannelBot:
         if not self.is_admin(update):
             return
 
+        # Сохраняем информацию о документе
+        document_file = update.message.document.get_file()
+        document_path = f"temp_document_{update.message.message_id}_{update.message.document.file_name}"
+        document_file.download(document_path)
+        
+        context.user_data['last_document_path'] = document_path
+        context.user_data['last_document_id'] = update.message.document.file_id
+        context.user_data['last_caption'] = update.message.caption or ""
+        
+        keyboard = [
+            [InlineKeyboardButton("📢 Опубликовать в канал", callback_data="publish_document")],
+            [InlineKeyboardButton("📅 Запланировать публикацию", callback_data="schedule_document")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         update.message.reply_text(
-            "📎 Документ получен. Для публикации в канал используйте:\n"
-            "/post с текстом и прикрепленным документом"
+            "📎 Документ получен! Выберите действие:",
+            reply_markup=reply_markup
         )
 
     def handle_message(self, update: Update, context):
@@ -575,6 +729,17 @@ class ChannelBot:
                 parse_mode="HTML"
             )
             
+        elif text == "🕐 Проверить посты":
+            self.list_scheduled_posts(update, context)
+            
+        elif text == "🧹 Очистить старые":
+            update.message.reply_text(
+                "🧹 <b>Очистка старых постов</b>\n\n"
+                "Эта функция будет удалять уже опубликованные посты из БД.\n"
+                "В разработке 🚧",
+                parse_mode="HTML"
+            )
+            
         else:
             # Если сообщение не соответствует кнопкам, предлагаем меню
             update.message.reply_text(
@@ -604,6 +769,18 @@ class ChannelBot:
             # Логика удаления
         elif data == "publish_photo":
             self.publish_photo_handler(query, context)
+        elif data == "schedule_photo":
+            self.schedule_photo_handler(query, context)
+        elif data == "publish_document":
+            self.publish_document_handler(query, context)
+        elif data == "schedule_document":
+            self.schedule_document_handler(query, context)
+        elif data.startswith("publish_"):
+            post_id = int(data.split("_")[1])
+            self.publish_post_now(query, context, post_id)
+        elif data.startswith("delete_"):
+            post_id = int(data.split("_")[1])
+            self.delete_post_handler(query, context, post_id)
         else:
             # Старые обработчики
             if data == "create_post":
@@ -622,18 +799,18 @@ class ChannelBot:
         
         if data == "schedule_1h":
             scheduled_time = now + timedelta(hours=1)
-            query.edit_message_text(f"⏰ Пост запланирован на {scheduled_time.strftime('%H:%M')}")
+            self.schedule_quick_post(query, context, scheduled_time, "через 1 час")
         elif data == "schedule_3h":
             scheduled_time = now + timedelta(hours=3)
-            query.edit_message_text(f"⏰ Пост запланирован на {scheduled_time.strftime('%H:%M')}")
+            self.schedule_quick_post(query, context, scheduled_time, "через 3 часа")
         elif data == "schedule_tomorrow_morning":
             tomorrow = now + timedelta(days=1)
             scheduled_time = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
-            query.edit_message_text(f"📅 Пост запланирован на завтра утро (09:00)")
+            self.schedule_quick_post(query, context, scheduled_time, "завтра утро (09:00)")
         elif data == "schedule_tomorrow_evening":
             tomorrow = now + timedelta(days=1)
             scheduled_time = tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
-            query.edit_message_text(f"📅 Пост запланирован на завтра вечер (18:00)")
+            self.schedule_quick_post(query, context, scheduled_time, "завтра вечер (18:00)")
         elif data == "schedule_custom":
             query.edit_message_text(
                 "🗓️ Введите дату и время в формате:\n"
@@ -644,35 +821,139 @@ class ChannelBot:
         elif data == "cancel_schedule":
             query.edit_message_text("❌ Планирование отменено")
 
+    def schedule_quick_post(self, query, context, scheduled_time, description):
+        """Быстрое планирование поста"""
+        if 'last_message_text' in context.user_data:
+            message_text = context.user_data['last_message_text']
+            post_id = self.db.add_scheduled_post(
+                query.message.chat_id,
+                message_text,
+                scheduled_time
+            )
+            query.edit_message_text(
+                f"✅ Пост запланирован на {description}\n"
+                f"🆔 ID: {post_id}\n"
+                f"📝 Текст: {message_text[:100]}{'...' if len(message_text) > 100 else ''}"
+            )
+        else:
+            query.edit_message_text(
+                "❌ Не найден текст для публикации. Сначала отправьте текст сообщения."
+            )
+
     def publish_photo_handler(self, query, context):
         """Обработчик публикации фото"""
-        photo_id = context.user_data.get('last_photo')
+        photo_path = context.user_data.get('last_photo_path')
         caption = context.user_data.get('last_caption', '')
         
-        if photo_id:
+        if photo_path and os.path.exists(photo_path):
             try:
-                context.bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=photo_id,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
+                with open(photo_path, 'rb') as photo:
+                    context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=photo,
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
                 query.edit_message_text("✅ Фото опубликовано в канале!")
+                # Очищаем временные данные
+                os.remove(photo_path)
+                context.user_data.pop('last_photo_path', None)
+                context.user_data.pop('last_caption', None)
             except Exception as e:
                 query.edit_message_text(f"❌ Ошибка: {e}")
         else:
-            query.edit_message_text("❌ Фото не найдено")
+            query.edit_message_text("❌ Фото не найдено или было удалено")
+
+    def schedule_photo_handler(self, query, context):
+        """Планирование публикации фото"""
+        query.edit_message_text(
+            "⏰ Для планирования фото используйте текстовую команду:\n"
+            "/schedule с прикрепленным фото и текстом"
+        )
+
+    def publish_document_handler(self, query, context):
+        """Обработчик публикации документа"""
+        document_path = context.user_data.get('last_document_path')
+        caption = context.user_data.get('last_caption', '')
+        
+        if document_path and os.path.exists(document_path):
+            try:
+                with open(document_path, 'rb') as document:
+                    context.bot.send_document(
+                        chat_id=CHANNEL_ID,
+                        document=document,
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                query.edit_message_text("✅ Документ опубликован в канале!")
+                # Очищаем временные данные
+                os.remove(document_path)
+                context.user_data.pop('last_document_path', None)
+                context.user_data.pop('last_caption', None)
+            except Exception as e:
+                query.edit_message_text(f"❌ Ошибка: {e}")
+        else:
+            query.edit_message_text("❌ Документ не найден или был удален")
+
+    def schedule_document_handler(self, query, context):
+        """Планирование публикации документа"""
+        query.edit_message_text(
+            "⏰ Для планирования документа используйте текстовую команду:\n"
+            "/schedule с прикрепленным документом и текстом"
+        )
+
+    def publish_post_now(self, query, context, post_id):
+        """Немедленная публикация запланированного поста"""
+        post = self.db.get_post_by_id(post_id)
+        if post:
+            try:
+                self.send_scheduled_post(post)
+                self.db.delete_scheduled_post(post_id)
+                query.edit_message_text(f"✅ Пост {post_id} опубликован сейчас!")
+            except Exception as e:
+                query.edit_message_text(f"❌ Ошибка публикации: {e}")
+        else:
+            query.edit_message_text("❌ Пост не найден")
+
+    def delete_post_handler(self, query, context, post_id):
+        """Удаление запланированного поста"""
+        post = self.db.get_post_by_id(post_id)
+        if post:
+            self.db.delete_scheduled_post(post_id)
+            query.edit_message_text(f"✅ Пост {post_id} удален из планировщика")
+        else:
+            query.edit_message_text("❌ Пост не найден")
 
     def is_admin(self, update: Update) -> bool:
         """Проверка прав администратора"""
         user_id = update.effective_user.id
         return user_id in ADMIN_IDS
 
+    def stop_bot(self):
+        """Остановка бота"""
+        logger.info("Остановка бота...")
+        self.running = False
+        self.updater.stop()
+        self.db.close_connection()
+        logger.info("Бот остановлен")
+
     def run(self):
         """Запуск бота"""
         logger.info("Бот запущен с улучшенным меню!")
+        
+        # Проверка доступа к каналу
+        if not self.check_bot_channel_permissions():
+            logger.error("Бот не имеет доступа к каналу! Добавьте бота как администратора.")
+        
         self.updater.start_polling()
+        logger.info("Бот начал работу")
         self.updater.idle()
+
+# Обработчики сигналов для graceful shutdown
+def signal_handler(signum, frame, bot):
+    print(f"\n🛑 Получен сигнал {signum}. Останавливаем бота...")
+    bot.stop_bot()
+    sys.exit(0)
 
 # Запуск бота
 if __name__ == "__main__":
@@ -680,5 +961,17 @@ if __name__ == "__main__":
         print("❌ Установите BOT_TOKEN в коде!")
         exit(1)
     
-    bot = ChannelBot(BOT_TOKEN)
-    bot.run()
+    try:
+        bot = ChannelBot(BOT_TOKEN)
+        
+        # Регистрация обработчиков сигналов
+        signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f, bot))
+        signal.signal(signal.SIGTERM, lambda s, f: signal_handler(s, f, bot))
+        
+        # Регистрация функции закрытия при выходе
+        atexit.register(bot.stop_bot)
+        
+        bot.run()
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
+        sys.exit(1)
