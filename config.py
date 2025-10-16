@@ -1,10 +1,13 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+# Токен бота
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+# ID канала (начинается с @ или -100)
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@your_channel_username")
 
-if not TELEGRAM_BOT_TOKEN or not DEEPSEEK_API_KEY:
-    raise ValueError("Необходимо установить TELEGRAM_BOT_TOKEN и DEEPSEEK_API_KEY в .env файле")
+# ID администраторов
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "123456789").split(',')))
+
+# Настройки базы данных
+DATABASE_URL = os.getenv("DATABASE_URL", "channel_bot.db")
