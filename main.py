@@ -9,10 +9,13 @@ import sys
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram import F
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.types import ReplyKeyboardRemove
+from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -49,9 +52,9 @@ DEFAULT_LIFETIMES = {
 MAX_FILTERS_PER_USER = 50
 
 # Инициализация бота
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 # ========== УЛУЧШЕНИЯ: БЕЗОПАСНОСТЬ БАЗЫ ДАННЫХ ==========
 @contextmanager
@@ -180,152 +183,149 @@ def validate_filter_name(name: str):
 
 def get_main_keyboard(user_id=None):
     """Главная клавиатура с проверкой прав администратора"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("📋 Мои фильтры"),
-        types.KeyboardButton("✨ Добавить фильтр")
-    )
-    keyboard.row(
-        types.KeyboardButton("⏳ Сроки замены"),
-        types.KeyboardButton("⚙️ Управление")
-    )
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="📋 Мои фильтры")
+    builder.button(text="✨ Добавить фильтр")
+    builder.button(text="⏳ Сроки замены")
+    builder.button(text="⚙️ Управление")
+    
     # Правильная проверка администратора
     if user_id and user_id == ADMIN_ID:
-        keyboard.row(types.KeyboardButton("👑 Админ панель"))
-    return keyboard
+        builder.button(text="👑 Админ панель")
+    
+    builder.adjust(2, 2, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_filter_type_keyboard():
-    """Клавиатура для выбора типа фильтра (убраны механический, престиж, кристалл, угольный)"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    """Клавиатура для выбора типа фильтра"""
+    builder = ReplyKeyboardBuilder()
     
-    # Только оставшиеся фильтры
-    keyboard.row(
-        types.KeyboardButton("🔧 Магистральный SL10"),
-        types.KeyboardButton("🔧 Магистральный SL20")
-    )
-    keyboard.row(
-        types.KeyboardButton("💧 Гейзер"),
-        types.KeyboardButton("💧 Аквафор")
-    )
-    keyboard.row(types.KeyboardButton("📝 Другой тип"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    builder.button(text="🔧 Магистральный SL10")
+    builder.button(text="🔧 Магистральный SL20")
+    builder.button(text="💧 Гейзер")
+    builder.button(text="💧 Аквафор")
+    builder.button(text="📝 Другой тип")
+    builder.button(text="❌ Отмена")
     
-    return keyboard
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_multiple_filters_keyboard():
     """Упрощенная клавиатура для нескольких фильтров"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    builder = ReplyKeyboardBuilder()
     
-    keyboard.row(types.KeyboardButton("➕ Добавить фильтр"))
-    keyboard.row(types.KeyboardButton("➕ 1 фильтр"))
-    keyboard.row(types.KeyboardButton("✅ Готово"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    builder.button(text="➕ Добавить фильтр")
+    builder.button(text="➕ 1 фильтр")
+    builder.button(text="✅ Готово")
+    builder.button(text="❌ Отмена")
     
-    return keyboard
+    builder.adjust(2, 2)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_add_filter_keyboard():
     """Обновленная клавиатура добавления фильтра"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("🔧 Один фильтр"),
-        types.KeyboardButton("📦 Несколько фильтров")
-    )
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
-    return keyboard
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="🔧 Один фильтр")
+    builder.button(text="📦 Несколько фильтров")
+    builder.button(text="🔙 Главное меню")
+    
+    builder.adjust(2, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_location_keyboard():
     """Упрощенная клавиатура для места установки"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(types.KeyboardButton("📍 Указать место установки"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
-    return keyboard
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="📍 Указать место установки")
+    builder.button(text="❌ Отмена")
+    
+    builder.adjust(1, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_filters_list_keyboard(filters, action="delete"):
     """Клавиатура со списком фильтров для удаления или редактирования"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    builder = ReplyKeyboardBuilder()
     
     for f in filters:
         button_text = f"#{f['id']} {f['filter_type']} - {f['location']}"
-        keyboard.add(types.KeyboardButton(button_text))
+        builder.button(text=button_text)
     
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
-    return keyboard
+    builder.button(text="🔙 Главное меню")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_edit_filter_keyboard():
     """Клавиатура для редактирования фильтра"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    keyboard.row(
-        types.KeyboardButton("✏️ Тип фильтра"),
-        types.KeyboardButton("📍 Место установки")
-    )
-    keyboard.row(
-        types.KeyboardButton("📅 Дата замены"),
-        types.KeyboardButton("⏱️ Срок службы")
-    )
-    keyboard.row(types.KeyboardButton("🔙 К списку фильтров"))
-    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
-    return keyboard
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="✏️ Тип фильтра")
+    builder.button(text="📍 Место установки")
+    builder.button(text="📅 Дата замены")
+    builder.button(text="⏱️ Срок службы")
+    builder.button(text="🔙 К списку фильтров")
+    builder.button(text="🔙 Главное меню")
+    
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_admin_keyboard():
     """Клавиатура админ панели"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("📊 Общая статистика"),
-        types.KeyboardButton("👥 Пользователи")
-    )
-    keyboard.row(
-        types.KeyboardButton("🗑️ Очистить базу"),
-        types.KeyboardButton("🔙 Главное меню")
-    )
-    return keyboard
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="📊 Общая статистика")
+    builder.button(text="👥 Пользователи")
+    builder.button(text="🗑️ Очистить базу")
+    builder.button(text="🔙 Главное меню")
+    
+    builder.adjust(2, 2)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_confirmation_keyboard(filter_id=None, action="delete"):
     """Клавиатура подтверждения удаления"""
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    builder = InlineKeyboardBuilder()
+    
     if action == "delete":
-        keyboard.add(
-            types.InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{filter_id}"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete")
-        )
+        builder.button(text="✅ Да, удалить", callback_data=f"confirm_delete_{filter_id}")
+        builder.button(text="❌ Отмена", callback_data="cancel_delete")
     elif action == "clear_db":
-        keyboard.add(
-            types.InlineKeyboardButton("✅ Да, очистить всю базу", callback_data="confirm_clear_db"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_clear_db")
-        )
-    return keyboard
+        builder.button(text="✅ Да, очистить всю базу", callback_data="confirm_clear_db")
+        builder.button(text="❌ Отмена", callback_data="cancel_clear_db")
+    
+    builder.adjust(2)
+    return builder.as_markup()
 
 def get_management_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row(
-        types.KeyboardButton("✏️ Редактировать"),
-        types.KeyboardButton("🗑️ Удалить")
-    )
-    keyboard.row(
-        types.KeyboardButton("📊 Статистика"),
-        types.KeyboardButton("🔙 Главное меню")
-    )
-    return keyboard
+    """Клавиатура управления"""
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="✏️ Редактировать")
+    builder.button(text="🗑️ Удалить")
+    builder.button(text="📊 Статистика")
+    builder.button(text="🔙 Главное меню")
+    
+    builder.adjust(2, 2)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_cancel_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("❌ Отмена"))
-    return keyboard
-
-def get_back_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(types.KeyboardButton("↩️ Назад"))
-    return keyboard
+    """Клавиатура отмены"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="❌ Отмена")
+    return builder.as_markup(resize_keyboard=True)
 
 def get_lifetime_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    keyboard.row(
-        types.KeyboardButton("3️⃣ 90 дней"),
-        types.KeyboardButton("6️⃣ 180 дней"),
-        types.KeyboardButton("1️⃣ 365 дней")
-    )
-    keyboard.row(types.KeyboardButton("📅 Другое количество"))
-    keyboard.row(types.KeyboardButton("❌ Отмена"))
-    return keyboard
+    """Клавиатура выбора срока службы"""
+    builder = ReplyKeyboardBuilder()
+    
+    builder.button(text="3️⃣ 90 дней")
+    builder.button(text="6️⃣ 180 дней")
+    builder.button(text="1️⃣ 365 дней")
+    builder.button(text="📅 Другое количество")
+    builder.button(text="❌ Отмена")
+    
+    builder.adjust(3, 1, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 # ========== УЛУЧШЕНИЯ: ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 def init_db():
@@ -642,8 +642,7 @@ async def check_expired_filters():
                     f"📍 {location}\n"
                     f"📅 Срок истекает: {expiry_date_nice}\n"
                     f"⏳ Осталось дней: {days_until_expiry}\n\n"
-                    f"⚠️ <i>Рекомендуется заменить в ближайшее время</i>",
-                    parse_mode='HTML'
+                    f"⚠️ <i>Рекомендуется заменить в ближайшее время</i>"
                 )
                 notified_users.add(user_id)
                 await asyncio.sleep(0.1)  # Небольшая задержка между сообщениями
@@ -664,8 +663,7 @@ async def check_expired_filters():
                         f"📍 {location}\n"
                         f"📅 Срок истек: {expiry_date_nice}\n"
                         f"⏰ Просрочено дней: {days_expired}\n\n"
-                        f"❌ <i>Требуется немедленная замена!</i>",
-                        parse_mode='HTML'
+                        f"❌ <i>Требуется немедленная замена!</i>"
                     )
                     await asyncio.sleep(0.1)
                 except Exception as e:
@@ -675,8 +673,8 @@ async def check_expired_filters():
         logging.error(f"Ошибка при проверке просроченных фильтров: {e}")
 
 # Глобальный обработчик ошибок
-@dp.errors_handler()
-async def errors_handler(update, exception):
+@dp.error()
+async def errors_handler(event, exception):
     """Глобальный обработчик ошибок"""
     logging.error(f"Ошибка: {exception}\n{traceback.format_exc()}")
     
@@ -710,7 +708,7 @@ async def schedule_daily_check():
         # Ожидаем 1 час до следующей проверки
         await asyncio.sleep(60 * 60)
 
-async def on_startup(dp):
+async def on_startup(bot):
     """Действия при запуске бота"""
     logging.info("Бот запущен")
     
@@ -728,11 +726,11 @@ async def on_startup(dp):
 
 # ========== НОВЫЕ ОБРАБОТЧИКИ ДЛЯ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
 
-@dp.message_handler(state=MultipleFiltersStates.waiting_change_date)
+@dp.message(MultipleFiltersStates.waiting_change_date)
 async def process_multiple_change_date(message: types.Message, state: FSMContext):
     """Обработка даты замены для нескольких фильтров"""
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -744,7 +742,7 @@ async def process_multiple_change_date(message: types.Message, state: FSMContext
             selected_filters = data['selected_filters']
             location = data['location']
         
-        await MultipleFiltersStates.next()
+        await state.set_state(MultipleFiltersStates.waiting_lifetime)
         
         await message.answer(
             f"⏱️ <b>Срок службы для всех фильтров</b>\n\n"
@@ -752,7 +750,6 @@ async def process_multiple_change_date(message: types.Message, state: FSMContext
             f"📅 <i>Дата замены:</i> {format_date_nice(change_date)}\n"
             f"📦 <i>Количество фильтров:</i> {len(selected_filters)}\n\n"
             f"📝 <b>Выберите или введите срок службы в днях:</b>",
-            parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
         
@@ -763,15 +760,14 @@ async def process_multiple_change_date(message: types.Message, state: FSMContext
             f"💡 <i>{str(e)}</i>\n\n"
             f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
             f"<i>Например: {today_nice}</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
 
-@dp.message_handler(state=MultipleFiltersStates.waiting_lifetime)
+@dp.message(MultipleFiltersStates.waiting_lifetime)
 async def process_multiple_lifetime(message: types.Message, state: FSMContext):
     """Обработка срока службы для нескольких фильтров"""
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -788,7 +784,6 @@ async def process_multiple_lifetime(message: types.Message, state: FSMContext):
             await message.answer(
                 "📅 <b>Введите срок службы в днях:</b>\n\n"
                 "💡 <i>Например: 30, 60, 90, 180, 365 и т.д.</i>",
-                parse_mode='HTML',
                 reply_markup=get_cancel_keyboard()
             )
             return
@@ -821,24 +816,22 @@ async def process_multiple_lifetime(message: types.Message, state: FSMContext):
             f"⏱️ <b>Срок службы:</b> {lifetime} дней\n\n"
             f"🔧 <b>Список фильтров:</b>\n{filters_list}\n\n"
             f"💫 <i>Теперь вы можете отслеживать срок их замены</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         
-        await state.finish()
+        await state.clear()
         
     except ValueError as e:
         await message.answer(
             f"❌ <b>Ошибка в сроке службы!</b>\n\n"
             f"💡 <i>{str(e)}</i>\n\n"
             f"📝 <b>Введите корректное число дней:</b>",
-            parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
 
 # ========== ОБРАБОТЧИКИ ДЛЯ УПРАВЛЕНИЯ ФИЛЬТРАМИ ==========
 
-@dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
+@dp.message(F.text == "📋 Мои фильтры")
 async def cmd_my_filters(message: types.Message):
     """Показать все фильтры пользователя"""
     filters = get_user_filters(message.from_user.id)
@@ -847,7 +840,6 @@ async def cmd_my_filters(message: types.Message):
         await message.answer(
             "📭 <b>У вас пока нет фильтров</b>\n\n"
             "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
@@ -873,10 +865,10 @@ async def cmd_my_filters(message: types.Message):
     
     # Добавляем инфографику
     infographic = create_expiry_infographic(filters)
-    await message.answer(response, parse_mode='HTML')
-    await message.answer(infographic, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+    await message.answer(response)
+    await message.answer(infographic, reply_markup=get_main_keyboard(message.from_user.id))
 
-@dp.message_handler(lambda message: message.text == "⏳ Сроки замены")
+@dp.message(F.text == "⏳ Сроки замены")
 async def cmd_expiry_dates(message: types.Message):
     """Показать сроки замены с инфографикой"""
     filters = get_user_filters(message.from_user.id)
@@ -885,15 +877,14 @@ async def cmd_expiry_dates(message: types.Message):
         await message.answer(
             "📭 <b>У вас пока нет фильтров</b>\n\n"
             "💫 <i>Добавьте первый фильтр для отслеживания сроков замены</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
     
     infographic = create_expiry_infographic(filters)
-    await message.answer(infographic, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+    await message.answer(infographic, reply_markup=get_main_keyboard(message.from_user.id))
 
-@dp.message_handler(lambda message: message.text == "📊 Статистика")
+@dp.message(F.text == "📊 Статистика")
 async def cmd_statistics(message: types.Message):
     """Показать статистику по фильтрам"""
     filters = get_user_filters(message.from_user.id)
@@ -902,7 +893,6 @@ async def cmd_statistics(message: types.Message):
         await message.answer(
             "📭 <b>У вас пока нет фильтров</b>\n\n"
             "💫 <i>Добавьте фильтры для просмотра статистики</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
@@ -951,13 +941,13 @@ async def cmd_statistics(message: types.Message):
     infographic = create_stats_infographic(stats, filters)
     detailed_stats = create_detailed_stats(stats, filters)
     
-    await message.answer(infographic, parse_mode='HTML')
-    await message.answer(detailed_stats, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+    await message.answer(infographic)
+    await message.answer(detailed_stats, reply_markup=get_main_keyboard(message.from_user.id))
 
 # ========== ОБРАБОТЧИКИ УДАЛЕНИЯ ФИЛЬТРОВ ==========
 
-@dp.message_handler(lambda message: message.text == "🗑️ Удалить")
-async def cmd_delete_filter(message: types.Message):
+@dp.message(F.text == "🗑️ Удалить")
+async def cmd_delete_filter(message: types.Message, state: FSMContext):
     """Начало процесса удаления фильтра"""
     filters = get_user_filters(message.from_user.id)
     
@@ -965,12 +955,11 @@ async def cmd_delete_filter(message: types.Message):
         await message.answer(
             "📭 <b>Нет фильтров для удаления</b>\n\n"
             "💫 <i>Добавьте фильтры перед использованием этой функции</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
     
-    await DeleteFilterStates.waiting_filter_selection.set()
+    await state.set_state(DeleteFilterStates.waiting_filter_selection)
     
     filters_list = "\n".join([f"• #{f['id']} {f['filter_type']} - {f['location']}" for f in filters])
     
@@ -979,15 +968,14 @@ async def cmd_delete_filter(message: types.Message):
         f"📋 <b>Ваши фильтры:</b>\n{filters_list}\n\n"
         f"🔢 <b>Выберите фильтр для удаления:</b>\n"
         f"<i>Нажмите на соответствующий номер фильтра</i>",
-        parse_mode='HTML',
         reply_markup=get_filters_list_keyboard(filters, "delete")
     )
 
-@dp.message_handler(state=DeleteFilterStates.waiting_filter_selection)
+@dp.message(DeleteFilterStates.waiting_filter_selection)
 async def process_delete_filter_selection(message: types.Message, state: FSMContext):
     """Обработка выбора фильтра для удаления"""
     if message.text == "🔙 Главное меню":
-        await state.finish()
+        await state.clear()
         await message.answer("🏠 Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -1007,26 +995,23 @@ async def process_delete_filter_selection(message: types.Message, state: FSMCont
                 f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n\n"
                 f"❓ <b>Вы уверены что хотите удалить этот фильтр?</b>\n"
                 f"<i>Это действие нельзя отменить</i>",
-                parse_mode='HTML',
                 reply_markup=get_confirmation_keyboard(filter_id, "delete")
             )
-            await state.finish()
+            await state.clear()
         else:
             await message.answer(
                 "❌ <b>Фильтр не найден!</b>\n\n"
                 "💡 <i>Выберите фильтр из списка</i>",
-                parse_mode='HTML',
                 reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "delete")
             )
     else:
         await message.answer(
             "❌ <b>Неверный формат!</b>\n\n"
             "💡 <i>Выберите фильтр из списка кнопок</i>",
-            parse_mode='HTML',
             reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "delete")
         )
 
-@dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_'))
+@dp.callback_query(F.data.startswith('confirm_delete_'))
 async def process_confirm_delete(callback_query: types.CallbackQuery):
     """Подтверждение удаления фильтра"""
     filter_id = int(callback_query.data.split('_')[2])
@@ -1047,8 +1032,7 @@ async def process_confirm_delete(callback_query: types.CallbackQuery):
         f"✅ <b>ФИЛЬТР УДАЛЕН!</b>\n\n"
         f"🗑️ <b>Удален фильтр:</b> #{filter_id} {filter_data['filter_type']}\n"
         f"📍 <b>Место:</b> {filter_data['location']}\n\n"
-        f"💫 <i>Фильтр успешно удален из вашего списка</i>",
-        parse_mode='HTML'
+        f"💫 <i>Фильтр успешно удален из вашего списка</i>"
     )
     
     await bot.send_message(
@@ -1057,13 +1041,12 @@ async def process_confirm_delete(callback_query: types.CallbackQuery):
         reply_markup=get_main_keyboard(user_id)
     )
 
-@dp.callback_query_handler(lambda c: c.data == 'cancel_delete')
+@dp.callback_query(F.data == 'cancel_delete')
 async def process_cancel_delete(callback_query: types.CallbackQuery):
     """Отмена удаления фильтра"""
     await callback_query.message.edit_text(
         "🚫 <b>УДАЛЕНИЕ ОТМЕНЕНО</b>\n\n"
-        "💡 <i>Фильтр не был удален</i>",
-        parse_mode='HTML'
+        "💡 <i>Фильтр не был удален</i>"
     )
     
     await bot.send_message(
@@ -1074,8 +1057,8 @@ async def process_cancel_delete(callback_query: types.CallbackQuery):
 
 # ========== ИСПРАВЛЕННЫЙ РАЗДЕЛ РЕДАКТИРОВАНИЯ ==========
 
-@dp.message_handler(lambda message: message.text == "✏️ Редактировать")
-async def cmd_edit_filter(message: types.Message):
+@dp.message(F.text == "✏️ Редактировать")
+async def cmd_edit_filter(message: types.Message, state: FSMContext):
     """Начало процесса редактирования фильтра"""
     filters = get_user_filters(message.from_user.id)
     
@@ -1083,12 +1066,11 @@ async def cmd_edit_filter(message: types.Message):
         await message.answer(
             "📭 <b>Нет фильтров для редактирования</b>\n\n"
             "💫 <i>Добавьте фильтры перед использованием этой функции</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
     
-    await EditFilterStates.waiting_filter_selection.set()
+    await state.set_state(EditFilterStates.waiting_filter_selection)
     
     filters_list = "\n".join([f"• #{f['id']} {f['filter_type']} - {f['location']}" for f in filters])
     
@@ -1097,14 +1079,13 @@ async def cmd_edit_filter(message: types.Message):
         f"📋 <b>Ваши фильтры:</b>\n{filters_list}\n\n"
         f"🔢 <b>Выберите фильтр для редактирования:</b>\n"
         f"<i>Нажмите на соответствующий номер фильтра</i>",
-        parse_mode='HTML',
         reply_markup=get_filters_list_keyboard(filters, "edit")
     )
 
-@dp.message_handler(state=EditFilterStates.waiting_filter_selection)
+@dp.message(EditFilterStates.waiting_filter_selection)
 async def process_edit_filter_selection(message: types.Message, state: FSMContext):
     if message.text == "🔙 Главное меню":
-        await state.finish()
+        await state.clear()
         await message.answer("🏠 Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -1122,7 +1103,7 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
             expiry_date_nice = format_date_nice(datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date())
             last_change_nice = format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date())
             
-            await EditFilterStates.waiting_field_selection.set()
+            await state.set_state(EditFilterStates.waiting_field_selection)
             await message.answer(
                 f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
                 f"🔧 <b>Тип:</b> {filter_data['filter_type']}\n"
@@ -1131,33 +1112,30 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
                 f"⏱️ <b>Срок службы:</b> {filter_data['lifetime_days']} дн.\n"
                 f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n\n"
                 f"🔄 <b>Что вы хотите изменить?</b>",
-                parse_mode='HTML',
                 reply_markup=get_edit_filter_keyboard()
             )
         else:
             await message.answer(
                 "❌ <b>Фильтр не найден!</b>\n\n"
                 "💡 <i>Выберите фильтр из списка</i>",
-                parse_mode='HTML',
                 reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "edit")
             )
     else:
         await message.answer(
             "❌ <b>Неверный формат!</b>\n\n"
             "💡 <i>Выберите фильтр из списка кнопок</i>",
-            parse_mode='HTML',
             reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "edit")
         )
 
-@dp.message_handler(state=EditFilterStates.waiting_field_selection)
+@dp.message(EditFilterStates.waiting_field_selection)
 async def process_edit_field_selection(message: types.Message, state: FSMContext):
     if message.text == "🔙 Главное меню":
-        await state.finish()
+        await state.clear()
         await message.answer("🏠 Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
     if message.text == "🔙 К списку фильтров":
-        await EditFilterStates.waiting_filter_selection.set()
+        await state.set_state(EditFilterStates.waiting_filter_selection)
         filters = get_user_filters(message.from_user.id)
         filters_list = "\n".join([f"• #{f['id']} {f['filter_type']} - {f['location']}" for f in filters])
         
@@ -1165,7 +1143,6 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
             f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
             f"📋 <b>Ваши фильтры:</b>\n{filters_list}\n\n"
             f"🔢 <b>Выберите фильтр для редактирования:</b>",
-            parse_mode='HTML',
             reply_markup=get_filters_list_keyboard(filters, "edit")
         )
         return
@@ -1174,54 +1151,50 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
         filter_data = data['editing_filter']
     
     if message.text == "✏️ Тип фильтра":
-        await EditFilterStates.waiting_new_value.set()
+        await state.set_state(EditFilterStates.waiting_new_value)
         data['editing_field'] = 'filter_type'
         await message.answer(
             f"✏️ <b>ИЗМЕНЕНИЕ ТИПА ФИЛЬТРА</b>\n\n"
             f"🔧 <b>Текущий тип:</b> {filter_data['filter_type']}\n\n"
             f"📝 <b>Введите новый тип фильтра:</b>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
     
     elif message.text == "📍 Место установки":
-        await EditFilterStates.waiting_new_value.set()
+        await state.set_state(EditFilterStates.waiting_new_value)
         data['editing_field'] = 'location'
         await message.answer(
             f"✏️ <b>ИЗМЕНЕНИЕ МЕСТА УСТАНОВКИ</b>\n\n"
             f"📍 <b>Текущее место:</b> {filter_data['location']}\n\n"
             f"📝 <b>Введите новое место установки:</b>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
     
     elif message.text == "📅 Дата замены":
-        await EditFilterStates.waiting_new_value.set()
+        await state.set_state(EditFilterStates.waiting_new_value)
         data['editing_field'] = 'last_change'
         last_change_nice = format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date())
         await message.answer(
             f"✏️ <b>ИЗМЕНЕНИЕ ДАТЫ ЗАМЕНЫ</b>\n\n"
             f"📅 <b>Текущая дата замены:</b> {last_change_nice}\n\n"
             f"📝 <b>Введите новую дату замены (ДД.ММ.ГГ):</b>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
     
     elif message.text == "⏱️ Срок службы":
-        await EditFilterStates.waiting_new_value.set()
+        await state.set_state(EditFilterStates.waiting_new_value)
         data['editing_field'] = 'lifetime_days'
         await message.answer(
             f"✏️ <b>ИЗМЕНЕНИЕ СРОКА СЛУЖБЫ</b>\n\n"
             f"⏱️ <b>Текущий срок службы:</b> {filter_data['lifetime_days']} дней\n\n"
             f"📝 <b>Введите новый срок службы в днях:</b>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
 
-@dp.message_handler(state=EditFilterStates.waiting_new_value)
+@dp.message(EditFilterStates.waiting_new_value)
 async def process_edit_new_value(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await EditFilterStates.waiting_field_selection.set()
+        await state.set_state(EditFilterStates.waiting_field_selection)
         async with state.proxy() as data:
             filter_data = data['editing_filter']
         
@@ -1236,7 +1209,6 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             f"⏱️ <b>Срок службы:</b> {filter_data['lifetime_days']} дн.\n"
             f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n\n"
             f"🔄 <b>Что вы хотите изменить?</b>",
-            parse_mode='HTML',
             reply_markup=get_edit_filter_keyboard()
         )
         return
@@ -1291,23 +1263,21 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             f"✏️ <b>Изменено поле:</b> {field_names[field]}\n"
             f"🔧 <b>Фильтр:</b> #{filter_id}\n\n"
             f"💫 <i>Данные успешно обновлены</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
-        await state.finish()
+        await state.clear()
         
     except ValueError as e:
         await message.answer(
             f"❌ <b>Ошибка в данных!</b>\n\n"
             f"💡 <i>{str(e)}</i>\n\n"
             f"📝 <i>Попробуйте ввести данные еще раз</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
 
 # ========== ОБНОВЛЕННЫЙ РАЗДЕЛ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
 
-@dp.message_handler(lambda message: message.text == "📦 Несколько фильтров")
+@dp.message(F.text == "📦 Несколько фильтров")
 async def cmd_multiple_filters(message: types.Message, state: FSMContext):
     """Начало процесса добавления нескольких фильтров"""
     # Проверяем лимит фильтров
@@ -1316,12 +1286,11 @@ async def cmd_multiple_filters(message: types.Message, state: FSMContext):
             f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
             f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
             f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
         
-    await MultipleFiltersStates.waiting_filters_list.set()
+    await state.set_state(MultipleFiltersStates.waiting_filters_list)
     
     # Инициализируем список выбранных фильтров
     async with state.proxy() as data:
@@ -1335,11 +1304,10 @@ async def cmd_multiple_filters(message: types.Message, state: FSMContext):
         "• <b>✅ Готово</b> - завершить добавление\n\n"
         "📝 <b>Текущий список:</b>\n"
         "<i>Пока пусто</i>",
-        parse_mode='HTML',
         reply_markup=get_multiple_filters_keyboard()
     )
 
-@dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
+@dp.message(MultipleFiltersStates.waiting_filters_list)
 async def process_multiple_filters_selection(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         if 'selected_filters' not in data:
@@ -1347,7 +1315,7 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
     
     # Обработка кнопки отмены
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -1357,7 +1325,6 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
             await message.answer(
                 "❌ <b>Список фильтров пуст!</b>\n\n"
                 "💡 <i>Добавьте хотя бы один фильтр перед завершением</i>",
-                parse_mode='HTML',
                 reply_markup=get_multiple_filters_keyboard()
             )
             return
@@ -1371,12 +1338,11 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
                 f"📦 <i>Пытаетесь добавить: {len(data['selected_filters'])}</i>\n"
                 f"💡 <i>Максимум: {MAX_FILTERS_PER_USER}</i>\n\n"
                 f"🔄 <i>Удалите некоторые фильтры или уменьшите список</i>",
-                parse_mode='HTML',
                 reply_markup=get_multiple_filters_keyboard()
             )
             return
         
-        await MultipleFiltersStates.waiting_location.set()
+        await state.set_state(MultipleFiltersStates.waiting_location)
         
         # Формируем красивый список фильтров
         filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
@@ -1387,7 +1353,6 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
             f"🔧 <b>Список фильтров:</b>\n{filters_text}\n\n"
             f"📍 <b>Укажите место установки для всех фильтров:</b>\n\n"
             f"💡 <i>Все фильтры будут установлены в одном месте</i>",
-            parse_mode='HTML',
             reply_markup=get_location_keyboard()
         )
         return
@@ -1397,7 +1362,6 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
         await message.answer(
             "🔧 <b>Выберите тип фильтра:</b>\n\n"
             "💡 <i>Доступны все варианты фильтров</i>",
-            parse_mode='HTML',
             reply_markup=get_filter_type_keyboard()
         )
         return
@@ -1419,7 +1383,6 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
             f"✅ <b>Добавлен:</b> {new_filter}\n\n"
             f"{status_text}\n\n"
             f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
-            parse_mode='HTML',
             reply_markup=get_multiple_filters_keyboard()
         )
         return
@@ -1448,13 +1411,11 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
                 f"✅ <b>Добавлен:</b> {filter_name}\n\n"
                 f"{status_text}\n\n"
                 f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
-                parse_mode='HTML',
                 reply_markup=get_multiple_filters_keyboard()
             )
         else:
             await message.answer(
                 f"ℹ️ <b>Фильтр уже в списке:</b> {filter_name}",
-                parse_mode='HTML',
                 reply_markup=get_multiple_filters_keyboard()
             )
         return
@@ -1473,20 +1434,17 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
                     f"✅ <b>Добавлен:</b> {validated_filter}\n\n"
                     f"📊 Всего в списке: {len(data['selected_filters'])}\n\n"
                     f"🔧 <b>Текущий список:</b>\n{filters_text}",
-                    parse_mode='HTML',
                     reply_markup=get_multiple_filters_keyboard()
                 )
             else:
                 await message.answer(
                     f"ℹ️ <b>Фильтр уже в списке:</b> {validated_filter}",
-                    parse_mode='HTML',
                     reply_markup=get_multiple_filters_keyboard()
                 )
         except ValueError as e:
             await message.answer(
                 f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
                 f"💡 <i>{str(e)}</i>",
-                parse_mode='HTML',
                 reply_markup=get_multiple_filters_keyboard()
             )
         return
@@ -1502,7 +1460,6 @@ async def process_multiple_filters_selection(message: types.Message, state: FSMC
         f"📦 <b>Добавление фильтров</b>\n\n"
         f"{status_text}\n\n"
         f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
-        parse_mode='HTML',
         reply_markup=get_multiple_filters_keyboard()
     )
 
@@ -1512,25 +1469,24 @@ def is_admin(user_id: int) -> bool:
     """Проверка прав администратора"""
     return user_id == ADMIN_ID
 
-@dp.message_handler(lambda message: message.text == "👑 Админ панель")
+@dp.message(F.text == "👑 Админ панель")
 async def cmd_admin_panel(message: types.Message):
     """Админ панель"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        await message.answer("❌ <b>Доступ запрещен!</b>")
         return
     
     await message.answer(
         "👑 <b>АДМИН ПАНЕЛЬ</b>\n\n"
         "💡 <i>Управление базой данных и статистика</i>",
-        parse_mode='HTML',
         reply_markup=get_admin_keyboard()
     )
 
-@dp.message_handler(lambda message: message.text == "📊 Общая статистика")
+@dp.message(F.text == "📊 Общая статистика")
 async def cmd_admin_stats(message: types.Message):
     """Общая статистика для админа"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        await message.answer("❌ <b>Доступ запрещен!</b>")
         return
     
     stats = get_all_users_stats()
@@ -1549,32 +1505,32 @@ async def cmd_admin_stats(message: types.Message):
         for i, user in enumerate(users[:10], 1):
             response += f"{i}. ID {user['user_id']}: {user['filter_count']} фильтров\n"
     
-    await message.answer(response, parse_mode='HTML', reply_markup=get_admin_keyboard())
+    await message.answer(response, reply_markup=get_admin_keyboard())
 
-@dp.message_handler(lambda message: message.text == "👥 Пользователи")
+@dp.message(F.text == "👥 Пользователи")
 async def cmd_admin_users(message: types.Message):
     """Список пользователей для админа"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        await message.answer("❌ <b>Доступ запрещен!</b>")
         return
     
     users = get_all_users()
     
     if not users:
-        await message.answer("📭 <b>Нет пользователей в базе</b>", parse_mode='HTML')
+        await message.answer("📭 <b>Нет пользователей в базе</b>")
         return
     
     response = "👥 <b>СПИСОК ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
     for i, user in enumerate(users, 1):
         response += f"{i}. <b>ID {user['user_id']}</b>: {user['filter_count']} фильтров\n"
     
-    await message.answer(response, parse_mode='HTML', reply_markup=get_admin_keyboard())
+    await message.answer(response, reply_markup=get_admin_keyboard())
 
-@dp.message_handler(lambda message: message.text == "🗑️ Очистить базу")
+@dp.message(F.text == "🗑️ Очистить базу")
 async def cmd_clear_database(message: types.Message):
     """Очистка всей базы данных"""
     if not is_admin(message.from_user.id):
-        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        await message.answer("❌ <b>Доступ запрещен!</b>")
         return
     
     stats = get_all_users_stats()
@@ -1588,11 +1544,10 @@ async def cmd_clear_database(message: types.Message):
         f"Это действие удалит ВСЕ данные из базы!\n"
         f"<i>Восстановление будет невозможно</i>\n\n"
         f"❓ <b>Вы уверены что хотите очистить всю базу?</b>",
-        parse_mode='HTML',
         reply_markup=get_confirmation_keyboard(action="clear_db")
     )
 
-@dp.callback_query_handler(lambda c: c.data == 'confirm_clear_db')
+@dp.callback_query(F.data == 'confirm_clear_db')
 async def process_confirm_clear_db(callback_query: types.CallbackQuery):
     """Подтверждение очистки базы"""
     if not is_admin(callback_query.from_user.id):
@@ -1604,8 +1559,7 @@ async def process_confirm_clear_db(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text(
         f"✅ <b>БАЗА ДАННЫХ ОЧИЩЕНА!</b>\n\n"
         f"🗑️ <b>Удалено записей:</b> {deleted_count}\n\n"
-        f"💫 <i>Все данные успешно удалены</i>",
-        parse_mode='HTML'
+        f"💫 <i>Все данные успешно удалены</i>"
     )
     
     await bot.send_message(
@@ -1614,13 +1568,12 @@ async def process_confirm_clear_db(callback_query: types.CallbackQuery):
         reply_markup=get_admin_keyboard()
     )
 
-@dp.callback_query_handler(lambda c: c.data == 'cancel_clear_db')
+@dp.callback_query(F.data == 'cancel_clear_db')
 async def process_cancel_clear_db(callback_query: types.CallbackQuery):
     """Отмена очистки базы"""
     await callback_query.message.edit_text(
         "🚫 <b>ОЧИСТКА БАЗЫ ОТМЕНЕНА</b>\n\n"
-        "💡 <i>Данные не были удалены</i>",
-        parse_mode='HTML'
+        "💡 <i>Данные не были удалены</i>"
     )
     
     await bot.send_message(
@@ -1631,7 +1584,7 @@ async def process_cancel_clear_db(callback_query: types.CallbackQuery):
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 
-@dp.message_handler(commands=['start'])
+@dp.message(F.text == "/start")
 async def cmd_start(message: types.Message):
     await message.answer(
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
@@ -1643,32 +1596,29 @@ async def cmd_start(message: types.Message):
         "• ⚙️ Полное управление базой\n"
         "• 📊 Детальная статистика\n"
         "• 🔔 Автоматические напоминания",
-        parse_mode='HTML',
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
 # Обработка кнопки "Главное меню"
-@dp.message_handler(lambda message: message.text == "🔙 Главное меню")
+@dp.message(F.text == "🔙 Главное меню")
 async def cmd_back(message: types.Message):
     await message.answer(
         "🏠 <b>Главное меню</b>\n\n"
         "Выберите нужный раздел:",
-        parse_mode='HTML',
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
 # Обработка кнопки "Управление"
-@dp.message_handler(lambda message: message.text == "⚙️ Управление")
+@dp.message(F.text == "⚙️ Управление")
 async def cmd_management(message: types.Message):
     await message.answer(
         "🛠️ <b>Центр управления фильтрами</b>\n\n"
         "Выберите действие:",
-        parse_mode='HTML',
         reply_markup=get_management_keyboard()
     )
 
 # Добавление фильтра - выбор типа добавления
-@dp.message_handler(lambda message: message.text == "✨ Добавить фильтр")
+@dp.message(F.text == "✨ Добавить фильтр")
 async def cmd_add(message: types.Message):
     # Проверяем лимит фильтров
     if check_filters_limit(message.from_user.id):
@@ -1676,7 +1626,6 @@ async def cmd_add(message: types.Message):
             f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
             f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
             f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         return
@@ -1684,27 +1633,25 @@ async def cmd_add(message: types.Message):
     await message.answer(
         "🔧 <b>Выберите тип добавления:</b>\n\n"
         "💡 <i>Можно добавить один фильтр или сразу несколько</i>",
-        parse_mode='HTML',
         reply_markup=get_add_filter_keyboard()
     )
 
 # Обработка выбора типа добавления
-@dp.message_handler(lambda message: message.text in ["🔧 Один фильтр", "📦 Несколько фильтров"])
+@dp.message(F.text.in_(["🔧 Один фильтр", "📦 Несколько фильтров"]))
 async def process_add_type(message: types.Message, state: FSMContext):
     if message.text == "🔧 Один фильтр":
-        await FilterStates.waiting_filter_type.set()
+        await state.set_state(FilterStates.waiting_filter_type)
         await message.answer(
             "🔧 <b>Выберите тип фильтра:</b>\n\n"
             "💡 <i>Доступны все варианты фильтров</i>",
-            parse_mode='HTML',
             reply_markup=get_filter_type_keyboard()
         )
 
 # Обработка выбора типа фильтра для ОДНОГО фильтра
-@dp.message_handler(state=FilterStates.waiting_filter_type)
+@dp.message(FilterStates.waiting_filter_type)
 async def process_filter_type(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
         
@@ -1712,7 +1659,6 @@ async def process_filter_type(message: types.Message, state: FSMContext):
         await message.answer(
             "📝 <b>Введите тип фильтра:</b>\n"
             "<i>Например: Угольный фильтр, Механический фильтр и т.д.</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
         return
@@ -1737,7 +1683,6 @@ async def process_filter_type(message: types.Message, state: FSMContext):
             await message.answer(
                 f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
                 f"💡 <i>{str(e)}</i>",
-                parse_mode='HTML',
                 reply_markup=get_filter_type_keyboard()
             )
             return
@@ -1747,20 +1692,19 @@ async def process_filter_type(message: types.Message, state: FSMContext):
             data['filter_type'] = filter_name
             data['lifetime'] = get_lifetime_by_type(filter_name)
 
-        await FilterStates.next()
+        await state.set_state(FilterStates.waiting_location)
         await message.answer(
             "📍 <b>Укажите место установки фильтра:</b>\n\n"
             "💡 <i>Нажмите кнопку ниже чтобы указать место</i>",
-            parse_mode='HTML',
             reply_markup=get_location_keyboard()
         )
 
 # ========== ОБРАБОТЧИКИ МЕСТА УСТАНОВКИ И ДАТЫ ==========
 
-@dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
+@dp.message(FilterStates.waiting_location, MultipleFiltersStates.waiting_location)
 async def process_location(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
         
@@ -1768,19 +1712,18 @@ async def process_location(message: types.Message, state: FSMContext):
         await message.answer(
             "📍 <b>Введите место установки фильтра:</b>\n\n"
             "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
         return
     
     current_state = await state.get_state()
     
-    if current_state == FilterStates.waiting_location.state:
+    if current_state == FilterStates.waiting_location:
         # Для одного фильтра
         async with state.proxy() as data:
             data['location'] = safe_db_string(message.text)
 
-        await FilterStates.next()
+        await state.set_state(FilterStates.waiting_change_date)
         today_nice = format_date_nice(datetime.now().date())
         await message.answer(
             f"📅 <b>Дата последней замены</b>\n\n"
@@ -1788,7 +1731,6 @@ async def process_location(message: types.Message, state: FSMContext):
             f"📍 <i>Место:</i> {data['location']}\n\n"
             f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
             f"<i>Например: {today_nice}</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
     else:
@@ -1796,21 +1738,20 @@ async def process_location(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             data['location'] = safe_db_string(message.text)
 
-        await MultipleFiltersStates.next()
+        await state.set_state(MultipleFiltersStates.waiting_change_date)
         today_nice = format_date_nice(datetime.now().date())
         await message.answer(
             f"📅 <b>Дата последней замены для всех фильтров</b>\n\n"
             f"📍 <i>Место для всех фильтров:</i> {data['location']}\n\n"
             f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
             f"<i>Например: {today_nice}</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
 
-@dp.message_handler(state=FilterStates.waiting_change_date)
+@dp.message(FilterStates.waiting_change_date)
 async def process_change_date(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -1825,7 +1766,7 @@ async def process_change_date(message: types.Message, state: FSMContext):
         expiry_date = change_date + timedelta(days=lifetime)
         expiry_date_nice = format_date_nice(expiry_date)
         
-        await FilterStates.next()
+        await state.set_state(FilterStates.waiting_lifetime)
         
         await message.answer(
             f"⏱️ <b>Срок службы фильтра</b>\n\n"
@@ -1834,7 +1775,6 @@ async def process_change_date(message: types.Message, state: FSMContext):
             f"📅 <i>Дата замены:</i> {format_date_nice(change_date)}\n"
             f"🗓️ <i>Годен до:</i> {expiry_date_nice}\n\n"
             f"📝 <b>Выберите или введите срок службы в днях:</b>",
-            parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
         
@@ -1845,14 +1785,13 @@ async def process_change_date(message: types.Message, state: FSMContext):
             f"💡 <i>{str(e)}</i>\n\n"
             f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
             f"<i>Например: {today_nice}</i>",
-            parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
 
-@dp.message_handler(state=FilterStates.waiting_lifetime)
+@dp.message(FilterStates.waiting_lifetime)
 async def process_lifetime(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
-        await state.finish()
+        await state.clear()
         await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard(message.from_user.id))
         return
     
@@ -1869,7 +1808,6 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             await message.answer(
                 "📅 <b>Введите срок службы в днях:</b>\n\n"
                 "💡 <i>Например: 30, 60, 90, 180, 365 и т.д.</i>",
-                parse_mode='HTML',
                 reply_markup=get_cancel_keyboard()
             )
             return
@@ -1900,43 +1838,40 @@ async def process_lifetime(message: types.Message, state: FSMContext):
             f"⏱️ <b>Срок службы:</b> {lifetime} дней\n"
             f"🗓️ <b>Годен до:</b> {format_date_nice(expiry_date)}\n\n"
             f"💫 <i>Теперь вы можете отслеживать срок его замены</i>",
-            parse_mode='HTML',
             reply_markup=get_main_keyboard(message.from_user.id)
         )
         
-        await state.finish()
+        await state.clear()
         
     except ValueError as e:
         await message.answer(
             f"❌ <b>Ошибка в сроке службы!</b>\n\n"
             f"💡 <i>{str(e)}</i>\n\n"
             f"📝 <b>Введите корректное число дней:</b>",
-            parse_mode='HTML',
             reply_markup=get_lifetime_keyboard()
         )
 
 # Обработка отмены
-@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
+@dp.message(F.text == "❌ Отмена")
 async def cmd_cancel(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
         return
     
-    await state.finish()
+    await state.clear()
     await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard(message.from_user.id))
 
 # Обработка других сообщений
-@dp.message_handler()
+@dp.message()
 async def handle_other_messages(message: types.Message):
     await message.answer(
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
         "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
-        parse_mode='HTML',
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
 # Запуск бота
-if __name__ == '__main__':
+async def main():
     # Проверка обязательных переменных
     if not API_TOKEN:
         logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
@@ -1945,8 +1880,7 @@ if __name__ == '__main__':
     init_db()
     
     # Запуск с обработчиком startup
-    executor.start_polling(
-        dp, 
-        skip_updates=True,
-        on_startup=on_startup
-    )
+    await dp.start_polling(bot, on_startup=on_startup)
+
+if __name__ == '__main__':
+    asyncio.run(main())
