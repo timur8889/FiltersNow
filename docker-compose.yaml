@@ -1,8 +1,15 @@
-ervices:
+version: '3.8'
+services:
+  filter-bot:
+    build: .
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID}
+    volumes:
+      - bot_data:/app/data
+      - bot_backups:/app/backups
+    restart: unless-stopped
 
-    app:
-        build:
-            context: .
-            dockerfile: Dockerfile
-        environment:
-            TOKEN: MY_TOKEN
+volumes:
+  bot_data:
+  bot_backups:
