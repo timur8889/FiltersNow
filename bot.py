@@ -10,7 +10,7 @@ import sys
 import aiosqlite
 import json
 from datetime import datetime, timedelta
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Callable, Any, Awaitable, Union
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -204,20 +204,6 @@ def validate_lifetime(lifetime: str) -> tuple[bool, str, int]:
     except ValueError:
         return False, "Срок службы должен быть числом (дни)", 0
 
-# ========== УЛУЧШЕНИЕ: БЕЗОПАСНЫЕ ОПЕРАЦИИ С БД ==========
-async def safe_db_operation(operation, *args, **kwargs):
-    """Безопасное выполнение операций с БД"""
-    try:
-        return await operation(*args, **kwargs)
-    except aiosqlite.Error as e:
-        logging.error(f"Ошибка БД в операции {operation.__name__}: {e}")
-        health_monitor.record_error()
-        raise
-    except Exception as e:
-        logging.error(f"Неожиданная ошибка в операции {operation.__name__}: {e}")
-        health_monitor.record_error()
-        raise
-
 # ========== УЛУЧШЕНИЕ: МОНИТОРИНГ ЗДОРОВЬЯ ==========
 class BotHealthMonitor:
     def __init__(self):
@@ -315,7 +301,7 @@ dp = Dispatcher(storage=storage)
 dp.update.outer_middleware(RateLimitMiddleware())
 
 # ========== УЛУЧШЕНИЕ: АСИНХРОННАЯ БАЗА ДАННЫХ ==========
-@contextmanager
+@asynccontextmanager
 async def get_db_connection():
     """Асинхронный контекстный менеджер для работы с БД"""
     conn = await aiosqlite.connect('filters.db')
@@ -331,27 +317,29 @@ async def get_db_connection():
 
 async def get_user_filters(user_id: int) -> List[Dict]:
     """Асинхронное получение фильтров пользователя"""
-    return await safe_db_operation(_get_user_filters, user_id)
-
-async def _get_user_filters(user_id: int) -> List[Dict]:
-    """Внутренняя функция получения фильтров"""
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        await cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
-        rows = await cur.fetchall()
-        return [dict(row) for row in rows]
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            await cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logging.error(f"Ошибка при получении фильтров пользователя {user_id}: {e}")
+        health_monitor.record_error()
+        return []
 
 async def get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
     """Асинхронное получение фильтра по ID"""
-    return await safe_db_operation(_get_filter_by_id, filter_id, user_id)
-
-async def _get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
-    """Внутренняя функция получения фильтра по ID"""
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        await cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
-        result = await cur.fetchone()
-        return dict(result) if result else None
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            await cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+            result = await cur.fetchone()
+            return dict(result) if result else None
+    except Exception as e:
+        logging.error(f"Ошибка при получении фильтра {filter_id}: {e}")
+        health_monitor.record_error()
+        return None
 
 async def check_filters_limit(user_id: int) -> bool:
     """Асинхронная проверка лимита фильтров"""
@@ -360,73 +348,78 @@ async def check_filters_limit(user_id: int) -> bool:
 
 async def get_all_users_stats() -> Dict:
     """Асинхронное получение статистики"""
-    return await safe_db_operation(_get_all_users_stats)
-
-async def _get_all_users_stats() -> Dict:
-    """Внутренняя функция получения статистики"""
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        await cur.execute('''SELECT COUNT(DISTINCT user_id) as total_users, 
-                              COUNT(*) as total_filters,
-                              SUM(CASE WHEN expiry_date <= date('now') THEN 1 ELSE 0 END) as expired_filters,
-                              SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
-                       FROM filters''')
-        result = await cur.fetchone()
-        return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            await cur.execute('''SELECT COUNT(DISTINCT user_id) as total_users, 
+                                  COUNT(*) as total_filters,
+                                  SUM(CASE WHEN expiry_date <= date('now') THEN 1 ELSE 0 END) as expired_filters,
+                                  SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
+                           FROM filters''')
+            result = await cur.fetchone()
+            return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
+    except Exception as e:
+        logging.error(f"Ошибка при получении статистики: {e}")
+        health_monitor.record_error()
+        return {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
 
 async def add_filter_to_db(user_id: int, filter_type: str, location: str, last_change: str, expiry_date: str, lifetime_days: int) -> bool:
     """Добавление фильтра в БД"""
-    return await safe_db_operation(_add_filter_to_db, user_id, filter_type, location, last_change, expiry_date, lifetime_days)
-
-async def _add_filter_to_db(user_id: int, filter_type: str, location: str, last_change: str, expiry_date: str, lifetime_days: int) -> bool:
-    """Внутренняя функция добавления фильтра"""
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        await cur.execute('''INSERT INTO filters 
-                          (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
-                          VALUES (?, ?, ?, ?, ?, ?)''',
-                          (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
-        return True
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            await cur.execute('''INSERT INTO filters 
+                              (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                              VALUES (?, ?, ?, ?, ?, ?)''',
+                              (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
+            return True
+    except Exception as e:
+        logging.error(f"Ошибка при добавлении фильтра: {e}")
+        health_monitor.record_error()
+        return False
 
 async def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
     """Обновление фильтра в БД"""
-    return await safe_db_operation(_update_filter_in_db, filter_id, user_id, **kwargs)
-
-async def _update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
-    """Внутренняя функция обновления фильтра"""
-    if not kwargs:
-        return False
-    
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        set_clause = ", ".join([f"{key} = ?" for key in kwargs.keys()])
-        values = list(kwargs.values())
-        values.extend([filter_id, user_id])
+    try:
+        if not kwargs:
+            return False
         
-        await cur.execute(f"UPDATE filters SET {set_clause} WHERE id = ? AND user_id = ?", values)
-        return cur.rowcount > 0
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            set_clause = ", ".join([f"{key} = ?" for key in kwargs.keys()])
+            values = list(kwargs.values())
+            values.extend([filter_id, user_id])
+            
+            await cur.execute(f"UPDATE filters SET {set_clause} WHERE id = ? AND user_id = ?", values)
+            return cur.rowcount > 0
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении фильтра {filter_id}: {e}")
+        health_monitor.record_error()
+        return False
 
 async def delete_filter_from_db(filter_id: int, user_id: int) -> bool:
     """Удаление фильтра из БД"""
-    return await safe_db_operation(_delete_filter_from_db, filter_id, user_id)
-
-async def _delete_filter_from_db(filter_id: int, user_id: int) -> bool:
-    """Внутренняя функция удаления фильтра"""
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        await cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
-        return cur.rowcount > 0
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            await cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+            return cur.rowcount > 0
+    except Exception as e:
+        logging.error(f"Ошибка при удалении фильтра {filter_id}: {e}")
+        health_monitor.record_error()
+        return False
 
 async def clear_all_filters() -> int:
     """Асинхронная очистка базы данных"""
-    return await safe_db_operation(_clear_all_filters)
-
-async def _clear_all_filters() -> int:
-    """Внутренняя функция очистки базы"""
-    async with get_db_connection() as conn:
-        cur = await conn.cursor()
-        await cur.execute("DELETE FROM filters")
-        return cur.rowcount
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            await cur.execute("DELETE FROM filters")
+            return cur.rowcount
+    except Exception as e:
+        logging.error(f"Ошибка при очистке базы данных: {e}")
+        health_monitor.record_error()
+        return 0
 
 # ========== УЛУЧШЕНИЕ: УЛУЧШЕННАЯ ВАЛИДАЦИЯ ДАТ ==========
 def try_auto_correct_date(date_str: str) -> Optional[datetime.date]:
@@ -608,33 +601,46 @@ async def init_db():
         async with get_db_connection() as conn:
             cur = await conn.cursor()
             
-            await cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filters'")
+            # Проверяем существование таблицы
+            await cur.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='filters'
+            """)
             table_exists = await cur.fetchone()
             
             if not table_exists:
-                await cur.execute('''CREATE TABLE filters (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            filter_type TEXT,
-                            location TEXT,
-                            last_change DATE,
-                            expiry_date DATE,
-                            lifetime_days INTEGER,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                # Создаем таблицу
+                await cur.execute('''
+                    CREATE TABLE filters (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        filter_type TEXT,
+                        location TEXT,
+                        last_change DATE,
+                        expiry_date DATE,
+                        lifetime_days INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
                 
+                # Создаем индексы
                 await cur.execute('''CREATE INDEX idx_user_id ON filters(user_id)''')
                 await cur.execute('''CREATE INDEX idx_expiry_date ON filters(expiry_date)''')
                 logging.info("База данных успешно создана")
             else:
-                logging.info("База данных уже существует, проверка структуры завершена")
-            
+                logging.info("База данных уже существует")
+                
     except Exception as e:
         logging.error(f"Критическая ошибка инициализации БД: {e}")
+        # Создаем резервную копию при критической ошибке
         if os.path.exists('filters.db'):
             backup_name = f'filters_backup_critical_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-            shutil.copy2('filters.db', backup_name)
-            logging.info(f"Создана критическая резервная копия: {backup_name}")
+            try:
+                shutil.copy2('filters.db', backup_name)
+                logging.info(f"Создана критическая резервная копия: {backup_name}")
+            except Exception as backup_error:
+                logging.error(f"Не удалось создать резервную копию: {backup_error}")
         raise
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
@@ -649,7 +655,7 @@ async def cmd_start(message: types.Message):
         "📦 <b>Основные возможности:</b>\n"
         "• 📋 Просмотр всех ваших фильтров\n"
         "• ✨ Добавление новых фильтров\n"
-        "• ⏳ Контроль сроков замены\n"
+        "• ⏳ Контроль сроков замену\n"
         "• ⚙️ Полное управление базой\n"
         "• 📊 Детальная статистика\n"
         "• 🔔 Автоматические напоминания",
@@ -726,7 +732,7 @@ async def cmd_add(message: types.Message):
         await message.answer(
             f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
             f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
-            f"📊 <i>Удалите некоторые фильтров перед добавлением новых</i>",
+            f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
             reply_markup=get_main_keyboard(message.from_user.id),
             parse_mode='HTML'
         )
