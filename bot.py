@@ -9,6 +9,8 @@ import re
 import sys
 import aiosqlite
 import json
+import pandas as pd
+import io
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Callable, Any, Awaitable, Union
@@ -82,6 +84,7 @@ def get_main_keyboard(user_id: int):
     builder.button(text="✨ Добавить фильтр")
     builder.button(text="⚙️ Управление фильтрами")
     builder.button(text="📊 Статистика")
+    builder.button(text="📤 Импорт/Экспорт")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
@@ -94,12 +97,35 @@ def get_add_filter_keyboard():
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
+def get_filter_type_keyboard():
+    """Клавиатура для выбора типа фильтра"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="Магистральный SL10")
+    builder.button(text="Магистральный SL20")
+    builder.button(text="Гейзер")
+    builder.button(text="Аквафор")
+    builder.button(text="Другой тип фильтра")
+    builder.button(text="❌ Отмена")
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
 def get_management_keyboard():
     """Клавиатура управления"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="✏️ Редактировать фильтр")
     builder.button(text="🗑️ Удалить фильтр")
+    builder.button(text="📊 Онлайн Excel")
     builder.button(text="❌ Отмена")
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_import_export_keyboard():
+    """Клавиатура импорта/экспорта"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📤 Экспорт в Excel")
+    builder.button(text="📥 Импорт из Excel")
+    builder.button(text="📋 Шаблон Excel")
+    builder.button(text="🔙 Назад")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
@@ -300,7 +326,7 @@ class RateLimitMiddleware(BaseMiddleware):
         
         return await handler(event, data)
 
-# Инициализация бота с улучшенными настройками
+# Инициализация бота с улучшенными настройки
 bot = Bot(
     token=API_TOKEN,
     default=DefaultBotProperties(parse_mode='HTML')
@@ -586,6 +612,9 @@ class EditFilterStates(StatesGroup):
 class DeleteFilterStates(StatesGroup):
     waiting_filter_selection = State()
 
+class ImportExportStates(StatesGroup):
+    waiting_excel_file = State()
+
 # ========== УЛУЧШЕНИЕ: АСИНХРОННАЯ ИНИЦИАЛИЗАЦИЯ БАЗЫ ==========
 async def init_db():
     """Асинхронная инициализация базы данных"""
@@ -650,6 +679,7 @@ async def cmd_start(message: types.Message):
         "• ⏳ Контроль сроков замены\n"
         "• ⚙️ Полное управление базой\n"
         "• 📊 Детальная статистика\n"
+        "• 📤 Импорт/экспорт Excel\n"
         "• 🔔 Автоматические напоминания",
         reply_markup=get_main_keyboard(message.from_user.id),
         parse_mode='HTML'
@@ -672,7 +702,8 @@ async def cmd_help(message: types.Message):
         "• 📋 Мои фильтры - просмотр всех\n"
         "• ✨ Добавить фильтр - новый фильтр\n"
         "• ⚙️ Управление - редактирование\n"
-        "• 📊 Статистика - ваша статистика\n\n"
+        "• 📊 Статистика - ваша статистика\n"
+        "• 📤 Импорт/Экспорт - работа с Excel\n\n"
         "❌ <b>Отмена операций:</b>\n"
         "Используйте кнопку '❌ Отмена' для отмены текущей операции"
     )
@@ -733,9 +764,9 @@ async def cmd_add_single(message: types.Message, state: FSMContext):
     """Добавление одного фильтра"""
     await state.set_state(FilterStates.waiting_filter_type)
     await message.answer(
-        "💧 <b>Введите тип фильтра:</b>\n\n"
-        "💡 <i>Например: Магистральный SL10, Гейзер, Аквафор и т.д.</i>",
-        reply_markup=get_cancel_keyboard(),
+        "💧 <b>Выберите тип фильтра:</b>\n\n"
+        "💡 <i>Используйте кнопки для быстрого выбора или введите свой вариант</i>",
+        reply_markup=get_filter_type_keyboard(),
         parse_mode='HTML'
     )
 
@@ -744,10 +775,20 @@ async def process_filter_type(message: types.Message, state: FSMContext):
     """Обработка типа фильтра"""
     filter_type = message.text.strip()
     
+    # Если выбран "Другой тип фильтра", ждем ручной ввод
+    if filter_type == "Другой тип фильтра":
+        await message.answer(
+            "💧 <b>Введите свой тип фильтра:</b>\n\n"
+            "💡 <i>Например: Барьер, Атолл, Брита и т.д.</i>",
+            reply_markup=get_cancel_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
     # Валидация типа фильтра
     is_valid, error_msg = validate_filter_type(filter_type)
     if not is_valid:
-        await message.answer(f"❌ {error_msg}\n\nПожалуйста, введите тип фильтра еще раз:")
+        await message.answer(f"❌ {error_msg}\n\nПожалуйста, выберите тип фильтра еще раз:")
         return
     
     await state.update_data(filter_type=filter_type)
@@ -871,6 +912,7 @@ async def cmd_add_multiple(message: types.Message, state: FSMContext):
         "📝 <b>Пример:</b>\n"
         "<code>Магистральный SL10; Кухня; 15.09.23</code>\n"
         "<code>Гейзер; Ванная; 20.08.23</code>\n\n"
+        "🚀 <b>Быстрые типы:</b> Магистральный SL10, Магистральный SL20, Гейзер, Аквафор\n\n"
         "💡 <i>Срок службы будет определен автоматически по типу фильтра</i>",
         reply_markup=get_cancel_keyboard(),
         parse_mode='HTML'
@@ -1248,6 +1290,341 @@ async def process_filter_deletion(message: types.Message, state: FSMContext):
         await message.answer(
             "❌ <b>Ошибка при удалении фильтра!</b>",
             reply_markup=get_main_keyboard(user_id),
+            parse_mode='HTML'
+        )
+    
+    await state.clear()
+
+# ========== ОНЛАЙН EXCEL ==========
+@dp.message(F.text == "📊 Онлайн Excel")
+async def cmd_online_excel(message: types.Message):
+    """Показать данные в формате онлайн Excel"""
+    filters = await get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
+            "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
+            reply_markup=get_main_keyboard(message.from_user.id),
+            parse_mode='HTML'
+        )
+        return
+    
+    # Создаем DataFrame
+    data = []
+    today = datetime.now().date()
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        icon, status = get_status_icon_and_text(days_until_expiry)
+        
+        data.append({
+            'ID': f['id'],
+            'Тип': f['filter_type'],
+            'Местоположение': f['location'],
+            'Замена': format_date_nice(last_change),
+            'Годен до': format_date_nice(expiry_date),
+            'Осталось дней': days_until_expiry,
+            'Статус': f"{icon} {status}",
+            'Срок службы': f"{f['lifetime_days']} дн."
+        })
+    
+    df = pd.DataFrame(data)
+    
+    # Форматируем таблицу как текст
+    excel_like_output = "📊 <b>ОНЛАЙН EXCEL - ВАШИ ФИЛЬТРЫ</b>\n\n"
+    
+    # Заголовки
+    headers = ["ID", "Тип", "Место", "Замена", "Годен до", "Дней", "Статус"]
+    excel_like_output += "┌" + "─" * 8 + "┬" + "─" * 15 + "┬" + "─" * 12 + "┬" + "─" * 10 + "┬" + "─" * 10 + "┬" + "─" * 6 + "┬" + "─" * 12 + "┐\n"
+    excel_like_output += "│" + "".join(f"{h:^{width}}" for h, width in zip(headers, [8, 15, 12, 10, 10, 6, 12])) + "│\n"
+    excel_like_output += "├" + "─" * 8 + "┼" + "─" * 15 + "┼" + "─" * 12 + "┼" + "─" * 10 + "┼" + "─" * 10 + "┼" + "─" * 6 + "┼" + "─" * 12 + "┤\n"
+    
+    # Данные
+    for _, row in df.iterrows():
+        excel_like_output += f"│{row['ID']:^8}│{row['Тип'][:13]:^15}│{row['Местоположение'][:10]:^12}│{row['Замена']:^10}│{row['Годен до']:^10}│{row['Осталось дней']:^6}│{row['Статус'][:10]:^12}│\n"
+    
+    excel_like_output += "└" + "─" * 8 + "┴" + "─" * 15 + "┴" + "─" * 12 + "┴" + "─" * 10 + "┴" + "─" * 10 + "┴" + "─" * 6 + "┴" + "─" * 12 + "┘\n\n"
+    
+    # Статистика
+    expired = len([f for f in filters if (datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - today).days <= 0])
+    expiring_soon = len([f for f in filters if 0 < (datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - today).days <= 7])
+    normal = len([f for f in filters if (datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - today).days > 7])
+    
+    excel_like_output += f"📈 <b>СТАТИСТИКА:</b> Всего: {len(filters)} | 🟢 Норма: {normal} | 🟡 Скоро: {expiring_soon} | 🔴 Просрочено: {expired}"
+    
+    await message.answer(excel_like_output, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+
+# ========== ИМПОРТ/ЭКСПОРТ ==========
+@dp.message(F.text == "📤 Импорт/Экспорт")
+async def cmd_import_export(message: types.Message):
+    """Меню импорта/экспорта"""
+    await message.answer(
+        "📤 <b>ИМПОРТ/ЭКСПОРТ ДАННЫХ</b>\n\n"
+        "💡 <b>Доступные функции:</b>\n"
+        "• 📤 Экспорт в Excel - выгрузка всех ваших фильтров\n"
+        "• 📥 Импорт из Excel - загрузка фильтров из файла\n"
+        "• 📋 Шаблон Excel - скачать шаблон для заполнения\n\n"
+        "⚠️ <i>Поддерживаются файлы .xlsx</i>",
+        reply_markup=get_import_export_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📤 Экспорт в Excel")
+async def cmd_export_excel(message: types.Message):
+    """Экспорт фильтров в Excel"""
+    filters = await get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров для экспорта</b>",
+            reply_markup=get_main_keyboard(message.from_user.id),
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        # Создаем DataFrame
+        data = []
+        today = datetime.now().date()
+        
+        for f in filters:
+            expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+            last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
+            days_until_expiry = (expiry_date - today).days
+            
+            icon, status = get_status_icon_and_text(days_until_expiry)
+            
+            data.append({
+                'ID': f['id'],
+                'Тип фильтра': f['filter_type'],
+                'Местоположение': f['location'],
+                'Дата последней замены': last_change.strftime('%d.%m.%Y'),
+                'Дата истечения срока': expiry_date.strftime('%d.%m.%Y'),
+                'Осталось дней': days_until_expiry,
+                'Статус': status,
+                'Срок службы (дни)': f['lifetime_days'],
+                'Иконка статуса': icon
+            })
+        
+        df = pd.DataFrame(data)
+        
+        # Создаем Excel файл в памяти
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Мои фильтры', index=False)
+            
+            # Настраиваем ширину колонок
+            worksheet = writer.sheets['Мои фильтры']
+            for idx, col in enumerate(df.columns):
+                max_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
+                worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50)
+        
+        output.seek(0)
+        
+        # Отправляем файл
+        await message.answer_document(
+            types.BufferedInputFile(output.read(), filename=f"мои_фильтры_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"),
+            caption=f"✅ <b>ЭКСПОРТ ЗАВЕРШЕН</b>\n\n📦 Экспортировано фильтров: {len(filters)}\n💫 Файл готов к использованию",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при экспорте в Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при экспорте данных!</b>\n\n"
+            "Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "📋 Шаблон Excel")
+async def cmd_excel_template(message: types.Message):
+    """Отправка шаблона Excel"""
+    try:
+        # Создаем шаблон DataFrame
+        template_data = [
+            {
+                'Тип фильтра': 'Магистральный SL10',
+                'Местоположение': 'Кухня',
+                'Дата последней замены': '15.09.2023',
+                'Срок службы (дни)': '180'
+            },
+            {
+                'Тип фильтра': 'Гейзер',
+                'Местоположение': 'Ванная',
+                'Дата последней замены': '20.08.2023', 
+                'Срок службы (дни)': '365'
+            }
+        ]
+        
+        df = pd.DataFrame(template_data)
+        
+        # Создаем Excel файл в памяти
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Шаблон', index=False)
+            
+            # Добавляем инструкции
+            instructions = pd.DataFrame({
+                'Инструкция': [
+                    '1. Заполните данные в колонках A-D',
+                    '2. Тип фильтра: Магистральный SL10, Магистральный SL20, Гейзер, Аквафор или другой',
+                    '3. Местоположение: Кухня, Ванная, Под раковиной и т.д.',
+                    '4. Дата замены в формате ДД.ММ.ГГГГ',
+                    '5. Срок службы в днях (автоматически определится для популярных типов)',
+                    '6. Сохраните файл и импортируйте в бота'
+                ]
+            })
+            instructions.to_excel(writer, sheet_name='Инструкция', index=False)
+            
+            # Настраиваем ширину колонок
+            for sheet_name in writer.sheets:
+                worksheet = writer.sheets[sheet_name]
+                for idx, col in enumerate(worksheet.iter_cols()):
+                    max_len = 0
+                    for cell in col:
+                        try:
+                            if len(str(cell.value)) > max_len:
+                                max_len = len(str(cell.value))
+                        except:
+                            pass
+                    worksheet.column_dimensions[chr(65 + idx)].width = min(max_len + 2, 50)
+        
+        output.seek(0)
+        
+        # Отправляем файл
+        await message.answer_document(
+            types.BufferedInputFile(output.read(), filename="шаблон_фильтров.xlsx"),
+            caption="📋 <b>ШАБЛОН EXCEL</b>\n\n"
+                   "💡 <i>Используйте этот шаблон для заполнения данных о фильтрах</i>\n\n"
+                   "📝 <b>Как использовать:</b>\n"
+                   "1. 📥 Скачайте шаблон\n"
+                   "2. ✏️ Заполните данные\n"
+                   "3. 📤 Загрузите файл через 'Импорт из Excel'",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при создании шаблона Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при создании шаблона!</b>",
+            reply_markup=get_main_keyboard(message.from_user.id),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "📥 Импорт из Excel")
+async def cmd_import_excel(message: types.Message, state: FSMContext):
+    """Начало импорта из Excel"""
+    await state.set_state(ImportExportStates.waiting_excel_file)
+    await message.answer(
+        "📥 <b>ИМПОРТ ИЗ EXCEL</b>\n\n"
+        "💡 <b>Отправьте Excel файл (.xlsx) с данными о фильтрах</b>\n\n"
+        "📋 <b>Формат файла:</b>\n"
+        "• Колонка A: Тип фильтра\n"
+        "• Колонка B: Местоположение\n"
+        "• Колонка C: Дата замены (ДД.ММ.ГГГГ)\n"
+        "• Колонка D: Срок службы (дни, опционально)\n\n"
+        "⚠️ <i>Первая строка должна содержать заголовки</i>\n"
+        "📎 <i>Или используйте готовый шаблон из меню</i>",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(ImportExportStates.waiting_excel_file, F.document)
+async def process_excel_import(message: types.Message, state: FSMContext):
+    """Обработка импорта Excel файла"""
+    try:
+        # Проверяем, что это Excel файл
+        if not message.document.file_name.endswith(('.xlsx', '.xls')):
+            await message.answer("❌ <b>Неверный формат файла!</b>\n\nОтправьте файл в формате .xlsx или .xls", parse_mode='HTML')
+            return
+        
+        # Скачиваем файл
+        file_info = await bot.get_file(message.document.file_id)
+        downloaded_file = await bot.download_file(file_info.file_path)
+        
+        # Читаем Excel
+        df = pd.read_excel(downloaded_file)
+        
+        # Проверяем необходимые колонки
+        required_columns = ['Тип фильтра', 'Местоположение', 'Дата последней замены']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            await message.answer(
+                f"❌ <b>В файле отсутствуют обязательные колонки:</b>\n{', '.join(missing_columns)}\n\n"
+                f"💡 Используйте шаблон из меню 'Шаблон Excel'",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Обрабатываем данные
+        added_count = 0
+        errors = []
+        
+        for idx, row in df.iterrows():
+            try:
+                filter_type = str(row['Тип фильтра']).strip()
+                location = str(row['Местоположение']).strip()
+                date_str = str(row['Дата последней замены']).strip()
+                
+                # Преобразуем дату из разных форматов
+                if isinstance(date_str, str):
+                    change_date = validate_date(date_str)
+                else:
+                    # Если это datetime объект
+                    change_date = row['Дата последней замены'].date()
+                
+                # Определяем срок службы
+                if 'Срок службы (дни)' in df.columns and pd.notna(row['Срок службы (дни)']):
+                    lifetime = int(row['Срок службы (дни)'])
+                else:
+                    lifetime = DEFAULT_LIFETIMES.get(filter_type.lower(), 180)
+                
+                # Расчет даты истечения
+                expiry_date = change_date + timedelta(days=lifetime)
+                
+                # Сохранение в БД
+                success = await add_filter_to_db(
+                    user_id=message.from_user.id,
+                    filter_type=filter_type,
+                    location=location,
+                    last_change=change_date.strftime('%Y-%m-%d'),
+                    expiry_date=expiry_date.strftime('%Y-%m-%d'),
+                    lifetime_days=lifetime
+                )
+                
+                if success:
+                    added_count += 1
+                else:
+                    errors.append(f"Строка {idx+2}: Ошибка сохранения")
+                    
+            except Exception as e:
+                errors.append(f"Строка {idx+2}: {str(e)}")
+                continue
+        
+        # Формируем ответ
+        response = f"✅ <b>ИМПОРТ ЗАВЕРШЕН</b>\n\n📦 Добавлено фильтров: {added_count}\n"
+        
+        if errors:
+            response += f"❌ Ошибок: {len(errors)}\n"
+            if len(errors) <= 5:
+                response += "\n".join(f"• {error}" for error in errors)
+            else:
+                response += f"\nПоказаны первые 5 ошибок из {len(errors)}:\n" + "\n".join(f"• {error}" for error in errors[:5])
+        
+        await message.answer(response, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+        
+    except Exception as e:
+        logging.error(f"Ошибка при импорте Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при обработке файла!</b>\n\n"
+            "Проверьте формат файла и попробуйте еще раз.",
+            reply_markup=get_main_keyboard(message.from_user.id),
             parse_mode='HTML'
         )
     
