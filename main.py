@@ -1,1072 +1,1952 @@
 import logging
-import asyncio
 import sqlite3
-import time
 import os
+import asyncio
+import shutil
+import traceback
+import re
+import sys
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.utils import executor
+from dotenv import load_dotenv
 
-# Modern imports
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.constants import ParseMode
+# Загрузка переменных окружения
+load_dotenv()
 
-import asyncpg
-from redis import asyncio as aioredis
-import pickle
+# Настройки
+API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
 
-# AI & ML
-import openai
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-import torch
+# Проверка обязательных переменных
+if not API_TOKEN:
+    logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+    exit(1)
 
-# Modern web framework
-from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-
-# Modern data validation
-from pydantic import BaseModel, Field, validator
-from typing_extensions import Annotated
-
-# Security
-import jwt
-from passlib.context import CryptContext
-from cryptography.fernet import Fernet
-import secrets
-
-# Monitoring & Observability
-from prometheus_client import Counter, Histogram, generate_latest, start_http_server, REGISTRY
-import sentry_sdk
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.jaeger.thrift import JaegerExporter
-
-# Cloud & Containers
-import docker
-import kubernetes as k8s
-from consul import Consul
-
-# Async email
-import aiosmtplib
-from email.mime.text import MimeText
-from email.mime.multipart import MimeMultipart
-
-# Modern media processing
-from PIL import Image, ImageOps
-import io
-import aiofiles
-from moviepy.editor import VideoFileClip
-
-# Web3 & Blockchain (optional)
-from web3 import Web3, AsyncHTTPProvider
-import aiohttp
-
-# Real-time communication
-import websockets
-from socketio import AsyncServer
-
-# Advanced ML
-import pandas as pd
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-import xgboost as xgb
-import lightgbm as lgb
-import numpy as np
-
-# Modern utilities
-import orjson
-import aiofiles
-from pathlib import Path
-import yaml
-from dataclasses import dataclass
-from enum import Enum
-import uuid
-
-# Async file processing
-import aiohttp
-from aiohttp import ClientSession
-
-# ==================== CONFIGURATION WITH ENV VARIABLES ====================
-from pydantic_settings import BaseSettings
-from functools import lru_cache
-
-class Settings(BaseSettings):
-    """Modern configuration management with validation"""
-    
-    # Bot Configuration
-    BOT_TOKEN: str = Field(..., env="BOT_TOKEN")
-    CHANNEL_ID: str = Field(..., env="CHANNEL_ID")
-    ADMIN_IDS: List[int] = Field(default=[5024165375], env="ADMIN_IDS")
-    
-    # Database
-    DATABASE_URL: str = Field(..., env="DATABASE_URL")
-    REDIS_URL: str = Field("redis://localhost:6379", env="REDIS_URL")
-    
-    # Security
-    SECRET_KEY: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
-    ENCRYPTION_KEY: str = Field(default_factory=lambda: Fernet.generate_key().decode())
-    JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 60 * 24
-    
-    # AI Services
-    OPENAI_API_KEY: Optional[str] = Field(None, env="OPENAI_API_KEY")
-    HUGGINGFACE_TOKEN: Optional[str] = Field(None, env="HUGGINGFACE_TOKEN")
-    
-    # Cloud & Monitoring
-    SENTRY_DSN: Optional[str] = Field(None, env="SENTRY_DSN")
-    JAEGER_HOST: str = Field("localhost", env="JAEGER_HOST")
-    
-    # Web3 (optional)
-    WEB3_PROVIDER_URL: Optional[str] = Field(None, env="WEB3_PROVIDER_URL")
-    
-    # Feature Flags
-    ENABLE_AI: bool = True
-    ENABLE_ANALYTICS: bool = True
-    ENABLE_WEB3: bool = False
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-
-@lru_cache()
-def get_settings():
-    return Settings()
-
-settings = get_settings()
-
-# ==================== OBSERVABILITY & MONITORING ====================
-# Initialize Sentry
-if settings.SENTRY_DSN:
-    sentry_sdk.init(
-        dsn=settings.SENTRY_DSN,
-        traces_sample_rate=1.0,
-        profiles_sample_rate=1.0,
-    )
-
-# Initialize OpenTelemetry
-trace.set_tracer_provider(TracerProvider())
-jaeger_exporter = JaegerExporter(
-    agent_host_name=settings.JAEGER_HOST,
-    agent_port=6831,
-)
-trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(jaeger_exporter))
-tracer = trace.get_tracer(__name__)
-
-# Prometheus Metrics
-POSTS_CREATED = Counter('posts_created_total', 'Total posts created', ['type', 'status'])
-POSTS_PUBLISHED = Counter('posts_published_total', 'Total posts published', ['media_type'])
-REQUEST_DURATION = Histogram('request_duration_seconds', 'Request duration', ['endpoint'])
-USER_ACTIONS = Counter('user_actions_total', 'User actions', ['action_type', 'user_role'])
-AI_REQUESTS = Counter('ai_requests_total', 'AI API requests', ['provider', 'endpoint'])
-
-# ==================== MODERN DATA MODELS ====================
-class PostType(str, Enum):
-    TEXT = "text"
-    IMAGE = "image"
-    VIDEO = "video"
-    POLL = "poll"
-    CAROUSEL = "carousel"
-
-class PostStatus(str, Enum):
-    DRAFT = "draft"
-    SCHEDULED = "scheduled"
-    PUBLISHED = "published"
-    FAILED = "failed"
-
-class PostCreate(BaseModel):
-    text: str = Field(..., min_length=1, max_length=4096)
-    scheduled_time: datetime
-    media_paths: List[str] = Field(default_factory=list)
-    media_type: PostType = PostType.TEXT
-    options: Dict[str, Any] = Field(default_factory=dict)
-    
-    @validator('text')
-    def validate_content(cls, v):
-        if len(v.strip()) == 0:
-            raise ValueError('Text cannot be empty')
-        return v
-
-class AIContentRequest(BaseModel):
-    topic: str
-    tone: str = "professional"
-    style: str = "social_media"
-    length: int = 150
-    keywords: List[str] = Field(default_factory=list)
-
-class AnalyticsResponse(BaseModel):
-    post_id: int
-    views: int
-    engagements: int
-    engagement_rate: float
-    peak_time: Optional[datetime]
-    recommendations: List[str]
-
-# ==================== MODERN CACHE WITH REDIS CLUSTER ====================
-class DistributedCache:
-    def __init__(self):
-        self.redis = None
-        self.cluster_mode = False
-        
-    async def initialize(self):
-        """Initialize Redis connection with cluster support"""
-        try:
-            if "," in settings.REDIS_URL:
-                # Redis Cluster
-                from redis.asyncio import RedisCluster
-                self.redis = RedisCluster.from_url(settings.REDIS_URL)
-                self.cluster_mode = True
-            else:
-                # Single Redis instance
-                self.redis = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
-            
-            await self.redis.ping()
-            logging.info("✅ Redis cache initialized")
-        except Exception as e:
-            logging.error(f"❌ Redis initialization failed: {e}")
-            # Fallback to in-memory cache
-            self.redis = None
-            self._memory_cache = {}
-            self._memory_ttl = {}
-    
-    async def set(self, key: str, value: Any, expire: int = 3600, tags: List[str] = None):
-        """Set value with optional cache tags"""
-        try:
-            serialized = pickle.dumps({
-                'value': value,
-                'tags': tags or [],
-                'created_at': time.time()
-            })
-            
-            if self.redis:
-                await self.redis.setex(key, expire, serialized)
-                if tags:
-                    # Store key references in tag sets
-                    for tag in tags:
-                        await self.redis.sadd(f"tag:{tag}", key)
-            else:
-                self._memory_cache[key] = serialized
-                self._memory_ttl[key] = time.time() + expire
-        except Exception as e:
-            logging.error(f"Cache set error: {e}")
-    
-    async def get(self, key: str) -> Optional[Any]:
-        """Get value from cache"""
-        try:
-            if self.redis:
-                data = await self.redis.get(key)
-            else:
-                data = self._memory_cache.get(key)
-                if data and time.time() > self._memory_ttl.get(key, 0):
-                    del self._memory_cache[key]
-                    del self._memory_ttl[key]
-                    return None
-            
-            if data:
-                unpacked = pickle.loads(data)
-                return unpacked['value']
-        except Exception as e:
-            logging.error(f"Cache get error: {e}")
-        return None
-    
-    async def invalidate_tags(self, tags: List[str]):
-        """Invalidate all keys with specified tags"""
-        try:
-            if self.redis:
-                for tag in tags:
-                    keys = await self.redis.smembers(f"tag:{tag}")
-                    if keys:
-                        await self.redis.delete(*keys)
-                    await self.redis.delete(f"tag:{tag}")
-        except Exception as e:
-            logging.error(f"Cache tag invalidation error: {e}")
-
-# ==================== MODERN DATABASE WITH ADVANCED FEATURES ====================
-class AdvancedDatabase:
-    def __init__(self):
-        self.pool = None
-        self.cache = DistributedCache()
-        self.vector_store = None
-        
-    async def connect(self):
-        """Initialize database connection with connection pooling"""
-        self.pool = await asyncpg.create_pool(
-            settings.DATABASE_URL,
-            min_size=5,
-            max_size=20,
-            command_timeout=60
-        )
-        await self.create_tables()
-        await self.cache.initialize()
-        
-    async def create_tables(self):
-        """Create modern database schema with advanced features"""
-        async with self.pool.acquire() as conn:
-            # Enable UUID extension
-            await conn.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
-            
-            # Modern posts table with JSONB for flexibility
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS scheduled_posts (
-                    id SERIAL PRIMARY KEY,
-                    uuid UUID DEFAULT uuid_generate_v4(),
-                    chat_id BIGINT,
-                    message_text TEXT,
-                    media_paths JSONB DEFAULT '[]',
-                    media_type VARCHAR(50) DEFAULT 'text',
-                    scheduled_time TIMESTAMPTZ,
-                    timezone VARCHAR(50) DEFAULT 'UTC',
-                    status VARCHAR(20) DEFAULT 'scheduled',
-                    options JSONB DEFAULT '{}',
-                    metadata JSONB DEFAULT '{}',
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ DEFAULT NOW(),
-                    
-                    -- Indexes for performance
-                    INDEX idx_scheduled_time_status (scheduled_time, status),
-                    INDEX idx_status (status),
-                    INDEX idx_created_at (created_at)
-                )
-            ''')
-            
-            # Advanced users table with roles and permissions
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username VARCHAR(255),
-                    email VARCHAR(255),
-                    role VARCHAR(50) DEFAULT 'user',
-                    permissions JSONB DEFAULT '[]',
-                    points INTEGER DEFAULT 0,
-                    settings JSONB DEFAULT '{}',
-                    last_active TIMESTAMPTZ DEFAULT NOW(),
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    
-                    INDEX idx_role (role),
-                    INDEX idx_last_active (last_active)
-                )
-            ''')
-            
-            # Advanced analytics with vector embeddings
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS post_analytics (
-                    id SERIAL PRIMARY KEY,
-                    post_id INTEGER REFERENCES scheduled_posts(id),
-                    message_id BIGINT,
-                    views INTEGER DEFAULT 0,
-                    engagements INTEGER DEFAULT 0,
-                    reactions JSONB DEFAULT '{}',
-                    shares INTEGER DEFAULT 0,
-                    click_through_rate FLOAT DEFAULT 0,
-                    engagement_rate FLOAT DEFAULT 0,
-                    audience_reach INTEGER DEFAULT 0,
-                    peak_engagement_time TIMESTAMPTZ,
-                    geographic_data JSONB DEFAULT '{}',
-                    device_breakdown JSONB DEFAULT '{}',
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    
-                    INDEX idx_post_id (post_id),
-                    INDEX idx_engagement_rate (engagement_rate)
-                )
-            ''')
-            
-            # AI training data collection
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS ai_training_data (
-                    id SERIAL PRIMARY KEY,
-                    input_text TEXT,
-                    output_text TEXT,
-                    model_used VARCHAR(100),
-                    parameters JSONB DEFAULT '{}',
-                    quality_score FLOAT,
-                    user_feedback INTEGER DEFAULT 0,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            ''')
-            
-    async def add_scheduled_post(self, post_data: PostCreate, chat_id: int) -> int:
-        """Add scheduled post with modern features"""
-        async with self.pool.acquire() as conn:
-            post_id = await conn.fetchval('''
-                INSERT INTO scheduled_posts 
-                (chat_id, message_text, media_paths, media_type, scheduled_time, options)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING id
-            ''', chat_id, post_data.text, post_data.media_paths, 
-               post_data.media_type.value, post_data.scheduled_time, post_data.options)
-            
-            POSTS_CREATED.labels(type=post_data.media_type.value, status='scheduled').inc()
-            await self.cache.invalidate_tags(['scheduled_posts', 'pending_posts'])
-            return post_id
-
-# ==================== MODERN AI SERVICE WITH MULTIPLE PROVIDERS ====================
-class MultiModalAIService:
-    def __init__(self):
-        self.openai_client = None
-        self.huggingface_models = {}
-        self.local_models = {}
-        
-        if settings.OPENAI_API_KEY:
-            self.openai_client = openai.AsyncClient(api_key=settings.OPENAI_API_KEY)
-        
-        self.initialize_local_models()
-    
-    def initialize_local_models(self):
-        """Initialize local AI models for offline use"""
-        try:
-            # Text generation model
-            self.local_models['text_generation'] = pipeline(
-                "text-generation",
-                model="microsoft/DialoGPT-medium",
-                torch_dtype=torch.float16,
-                device_map="auto"
-            )
-            
-            # Sentiment analysis
-            self.local_models['sentiment'] = pipeline(
-                "sentiment-analysis",
-                model="cardiffnlp/twitter-roberta-base-sentiment-latest"
-            )
-            
-            # Text summarization
-            self.local_models['summarization'] = pipeline(
-                "summarization",
-                model="facebook/bart-large-cnn"
-            )
-            
-        except Exception as e:
-            logging.warning(f"Local model initialization failed: {e}")
-    
-    async def generate_content(self, request: AIContentRequest) -> Dict[str, Any]:
-        """Generate content using multiple AI providers with fallback"""
-        with tracer.start_as_current_span("ai_content_generation") as span:
-            span.set_attribute("topic", request.topic)
-            span.set_attribute("tone", request.tone)
-            
-            # Try OpenAI first
-            if self.openai_client:
-                try:
-                    result = await self._generate_with_openai(request)
-                    AI_REQUESTS.labels(provider='openai', endpoint='content_generation').inc()
-                    return result
-                except Exception as e:
-                    logging.warning(f"OpenAI generation failed: {e}")
-                    span.record_exception(e)
-            
-            # Fallback to local models
-            try:
-                result = await self._generate_with_local_model(request)
-                AI_REQUESTS.labels(provider='local', endpoint='content_generation').inc()
-                return result
-            except Exception as e:
-                logging.error(f"All AI generation failed: {e}")
-                span.record_exception(e)
-                raise
-    
-    async def _generate_with_openai(self, request: AIContentRequest) -> Dict[str, Any]:
-        """Generate content using OpenAI's latest models"""
-        prompt = self._build_advanced_prompt(request)
-        
-        response = await self.openai_client.chat.completions.create(
-            model="gpt-4-turbo-preview",
-            messages=[
-                {"role": "system", "content": "You are a professional social media content creator."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=request.length,
-            temperature=0.7,
-            presence_penalty=0.3,
-            frequency_penalty=0.3
-        )
-        
-        content = response.choices[0].message.content.strip()
-        
-        return {
-            "content": content,
-            "model": "gpt-4-turbo-preview",
-            "tokens_used": response.usage.total_tokens,
-            "quality_score": 0.9
-        }
-    
-    async def _generate_with_local_model(self, request: AIContentRequest) -> Dict[str, Any]:
-        """Generate content using local models"""
-        prompt = self._build_advanced_prompt(request)
-        
-        result = self.local_models['text_generation'](
-            prompt,
-            max_length=request.length + len(prompt),
-            num_return_sequences=1,
-            temperature=0.8,
-            do_sample=True
-        )
-        
-        content = result[0]['generated_text'].replace(prompt, '').strip()
-        
-        return {
-            "content": content,
-            "model": "local-dialogpt",
-            "tokens_used": len(content.split()),
-            "quality_score": 0.7
-        }
-    
-    def _build_advanced_prompt(self, request: AIContentRequest) -> str:
-        """Build sophisticated prompt for AI generation"""
-        tone_descriptions = {
-            "professional": "formal, business-oriented language",
-            "casual": "friendly, conversational tone",
-            "humorous": "funny, engaging with light humor",
-            "inspirational": "motivational and uplifting",
-            "urgent": "creating sense of immediacy"
-        }
-        
-        style_templates = {
-            "social_media": "Create an engaging social media post",
-            "blog": "Write a detailed blog post introduction",
-            "newsletter": "Craft a newsletter section",
-            "ad_copy": "Create persuasive advertising copy"
-        }
-        
-        return f"""
-        {style_templates.get(request.style, "Create content")} about: {request.topic}
-        
-        Requirements:
-        - Tone: {tone_descriptions.get(request.tone, request.tone)}
-        - Length: Approximately {request.length} words
-        - Keywords to include: {', '.join(request.keywords)}
-        - Target audience: Social media users
-        - Include a call-to-action
-        - Optimize for engagement and shares
-        
-        Please generate compelling content:
-        """
-
-# ==================== MODERN REAL-TIME ANALYTICS ====================
-class RealTimeAnalytics:
-    def __init__(self, db: AdvancedDatabase):
-        self.db = db
-        self.ml_models = {}
-        self.initialize_ml_models()
-    
-    def initialize_ml_models(self):
-        """Initialize ML models for predictive analytics"""
-        # Engagement prediction model
-        self.ml_models['engagement_predictor'] = xgb.XGBRegressor()
-        
-        # Optimal timing model
-        self.ml_models['timing_predictor'] = RandomForestRegressor()
-        
-        # Content quality model
-        self.ml_models['quality_predictor'] = lgb.LGBMRegressor()
-    
-    async def predict_engagement(self, post_data: Dict[str, Any]) -> float:
-        """Predict engagement rate for a post"""
-        features = self._extract_features(post_data)
-        
-        # For now, return a simple heuristic prediction
-        # In production, this would use the trained ML model
-        base_engagement = 0.05  # 5% base engagement
-        
-        # Content length factor
-        length_factor = min(len(post_data.get('text', '')) / 500, 1.0)
-        
-        # Media type bonus
-        media_bonus = {
-            'text': 0.0,
-            'image': 0.02,
-            'video': 0.05,
-            'carousel': 0.03
-        }.get(post_data.get('media_type', 'text'), 0.0)
-        
-        return base_engagement + (length_factor * 0.02) + media_bonus
-    
-    async def get_optimal_posting_time(self, audience_data: Dict[str, Any]) -> datetime:
-        """Calculate optimal posting time using ML"""
-        now = datetime.now()
-        
-        # Simple heuristic - in production this would use ML model
-        best_hours = {
-            "general": [9, 12, 15, 19, 21],
-            "business": [8, 12, 17],
-            "entertainment": [19, 20, 21, 22]
-        }
-        
-        audience_type = audience_data.get('type', 'general')
-        optimal_hour = best_hours.get(audience_type, [19])[0]
-        
-        return now.replace(hour=optimal_hour, minute=0, second=0, microsecond=0)
-    
-    def _extract_features(self, post_data: Dict[str, Any]) -> np.ndarray:
-        """Extract features for ML models"""
-        # This would extract various features from post data
-        # For now, return a simple feature vector
-        return np.array([[len(post_data.get('text', '')), 1 if post_data.get('media_paths') else 0]])
-
-# ==================== MODERN WEBSOCKET MANAGER ====================
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-    
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-    
-    async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
-    
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except:
-                self.disconnect(connection)
-
-# ==================== MODERN BOT WITH ADVANCED FEATURES ====================
-class ModernTelegramBot:
-    def __init__(self):
-        self.settings = settings
-        self.application = Application.builder().token(self.settings.BOT_TOKEN).build()
-        
-        # Modern components
-        self.db = AdvancedDatabase()
-        self.cache = DistributedCache()
-        self.ai_service = MultiModalAIService()
-        self.analytics = RealTimeAnalytics(self.db)
-        self.websocket_manager = ConnectionManager()
-        
-        # Feature flags
-        self.features = {
-            'ai_content_generation': settings.ENABLE_AI,
-            'advanced_analytics': settings.ENABLE_ANALYTICS,
-            'real_time_updates': True
-        }
-        
-        self.setup_handlers()
-        self.setup_advanced_features()
-    
-    def setup_advanced_features(self):
-        """Setup modern bot features"""
-        # Add custom filters
-        self.application.add_handler(MessageHandler(
-            filters.PHOTO | filters.VIDEO | filters.Document.ALL,
-            self.handle_media
-        ))
-        
-        # Add voice message handler
-        self.application.add_handler(MessageHandler(
-            filters.VOICE,
-            self.handle_voice_message
-        ))
-        
-        # Add location handler
-        self.application.add_handler(MessageHandler(
-            filters.LOCATION,
-            self.handle_location
-        ))
-    
-    async def initialize(self):
-        """Modern initialization with health checks"""
-        await self.db.connect()
-        
-        # Health check
-        await self.health_check()
-        
-        # Start background tasks
-        asyncio.create_task(self.process_pending_posts())
-        asyncio.create_task(self.periodic_analytics())
-        asyncio.create_task(self.cleanup_old_data())
-        
-        logging.info("🚀 Modern Telegram Bot initialized successfully")
-    
-    async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle modern media processing"""
-        if not self.is_admin(update):
-            return
-        
-        user = update.effective_user
-        message = update.message
-        
-        try:
-            # Process different media types
-            if message.photo:
-                await self.process_image(message.photo[-1], user)
-            elif message.video:
-                await self.process_video(message.video, user)
-            elif message.document:
-                await self.process_document(message.document, user)
-                
-            await update.message.reply_text("✅ Медиафайл получен и обработан")
-            
-        except Exception as e:
-            logging.error(f"Media processing error: {e}")
-            await update.message.reply_text("❌ Ошибка обработки медиафайла")
-    
-    async def process_image(self, photo, user):
-        """Advanced image processing"""
-        file = await photo.get_file()
-        
-        # Download and optimize image
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file.file_path) as response:
-                image_data = await response.read()
-                
-                # Optimize image
-                optimized_image = await self.optimize_image_modern(image_data)
-                
-                # Generate AI description
-                if self.features['ai_content_generation']:
-                    description = await self.generate_image_description(optimized_image)
-                    
-                # Store in cache for quick access
-                cache_key = f"image_{user.id}_{int(time.time())}"
-                await self.cache.set(cache_key, {
-                    'image_data': optimized_image,
-                    'description': description,
-                    'user_id': user.id,
-                    'timestamp': time.time()
-                })
-    
-    async def optimize_image_modern(self, image_data: bytes) -> bytes:
-        """Modern image optimization with AI enhancements"""
-        with Image.open(io.BytesIO(image_data)) as img:
-            # Convert to RGB if necessary
-            if img.mode in ('RGBA', 'LA', 'P'):
-                img = img.convert('RGB')
-            
-            # Smart cropping
-            img = ImageOps.exif_transpose(img)
-            
-            # Resize with maintaining aspect ratio
-            max_size = (1200, 1200)
-            img.thumbnail(max_size, Image.Resampling.LANCZOS)
-            
-            # Optimize for web
-            output = io.BytesIO()
-            img.save(output, format='WEBP', quality=85, optimize=True)
-            
-            return output.getvalue()
-    
-    async def generate_image_description(self, image_data: bytes) -> str:
-        """Generate AI description for images"""
-        if not self.features['ai_content_generation']:
-            return "Изображение для публикации"
-        
-        try:
-            # This would integrate with vision AI models
-            # For now, return a placeholder
-            return "Привлекательное изображение для социальных сетей"
-        except Exception as e:
-            logging.error(f"Image description generation failed: {e}")
-            return "Креативное изображение"
-    
-    async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Convert voice messages to text using AI"""
-        if not self.is_admin(update):
-            return
-        
-        voice = update.message.voice
-        file = await voice.get_file()
-        
-        try:
-            # Download voice file
-            async with aiohttp.ClientSession() as session:
-                async with session.get(file.file_path) as response:
-                    audio_data = await response.read()
-                    
-                    # Convert to text (placeholder - would use speech-to-text API)
-                    text = "Текст из голосового сообщения будет здесь"
-                    
-                    await update.message.reply_text(
-                        f"🎤 Распознанный текст:\n{text}\n\n"
-                        f"Используйте этот текст для создания поста"
-                    )
-                    
-        except Exception as e:
-            logging.error(f"Voice message processing error: {e}")
-            await update.message.reply_text("❌ Ошибка обработки голосового сообщения")
-    
-    async def process_pending_posts(self):
-        """Modern post processing with retry logic and circuit breaker"""
-        error_count = 0
-        max_errors = 3
-        
-        while True:
-            try:
-                posts = await self.db.get_pending_posts()
-                
-                for post in posts:
-                    try:
-                        await self.send_scheduled_post_modern(post)
-                        error_count = 0  # Reset on success
-                        
-                    except Exception as e:
-                        error_count += 1
-                        logging.error(f"Post {post['id']} failed: {e}")
-                        
-                        if error_count >= max_errors:
-                            logging.error("Circuit breaker triggered - pausing post processing")
-                            await asyncio.sleep(300)  # 5 minute pause
-                            error_count = 0
-                
-                await asyncio.sleep(30)  # Check every 30 seconds
-                
-            except Exception as e:
-                logging.error(f"Post processing loop error: {e}")
-                await asyncio.sleep(60)
-    
-    async def send_scheduled_post_modern(self, post):
-        """Modern post sending with analytics and optimization"""
-        try:
-            # Pre-process content
-            optimized_text = await self.optimize_post_content(post['message_text'])
-            
-            # Send based on media type
-            if post['media_paths']:
-                await self.send_media_post(post, optimized_text)
-            else:
-                await self.application.bot.send_message(
-                    chat_id=self.settings.CHANNEL_ID,
-                    text=optimized_text,
-                    parse_mode=ParseMode.HTML
-                )
-            
-            # Track in analytics
-            await self.track_post_analytics(post['id'])
-            
-            # Update status
-            await self.db.update_post_status(post['id'], 'published')
-            
-            # Broadcast real-time update
-            await self.websocket_manager.broadcast(
-                f"Post {post['id']} published successfully"
-            )
-            
-        except Exception as e:
-            logging.error(f"Failed to send post {post['id']}: {e}")
-            await self.db.update_post_status(post['id'], 'failed')
-            raise
-    
-    async def optimize_post_content(self, text: str) -> str:
-        """Optimize post content for better engagement"""
-        # Add emojis based on content
-        emoji_map = {
-            'поздравляю': '🎉',
-            'новость': '📰',
-            'совет': '💡',
-            'вопрос': '❓',
-            'важно': '⚠️'
-        }
-        
-        optimized = text
-        for keyword, emoji in emoji_map.items():
-            if keyword in text.lower():
-                optimized = f"{emoji} {optimized}"
-                break
-        
-        return optimized
-    
-    async def periodic_analytics(self):
-        """Periodic analytics calculation and reporting"""
-        while True:
-            try:
-                # Calculate daily analytics
-                await self.calculate_daily_metrics()
-                
-                # Generate insights
-                await self.generate_ai_insights()
-                
-                # Cleanup old analytics data
-                await self.cleanup_old_analytics()
-                
-                await asyncio.sleep(3600)  # Run every hour
-                
-            except Exception as e:
-                logging.error(f"Periodic analytics error: {e}")
-                await asyncio.sleep(300)
-    
-    async def health_check(self) -> bool:
-        """Comprehensive health check"""
-        checks = {
-            'database': await self.check_database_health(),
-            'redis': await self.check_redis_health(),
-            'telegram': await self.check_telegram_health(),
-            'ai_services': await self.check_ai_health()
-        }
-        
-        all_healthy = all(checks.values())
-        
-        if not all_healthy:
-            logging.warning(f"Health check failures: {checks}")
-        
-        return all_healthy
-    
-    async def check_database_health(self) -> bool:
-        try:
-            async with self.db.pool.acquire() as conn:
-                await conn.execute("SELECT 1")
-            return True
-        except:
-            return False
-    
-    async def check_redis_health(self) -> bool:
-        try:
-            await self.cache.redis.ping()
-            return True
-        except:
-            return False
-
-# ==================== MODERN FASTAPI APPLICATION ====================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    global bot
-    bot = ModernTelegramBot()
-    await bot.initialize()
-    
-    # Start Prometheus metrics server
-    start_http_server(8000)
-    
-    yield
-    
-    # Shutdown
-    await bot.application.stop()
-    await bot.application.shutdown()
-
-app = FastAPI(
-    title="Modern Telegram Bot API",
-    description="Advanced Telegram channel management bot with AI capabilities",
-    version="2.0.0",
-    lifespan=lifespan
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 
-# Modern middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Стандартные сроки службы фильтров (убраны механический, престиж, кристалл, угольный)
+DEFAULT_LIFETIMES = {
+    "магистральный sl10": 180,
+    "магистральный sl20": 180,
+    "гейзер": 365,
+    "аквафор": 365
+}
 
-# Mount static files for modern dashboard
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+# Ограничения
+MAX_FILTERS_PER_USER = 50
 
-# WebSocket endpoint for real-time updates
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await bot.websocket_manager.connect(websocket)
+# Инициализация бота
+bot = Bot(token=API_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
+
+# ========== УЛУЧШЕНИЯ: БЕЗОПАСНОСТЬ БАЗЫ ДАННЫХ ==========
+@contextmanager
+def get_db_connection():
+    """Контекстный менеджер для безопасной работы с БД"""
+    conn = sqlite3.connect('filters.db')
+    conn.row_factory = sqlite3.Row  # Для доступа к колонкам по имени
     try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle WebSocket messages
-            await bot.websocket_manager.send_personal_message(f"Message: {data}", websocket)
-    except WebSocketDisconnect:
-        bot.websocket_manager.disconnect(websocket)
-
-# Modern API endpoints
-@app.post("/api/v2/posts")
-async def create_post_modern(post: PostCreate, request: Request):
-    """Modern post creation endpoint"""
-    with tracer.start_as_current_span("create_post"):
-        # Validate user permissions
-        user_id = await authenticate_user(request)
-        
-        # Create post
-        post_id = await bot.db.add_scheduled_post(post, user_id)
-        
-        # Predict engagement
-        engagement_prediction = await bot.analytics.predict_engagement(post.dict())
-        
-        return {
-            "post_id": post_id,
-            "scheduled_time": post.scheduled_time,
-            "predicted_engagement": engagement_prediction,
-            "status": "scheduled"
-        }
-
-@app.get("/api/v2/analytics/dashboard")
-async def get_modern_dashboard():
-    """Modern analytics dashboard"""
-    return {
-        "total_posts": 150,
-        "engagement_rate": 0.045,
-        "top_performing_posts": [],
-        "audience_growth": 1250,
-        "ai_recommendations": [
-            "Post more video content",
-            "Optimal posting time: 19:00",
-            "Increase post frequency by 20%"
-        ]
-    }
-
-@app.get("/api/v2/ai/generate")
-async def generate_ai_content(request: AIContentRequest):
-    """AI content generation endpoint"""
-    result = await bot.ai_service.generate_content(request)
-    return result
-
-# Modern health check endpoint
-@app.get("/health")
-async def health_check():
-    health_status = await bot.health_check()
-    return {
-        "status": "healthy" if health_status else "unhealthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0.0",
-        "services": {
-            "database": await bot.check_database_health(),
-            "cache": await bot.check_redis_health(),
-            "ai_services": await bot.check_ai_health()
-        }
-    }
-
-# ==================== MODERN DEPLOYMENT CONFIGURATION ====================
-# Dockerfile, Kubernetes manifests, and CI/CD would be included in production
-
-async def main():
-    """Modern main function with error handling"""
-    try:
-        # Initialize and run the bot
-        bot = ModernTelegramBot()
-        await bot.initialize()
-        
-        # Start FastAPI server
-        import uvicorn
-        config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=8000,
-            log_level="info",
-            access_log=True
-        )
-        server = uvicorn.Server(config)
-        
-        # Run both bot and API server
-        await asyncio.gather(
-            bot.application.run_polling(),
-            server.serve()
-        )
-        
+        yield conn
     except Exception as e:
-        logging.critical(f"Application failed to start: {e}")
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+def safe_db_string(value: str) -> str:
+    """Очистка строки для безопасного использования в БД"""
+    if not value:
+        return ""
+    return re.sub(r'[;\'"\\]', '', value.strip())
+
+def get_user_filters(user_id):
+    """Безопасное получение фильтров пользователя"""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
+        return [dict(row) for row in cur.fetchall()]
+
+def get_filter_by_id(filter_id, user_id):
+    """Получение фильтра по ID с проверкой пользователя"""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+        result = cur.fetchone()
+        return dict(result) if result else None
+
+def check_filters_limit(user_id):
+    """Проверка лимита фильтров"""
+    filters = get_user_filters(user_id)
+    return len(filters) >= MAX_FILTERS_PER_USER
+
+def get_all_users_stats():
+    """Получение статистики по всем пользователям (для админа)"""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute('''SELECT COUNT(DISTINCT user_id) as total_users, 
+                              COUNT(*) as total_filters,
+                              SUM(CASE WHEN expiry_date <= date('now') THEN 1 ELSE 0 END) as expired_filters,
+                              SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
+                       FROM filters''')
+        result = cur.fetchone()
+        return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
+
+def get_all_users():
+    """Получение списка всех пользователей (для админа)"""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute('''SELECT DISTINCT user_id, COUNT(*) as filter_count 
+                       FROM filters 
+                       GROUP BY user_id 
+                       ORDER BY filter_count DESC''')
+        return [dict(row) for row in cur.fetchall()]
+
+def clear_all_filters():
+    """Очистка всей базы данных (для админа)"""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM filters")
+        conn.commit()
+        return cur.rowcount
+
+# ========== УЛУЧШЕНИЯ: ВАЛИДАЦИЯ ВВОДА ==========
+def validate_date(date_str: str):
+    """Валидация даты с улучшенной обработкой ошибок"""
+    date_str = date_str.strip()
+    
+    # Убираем лишние символы, но оставляем точки, дефисы и слэши
+    date_str = re.sub(r'[^\d\.\-/]', '', date_str)
+    
+    formats = ['%d.%m.%y', '%d.%m.%Y', '%d-%m-%y', '%d-%m-%Y', '%d/%m/%y', '%d/%m/%Y']
+    
+    for fmt in formats:
+        try:
+            date_obj = datetime.strptime(date_str, fmt).date()
+            today = datetime.now().date()
+            
+            # Проверяем что дата не в будущем (максимум +1 день для запаса)
+            if date_obj > today + timedelta(days=1):
+                raise ValueError("Дата не может быть в будущем")
+                
+            # Проверяем что дата не слишком старая (максимум 5 лет назад)
+            if date_obj < today - timedelta(days=5*365):
+                raise ValueError("Дата слишком старая")
+                
+            return date_obj
+        except ValueError:
+            continue
+    
+    raise ValueError("Неверный формат даты. Используйте ДД.ММ.ГГ или ДД.ММ.ГГГГ")
+
+def validate_lifetime(days_str: str):
+    """Валидация срока службы"""
+    try:
+        days = int(days_str)
+        if days <= 0:
+            raise ValueError("Срок службы должен быть положительным числом")
+        if days > 2000:  # Максимум ~5.5 лет
+            raise ValueError("Слишком большой срок службы")
+        return days
+    except ValueError:
+        raise ValueError("Введите корректное число дней")
+
+def validate_filter_name(name: str):
+    """Валидация названия фильтра"""
+    name = name.strip()
+    if not name:
+        raise ValueError("Название фильтра не может быть пустым")
+    if len(name) > 100:
+        raise ValueError("Название фильтра слишком длинное")
+    # Разрешаем буквы, цифры, пробелы, дефисы и точки
+    if re.search(r'[^\w\s\-\.]', name, re.UNICODE):
+        raise ValueError("Название содержит запрещенные символы")
+    return safe_db_string(name)
+
+# ========== ОБНОВЛЕННЫЕ КЛАВИАТУРЫ ==========
+
+def get_main_keyboard(user_id=None):
+    """Главная клавиатура с проверкой прав администратора"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("📋 Мои фильтры"),
+        types.KeyboardButton("✨ Добавить фильтр")
+    )
+    keyboard.row(
+        types.KeyboardButton("⏳ Сроки замены"),
+        types.KeyboardButton("⚙️ Управление")
+    )
+    # Правильная проверка администратора
+    if user_id and user_id == ADMIN_ID:
+        keyboard.row(types.KeyboardButton("👑 Админ панель"))
+    return keyboard
+
+def get_filter_type_keyboard():
+    """Клавиатура для выбора типа фильтра (убраны механический, престиж, кристалл, угольный)"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    # Только оставшиеся фильтры
+    keyboard.row(
+        types.KeyboardButton("🔧 Магистральный SL10"),
+        types.KeyboardButton("🔧 Магистральный SL20")
+    )
+    keyboard.row(
+        types.KeyboardButton("💧 Гейзер"),
+        types.KeyboardButton("💧 Аквафор")
+    )
+    keyboard.row(types.KeyboardButton("📝 Другой тип"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    
+    return keyboard
+
+def get_multiple_filters_keyboard():
+    """Упрощенная клавиатура для нескольких фильтров"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    keyboard.row(types.KeyboardButton("➕ Добавить фильтр"))
+    keyboard.row(types.KeyboardButton("➕ 1 фильтр"))
+    keyboard.row(types.KeyboardButton("✅ Готово"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    
+    return keyboard
+
+def get_add_filter_keyboard():
+    """Обновленная клавиатура добавления фильтра"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("🔧 Один фильтр"),
+        types.KeyboardButton("📦 Несколько фильтров")
+    )
+    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+    return keyboard
+
+def get_location_keyboard():
+    """Упрощенная клавиатура для места установки"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(types.KeyboardButton("📍 Указать место установки"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    return keyboard
+
+def get_filters_list_keyboard(filters, action="delete"):
+    """Клавиатура со списком фильтров для удаления или редактирования"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    for f in filters:
+        button_text = f"#{f['id']} {f['filter_type']} - {f['location']}"
+        keyboard.add(types.KeyboardButton(button_text))
+    
+    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+    return keyboard
+
+def get_edit_filter_keyboard():
+    """Клавиатура для редактирования фильтра"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.row(
+        types.KeyboardButton("✏️ Тип фильтра"),
+        types.KeyboardButton("📍 Место установки")
+    )
+    keyboard.row(
+        types.KeyboardButton("📅 Дата замены"),
+        types.KeyboardButton("⏱️ Срок службы")
+    )
+    keyboard.row(types.KeyboardButton("🔙 К списку фильтров"))
+    keyboard.row(types.KeyboardButton("🔙 Главное меню"))
+    return keyboard
+
+def get_admin_keyboard():
+    """Клавиатура админ панели"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("📊 Общая статистика"),
+        types.KeyboardButton("👥 Пользователи")
+    )
+    keyboard.row(
+        types.KeyboardButton("🗑️ Очистить базу"),
+        types.KeyboardButton("🔙 Главное меню")
+    )
+    return keyboard
+
+def get_confirmation_keyboard(filter_id=None, action="delete"):
+    """Клавиатура подтверждения удаления"""
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    if action == "delete":
+        keyboard.add(
+            types.InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{filter_id}"),
+            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete")
+        )
+    elif action == "clear_db":
+        keyboard.add(
+            types.InlineKeyboardButton("✅ Да, очистить всю базу", callback_data="confirm_clear_db"),
+            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_clear_db")
+        )
+    return keyboard
+
+def get_management_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row(
+        types.KeyboardButton("✏️ Редактировать"),
+        types.KeyboardButton("🗑️ Удалить")
+    )
+    keyboard.row(
+        types.KeyboardButton("📊 Статистика"),
+        types.KeyboardButton("🔙 Главное меню")
+    )
+    return keyboard
+
+def get_cancel_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("❌ Отмена"))
+    return keyboard
+
+def get_back_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("↩️ Назад"))
+    return keyboard
+
+def get_lifetime_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    keyboard.row(
+        types.KeyboardButton("3️⃣ 90 дней"),
+        types.KeyboardButton("6️⃣ 180 дней"),
+        types.KeyboardButton("1️⃣ 365 дней")
+    )
+    keyboard.row(types.KeyboardButton("📅 Другое количество"))
+    keyboard.row(types.KeyboardButton("❌ Отмена"))
+    return keyboard
+
+# ========== УЛУЧШЕНИЯ: ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
+def init_db():
+    """Безопасная инициализация базы данных с проверками"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            # Проверяем существование таблицы и её структуру
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filters'")
+            table_exists = cur.fetchone()
+            
+            if not table_exists:
+                # Создаем таблицу с полной структурой
+                cur.execute('''CREATE TABLE filters (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER,
+                            filter_type TEXT,
+                            location TEXT,
+                            last_change DATE,
+                            expiry_date DATE,
+                            lifetime_days INTEGER,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                
+                # Создаем индексы
+                cur.execute('''CREATE INDEX idx_user_id ON filters(user_id)''')
+                cur.execute('''CREATE INDEX idx_expiry_date ON filters(expiry_date)''')
+                logging.info("База данных успешно создана")
+            else:
+                # Проверяем структуру существующей таблицы
+                cur.execute("PRAGMA table_info(filters)")
+                columns = [column[1] for column in cur.fetchall()]
+                required_columns = ['id', 'user_id', 'filter_type', 'location', 'last_change', 'expiry_date', 'lifetime_days', 'created_at', 'updated_at']
+                
+                logging.info("База данных уже существует, проверка структуры завершена")
+            
+            conn.commit()
+            
+    except Exception as e:
+        logging.error(f"Критическая ошибка инициализации БД: {e}")
+        if os.path.exists('filters.db'):
+            backup_name = f'filters_backup_critical_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+            shutil.copy2('filters.db', backup_name)
+            logging.info(f"Создана критическая резервная копия: {backup_name}")
         raise
 
-if __name__ == "__main__":
-    # Modern logging setup
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('modern_bot.log'),
-        ]
+# Функция резервного копирования базы данных
+def backup_database():
+    """Создание резервной копии базы данных с проверками"""
+    try:
+        if not os.path.exists('filters.db'):
+            logging.warning("База данных не найдена для резервного копирования")
+            return False
+            
+        backup_dir = "backups"
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = os.path.join(backup_dir, f"filters_backup_{timestamp}.db")
+        
+        # Проверяем размер базы данных
+        db_size = os.path.getsize('filters.db')
+        if db_size == 0:
+            logging.warning("База данных пуста, пропускаем резервное копирование")
+            return False
+            
+        shutil.copy2('filters.db', backup_file)
+        logging.info(f"Создана резервная копия: {backup_file} ({db_size} bytes)")
+        
+        # Удаляем старые резервные копии (оставляем последние 10)
+        backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("filters_backup") and f.endswith(".db")])
+        for old_backup in backups[:-10]:
+            old_backup_path = os.path.join(backup_dir, old_backup)
+            try:
+                os.remove(old_backup_path)
+                logging.info(f"Удалена старая резервная копия: {old_backup}")
+            except Exception as e:
+                logging.error(f"Не удалось удалить старую резервную копию {old_backup}: {e}")
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Ошибка при создании резервной копии: {e}")
+        return False
+
+# States
+class FilterStates(StatesGroup):
+    waiting_filter_type = State()
+    waiting_location = State()
+    waiting_change_date = State()
+    waiting_lifetime = State()
+
+class MultipleFiltersStates(StatesGroup):
+    waiting_filters_list = State()
+    waiting_location = State()
+    waiting_change_date = State()
+    waiting_lifetime = State()
+
+class EditFilterStates(StatesGroup):
+    waiting_filter_selection = State()
+    waiting_field_selection = State()
+    waiting_new_value = State()
+
+class DeleteFilterStates(StatesGroup):
+    waiting_filter_selection = State()
+
+# ========== УЛУЧШЕНИЯ: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def parse_date(date_str):
+    """Улучшенный парсинг даты с валидацией"""
+    return validate_date(date_str)
+
+def format_date_nice(date):
+    return date.strftime('%d.%m.%y')
+
+def get_lifetime_by_type(filter_type):
+    filter_type_lower = filter_type.lower()
+    for key, days in DEFAULT_LIFETIMES.items():
+        if key in filter_type_lower:
+            return days
+    return 180
+
+def get_status_icon_and_text(days_until_expiry):
+    """Получение иконки и текста статуса"""
+    if days_until_expiry <= 0:
+        return "🔴", "ПРОСРОЧЕН"
+    elif days_until_expiry <= 7:
+        return "🟡", "СРОЧНО ЗАМЕНИТЬ"
+    elif days_until_expiry <= 30:
+        return "🟠", "СКОРО ЗАМЕНИТЬ"
+    else:
+        return "✅", "В НОРМЕ"
+
+def create_expiry_infographic(filters):
+    """Создание инфографики по срокам замены"""
+    today = datetime.now().date()
+    expired_count = 0
+    expiring_soon_count = 0
+    warning_count = 0
+    ok_count = 0
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        if days_until_expiry <= 0:
+            expired_count += 1
+        elif days_until_expiry <= 7:
+            expiring_soon_count += 1
+        elif days_until_expiry <= 30:
+            warning_count += 1
+        else:
+            ok_count += 1
+    
+    total = len(filters)
+    
+    # Создаем текстовую инфографику
+    infographic = "📊 <b>ИНФОГРАФИКА СРОКОВ ЗАМЕНЫ</b>\n\n"
+    
+    if expired_count > 0:
+        infographic += f"🔴 <b>Просрочено:</b> {expired_count} фильтров\n"
+        infographic += "   ⚠️ Требуется немедленная замена!\n\n"
+    
+    if expiring_soon_count > 0:
+        infographic += f"🟡 <b>Срочно заменить:</b> {expiring_soon_count} фильтров\n"
+        infographic += "   📅 Заменить в течение недели\n\n"
+    
+    if warning_count > 0:
+        infographic += f"🟠 <b>Скоро заменить:</b> {warning_count} фильтров\n"
+        infographic += "   📅 Заменить в течение месяца\n\n"
+    
+    if ok_count > 0:
+        infographic += f"✅ <b>В норме:</b> {ok_count} фильтров\n"
+        infographic += "   💧 Следующая замена через 30+ дней\n\n"
+    
+    # Прогресс-бар
+    if total > 0:
+        infographic += "📈 <b>Статус фильтров:</b>\n"
+        infographic += "[" + "🔴" * min(expired_count, 10) + "🟡" * min(expiring_soon_count, 10) + "🟠" * min(warning_count, 10) + "✅" * min(ok_count, 10) + "]\n\n"
+    
+    infographic += f"📦 <b>Всего фильтров:</b> {total}"
+    
+    return infographic
+
+def create_progress_bar(count, total, emoji):
+    """Создание текстового прогресс-бара"""
+    if total == 0:
+        return ""
+    
+    percentage = count / total
+    bars = int(percentage * 10)  # 10 символов для прогресс-бара
+    return emoji + "█" * bars + "░" * (10 - bars)
+
+def create_stats_infographic(stats, filters):
+    """Создание визуальной инфографики статистики"""
+    total = stats['total']
+    
+    # Создаем прогресс-бары
+    expired_bar = create_progress_bar(stats['expired'], total, "🔴")
+    expiring_7_bar = create_progress_bar(stats['expiring_7'], total, "🟡")
+    expiring_30_bar = create_progress_bar(stats['expiring_30'], total, "🟠")
+    ok_bar = create_progress_bar(stats['ok'], total, "✅")
+    
+    # Самый популярный тип фильтра
+    most_common_type = max(stats['filter_types'].items(), key=lambda x: x[1]) if stats['filter_types'] else ("Нет данных", 0)
+    
+    # Самый популярный тип фильтра
+    most_common_location = max(stats['locations'].items(), key=lambda x: x[1]) if stats['locations'] else ("Нет данных", 0)
+    
+    infographic = (
+        "📊 <b>СТАТИСТИКА ФИЛЬТРОВ - ИНФОГРАФИКА</b>\n\n"
+        
+        "🎯 <b>ОБЩАЯ СТАТИСТИКА</b>\n"
+        f"   📦 Всего фильтров: <b>{total}</b>\n"
+        f"   ⚠️ Требуют внимания: <b>{stats['expired'] + stats['expiring_7'] + stats['expiring_30']}</b>\n"
+        f"   ✅ В норме: <b>{stats['ok']}</b>\n\n"
+        
+        "📈 <b>РАСПРЕДЕЛЕНИЕ ПО СТАТУСАМ</b>\n"
+        f"   {expired_bar} Просрочено: {stats['expired']} ({stats['expired']/total*100:.1f}%)\n"
+        f"   {expiring_7_bar} Срочно: {stats['expiring_7']} ({stats['expiring_7']/total*100:.1f}%)\n"
+        f"   {expiring_30_bar} Скоро: {stats['expiring_30']} ({stats['expiring_30']/total*100:.1f}%)\n"
+        f"   {ok_bar} Норма: {stats['ok']} ({stats['ok']/total*100:.1f}%)\n\n"
+        
+        "🏆 <b>САМЫЕ ПОПУЛЯРНЫЕ</b>\n"
+        f"   🔧 Тип фильтра: <b>{most_common_type[0]}</b> ({most_common_type[1]} шт.)\n"
+        f"   📍 Место: <b>{most_common_location[0]}</b> ({most_common_location[1]} шт.)\n\n"
     )
     
-    # Run the modern application
-    asyncio.run(main())
+    # Добавляем информацию о ближайшем сроке
+    if stats['nearest_expiry'] is not None:
+        if stats['nearest_expiry'] <= 0:
+            infographic += f"🚨 <b>БЛИЖАЙШИЙ СРОК:</b> ПРОСРОЧЕН на {abs(stats['nearest_expiry'])} дн.\n"
+        else:
+            infographic += f"⏰ <b>БЛИЖАЙШИЙ СРОК:</b> через {stats['nearest_expiry']} дн.\n"
+    
+    return infographic
+
+def create_detailed_stats(stats, filters):
+    """Создание детальной статистики"""
+    total = stats['total']
+    
+    detailed = "📋 <b>ДЕТАЛЬНАЯ СТАТИСТИКА</b>\n\n"
+    
+    # Статистика по типам фильтров
+    if stats['filter_types']:
+        detailed += "🔧 <b>РАСПРЕДЕЛЕНИЕ ПО ТИПАМ:</b>\n"
+        for filter_type, count in sorted(stats['filter_types'].items(), key=lambda x: x[1], reverse=True)[:5]:  # Топ-5
+            percentage = count / total * 100
+            bar = create_progress_bar(count, total, "●")
+            detailed += f"   {bar} {filter_type}: {count} ({percentage:.1f}%)\n"
+        detailed += "\n"
+    
+    # Статистика по местам установки
+    if stats['locations']:
+        detailed += "📍 <b>РАСПРЕДЕЛЕНИЕ ПО МЕСТАМ:</b>\n"
+        for location, count in sorted(stats['locations'].items(), key=lambda x: x[1], reverse=True)[:5]:  # Топ-5
+            percentage = count / total * 100
+            bar = create_progress_bar(count, total, "●")
+            detailed += f"   {bar} {location}: {count} ({percentage:.1f}%)\n"
+        detailed += "\n"
+    
+    # Средний срок службы
+    if stats['ok'] > 0:
+        avg_days = stats['total_days_remaining'] / stats['ok']
+        detailed += f"📅 <b>СРЕДНИЙ СРОК У НОРМАЛЬНЫХ ФИЛЬТРОВ:</b> {avg_days:.1f} дней\n\n"
+    
+    # Рекомендации
+    recommendations = []
+    if stats['expired'] > 0:
+        recommendations.append(f"🚨 Заменить {stats['expired']} просроченных фильтров")
+    if stats['expiring_7'] > 0:
+        recommendations.append(f"⚠️ Подготовиться к замене {stats['expiring_7']} срочных фильтров")
+    if stats['expiring_30'] > 0:
+        recommendations.append(f"📝 Запланировать замену {stats['expiring_30']} фильтров в течение месяца")
+    
+    if recommendations:
+        detailed += "💡 <b>РЕКОМЕНДАЦИИ:</b>\n" + "\n".join([f"   • {rec}" for rec in recommendations])
+    else:
+        detailed += "🎉 <b>Отличная работа! Все фильтры в норме.</b>"
+    
+    return detailed
+
+# ========== ФОНОВЫЕ ЗАДАЧИ И ОБРАБОТКА ОШИБОК ==========
+async def check_expired_filters():
+    """Фоновая задача для проверки просроченных фильтров"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            
+            # Фильтры, которые истекают в ближайшие 7 дней
+            cur.execute('''SELECT DISTINCT user_id, filter_type, location, expiry_date 
+                          FROM filters 
+                          WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')''')
+            expiring_filters = cur.fetchall()
+            
+            # Фильтры, которые уже просрочены (но не более 30 дней назад)
+            cur.execute('''SELECT DISTINCT user_id, filter_type, location, expiry_date 
+                          FROM filters 
+                          WHERE expiry_date BETWEEN date('now', '-30 days') AND date('now', '-1 day')''')
+            expired_filters = cur.fetchall()
+        
+        notified_users = set()
+        
+        # Уведомления о скором истечении срока
+        for user_id, filter_type, location, expiry_date in expiring_filters:
+            try:
+                days_until_expiry = (datetime.strptime(str(expiry_date), '%Y-%m-%d').date() - datetime.now().date()).days
+                expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
+                
+                await bot.send_message(
+                    user_id,
+                    f"🔔 <b>Напоминание о замене фильтра</b>\n\n"
+                    f"🔧 {filter_type}\n"
+                    f"📍 {location}\n"
+                    f"📅 Срок истекает: {expiry_date_nice}\n"
+                    f"⏳ Осталось дней: {days_until_expiry}\n\n"
+                    f"⚠️ <i>Рекомендуется заменить в ближайшее время</i>",
+                    parse_mode='HTML'
+                )
+                notified_users.add(user_id)
+                await asyncio.sleep(0.1)  # Небольшая задержка между сообщениями
+            except Exception as e:
+                logging.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+        
+        # Уведомления о просроченных фильтрах
+        for user_id, filter_type, location, expiry_date in expired_filters:
+            if user_id not in notified_users:  # Не спамим пользователям, которые уже получили уведомление
+                try:
+                    days_expired = (datetime.now().date() - datetime.strptime(str(expiry_date), '%Y-%m-%d').date()).days
+                    expiry_date_nice = format_date_nice(datetime.strptime(str(expiry_date), '%Y-%m-%d').date())
+                    
+                    await bot.send_message(
+                        user_id,
+                        f"🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ</b>\n\n"
+                        f"🔧 {filter_type}\n"
+                        f"📍 {location}\n"
+                        f"📅 Срок истек: {expiry_date_nice}\n"
+                        f"⏰ Просрочено дней: {days_expired}\n\n"
+                        f"❌ <i>Требуется немедленная замена!</i>",
+                        parse_mode='HTML'
+                    )
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logging.error(f"Не удалось отправить срочное уведомление пользователю {user_id}: {e}")
+                    
+    except Exception as e:
+        logging.error(f"Ошибка при проверке просроченных фильтров: {e}")
+
+# Глобальный обработчик ошибок
+@dp.errors_handler()
+async def errors_handler(update, exception):
+    """Глобальный обработчик ошибок"""
+    logging.error(f"Ошибка: {exception}\n{traceback.format_exc()}")
+    
+    try:
+        # Отправляем сообщение администратору
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Ошибка в боте:\n\n"
+            f"Тип: {type(exception).__name__}\n"
+            f"Ошибка: {str(exception)[:1000]}"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить сообщение об ошибке администратору: {e}")
+    
+    return True
+
+# Запуск фоновой задачи
+async def schedule_daily_check():
+    """Планировщик ежедневных проверок"""
+    while True:
+        try:
+            await check_expired_filters()
+            # Создаем резервную копию раз в день в 3:00
+            if datetime.now().hour == 3 and datetime.now().minute == 0:
+                backup_database()
+                await asyncio.sleep(60)  # Ждем минуту чтобы не повторять
+        except Exception as e:
+            logging.error(f"Ошибка в фоновой задаче: {e}")
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+        
+        # Ожидаем 1 час до следующей проверки
+        await asyncio.sleep(60 * 60)
+
+async def on_startup(dp):
+    """Действия при запуске бота"""
+    logging.info("Бот запущен")
+    
+    # Создаем резервную копию при запуске
+    backup_database()
+    
+    # Запускаем фоновую задачу
+    asyncio.create_task(schedule_daily_check())
+    
+    # Уведомляем администратора о запуске
+    try:
+        await bot.send_message(ADMIN_ID, "🤖 Бот успешно запущен и работает")
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление администратору: {e}")
+
+# ========== НОВЫЕ ОБРАБОТЧИКИ ДЛЯ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
+
+@dp.message_handler(state=MultipleFiltersStates.waiting_change_date)
+async def process_multiple_change_date(message: types.Message, state: FSMContext):
+    """Обработка даты замены для нескольких фильтров"""
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    try:
+        change_date = validate_date(message.text)
+        
+        async with state.proxy() as data:
+            data['change_date'] = change_date
+            selected_filters = data['selected_filters']
+            location = data['location']
+        
+        await MultipleFiltersStates.next()
+        
+        await message.answer(
+            f"⏱️ <b>Срок службы для всех фильтров</b>\n\n"
+            f"📍 <i>Место:</i> {location}\n"
+            f"📅 <i>Дата замены:</i> {format_date_nice(change_date)}\n"
+            f"📦 <i>Количество фильтров:</i> {len(selected_filters)}\n\n"
+            f"📝 <b>Выберите или введите срок службы в днях:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+        
+    except ValueError as e:
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"❌ <b>Ошибка в дате!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=MultipleFiltersStates.waiting_lifetime)
+async def process_multiple_lifetime(message: types.Message, state: FSMContext):
+    """Обработка срока службы для нескольких фильтров"""
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    lifetime_mapping = {
+        "3️⃣ 90 дней": 90,
+        "6️⃣ 180 дней": 180,
+        "1️⃣ 365 дней": 365
+    }
+    
+    try:
+        if message.text in lifetime_mapping:
+            lifetime = lifetime_mapping[message.text]
+        elif message.text == "📅 Другое количество":
+            await message.answer(
+                "📅 <b>Введите срок службы в днях:</b>\n\n"
+                "💡 <i>Например: 30, 60, 90, 180, 365 и т.д.</i>",
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+        else:
+            lifetime = validate_lifetime(message.text)
+        
+        async with state.proxy() as data:
+            change_date = data['change_date']
+            selected_filters = data['selected_filters']
+            location = data['location']
+            
+            # Сохраняем все фильтры в БД
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                for filter_type in selected_filters:
+                    expiry_date = change_date + timedelta(days=lifetime)
+                    cur.execute('''INSERT INTO filters 
+                                (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                                VALUES (?, ?, ?, ?, ?, ?)''',
+                                (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                conn.commit()
+        
+        filters_list = "\n".join([f"• {f}" for f in selected_filters])
+        
+        await message.answer(
+            f"🎉 <b>ФИЛЬТРЫ УСПЕШНО ДОБАВЛЕНЫ!</b>\n\n"
+            f"📦 <b>Добавлено фильтров:</b> {len(selected_filters)}\n"
+            f"📍 <b>Место:</b> {location}\n"
+            f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n"
+            f"⏱️ <b>Срок службы:</b> {lifetime} дней\n\n"
+            f"🔧 <b>Список фильтров:</b>\n{filters_list}\n\n"
+            f"💫 <i>Теперь вы можете отслеживать срок их замены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        
+        await state.finish()
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в сроке службы!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите корректное число дней:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+
+# ========== ОБРАБОТЧИКИ ДЛЯ УПРАВЛЕНИЯ ФИЛЬТРАМИ ==========
+
+@dp.message_handler(lambda message: message.text == "📋 Мои фильтры")
+async def cmd_my_filters(message: types.Message):
+    """Показать все фильтры пользователя"""
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
+            "💫 <i>Добавьте первый фильтр с помощью кнопки '✨ Добавить фильтр'</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    today = datetime.now().date()
+    response = "📋 <b>ВАШИ ФИЛЬТРЫ</b>\n\n"
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        icon, status = get_status_icon_and_text(days_until_expiry)
+        
+        response += (
+            f"{icon} <b>#{f['id']} {f['filter_type']}</b>\n"
+            f"📍 {f['location']}\n"
+            f"📅 Заменен: {format_date_nice(last_change)}\n"
+            f"🗓️ Годен до: {format_date_nice(expiry_date)}\n"
+            f"⏱️ Осталось дней: <b>{days_until_expiry}</b>\n"
+            f"📊 Статус: <b>{status}</b>\n\n"
+        )
+    
+    # Добавляем инфографику
+    infographic = create_expiry_infographic(filters)
+    await message.answer(response, parse_mode='HTML')
+    await message.answer(infographic, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+
+@dp.message_handler(lambda message: message.text == "⏳ Сроки замены")
+async def cmd_expiry_dates(message: types.Message):
+    """Показать сроки замены с инфографикой"""
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
+            "💫 <i>Добавьте первый фильтр для отслеживания сроков замены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    infographic = create_expiry_infographic(filters)
+    await message.answer(infographic, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+
+@dp.message_handler(lambda message: message.text == "📊 Статистика")
+async def cmd_statistics(message: types.Message):
+    """Показать статистику по фильтрам"""
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
+            "💫 <i>Добавьте фильтры для просмотра статистики</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    today = datetime.now().date()
+    stats = {
+        'total': len(filters),
+        'expired': 0,
+        'expiring_7': 0,
+        'expiring_30': 0,
+        'ok': 0,
+        'filter_types': {},
+        'locations': {},
+        'total_days_remaining': 0,
+        'nearest_expiry': None
+    }
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until_expiry = (expiry_date - today).days
+        
+        # Статистика по статусам
+        if days_until_expiry <= 0:
+            stats['expired'] += 1
+        elif days_until_expiry <= 7:
+            stats['expiring_7'] += 1
+        elif days_until_expiry <= 30:
+            stats['expiring_30'] += 1
+        else:
+            stats['ok'] += 1
+            stats['total_days_remaining'] += days_until_expiry
+        
+        # Статистика по типам
+        filter_type = f['filter_type']
+        stats['filter_types'][filter_type] = stats['filter_types'].get(filter_type, 0) + 1
+        
+        # Статистика по местам
+        location = f['location']
+        stats['locations'][location] = stats['locations'].get(location, 0) + 1
+        
+        # Ближайший срок
+        if stats['nearest_expiry'] is None or days_until_expiry < stats['nearest_expiry']:
+            stats['nearest_expiry'] = days_until_expiry
+    
+    # Создаем инфографику
+    infographic = create_stats_infographic(stats, filters)
+    detailed_stats = create_detailed_stats(stats, filters)
+    
+    await message.answer(infographic, parse_mode='HTML')
+    await message.answer(detailed_stats, parse_mode='HTML', reply_markup=get_main_keyboard(message.from_user.id))
+
+# ========== ОБРАБОТЧИКИ УДАЛЕНИЯ ФИЛЬТРОВ ==========
+
+@dp.message_handler(lambda message: message.text == "🗑️ Удалить")
+async def cmd_delete_filter(message: types.Message):
+    """Начало процесса удаления фильтра"""
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>Нет фильтров для удаления</b>\n\n"
+            "💫 <i>Добавьте фильтры перед использованием этой функции</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    await DeleteFilterStates.waiting_filter_selection.set()
+    
+    filters_list = "\n".join([f"• #{f['id']} {f['filter_type']} - {f['location']}" for f in filters])
+    
+    await message.answer(
+        f"🗑️ <b>УДАЛЕНИЕ ФИЛЬТРА</b>\n\n"
+        f"📋 <b>Ваши фильтры:</b>\n{filters_list}\n\n"
+        f"🔢 <b>Выберите фильтр для удаления:</b>\n"
+        f"<i>Нажмите на соответствующий номер фильтра</i>",
+        parse_mode='HTML',
+        reply_markup=get_filters_list_keyboard(filters, "delete")
+    )
+
+@dp.message_handler(state=DeleteFilterStates.waiting_filter_selection)
+async def process_delete_filter_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора фильтра для удаления"""
+    if message.text == "🔙 Главное меню":
+        await state.finish()
+        await message.answer("🏠 Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    # Парсим ID фильтра из текста (формат: #ID Тип - Место)
+    match = re.match(r'#(\d+)', message.text)
+    if match:
+        filter_id = int(match.group(1))
+        filter_data = get_filter_by_id(filter_id, message.from_user.id)
+        
+        if filter_data:
+            expiry_date_nice = format_date_nice(datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date())
+            
+            await message.answer(
+                f"🗑️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
+                f"🔧 <b>Фильтр:</b> #{filter_id} {filter_data['filter_type']}\n"
+                f"📍 <b>Место:</b> {filter_data['location']}\n"
+                f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n\n"
+                f"❓ <b>Вы уверены что хотите удалить этот фильтр?</b>\n"
+                f"<i>Это действие нельзя отменить</i>",
+                parse_mode='HTML',
+                reply_markup=get_confirmation_keyboard(filter_id, "delete")
+            )
+            await state.finish()
+        else:
+            await message.answer(
+                "❌ <b>Фильтр не найден!</b>\n\n"
+                "💡 <i>Выберите фильтр из списка</i>",
+                parse_mode='HTML',
+                reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "delete")
+            )
+    else:
+        await message.answer(
+            "❌ <b>Неверный формат!</b>\n\n"
+            "💡 <i>Выберите фильтр из списка кнопок</i>",
+            parse_mode='HTML',
+            reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "delete")
+        )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('confirm_delete_'))
+async def process_confirm_delete(callback_query: types.CallbackQuery):
+    """Подтверждение удаления фильтра"""
+    filter_id = int(callback_query.data.split('_')[2])
+    user_id = callback_query.from_user.id
+    
+    filter_data = get_filter_by_id(filter_id, user_id)
+    if not filter_data:
+        await callback_query.answer("❌ Фильтр не найден!")
+        return
+    
+    # Удаляем фильтр из БД
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+        conn.commit()
+    
+    await callback_query.message.edit_text(
+        f"✅ <b>ФИЛЬТР УДАЛЕН!</b>\n\n"
+        f"🗑️ <b>Удален фильтр:</b> #{filter_id} {filter_data['filter_type']}\n"
+        f"📍 <b>Место:</b> {filter_data['location']}\n\n"
+        f"💫 <i>Фильтр успешно удален из вашего списка</i>",
+        parse_mode='HTML'
+    )
+    
+    await bot.send_message(
+        user_id,
+        "🏠 Возврат в главное меню",
+        reply_markup=get_main_keyboard(user_id)
+    )
+
+@dp.callback_query_handler(lambda c: c.data == 'cancel_delete')
+async def process_cancel_delete(callback_query: types.CallbackQuery):
+    """Отмена удаления фильтра"""
+    await callback_query.message.edit_text(
+        "🚫 <b>УДАЛЕНИЕ ОТМЕНЕНО</b>\n\n"
+        "💡 <i>Фильтр не был удален</i>",
+        parse_mode='HTML'
+    )
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        "🏠 Возврат в главное меню",
+        reply_markup=get_main_keyboard(callback_query.from_user.id)
+    )
+
+# ========== ИСПРАВЛЕННЫЙ РАЗДЕЛ РЕДАКТИРОВАНИЯ ==========
+
+@dp.message_handler(lambda message: message.text == "✏️ Редактировать")
+async def cmd_edit_filter(message: types.Message):
+    """Начало процесса редактирования фильтра"""
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>Нет фильтров для редактирования</b>\n\n"
+            "💫 <i>Добавьте фильтры перед использованием этой функции</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+    
+    await EditFilterStates.waiting_filter_selection.set()
+    
+    filters_list = "\n".join([f"• #{f['id']} {f['filter_type']} - {f['location']}" for f in filters])
+    
+    await message.answer(
+        f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
+        f"📋 <b>Ваши фильтры:</b>\n{filters_list}\n\n"
+        f"🔢 <b>Выберите фильтр для редактирования:</b>\n"
+        f"<i>Нажмите на соответствующий номер фильтра</i>",
+        parse_mode='HTML',
+        reply_markup=get_filters_list_keyboard(filters, "edit")
+    )
+
+@dp.message_handler(state=EditFilterStates.waiting_filter_selection)
+async def process_edit_filter_selection(message: types.Message, state: FSMContext):
+    if message.text == "🔙 Главное меню":
+        await state.finish()
+        await message.answer("🏠 Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    # Парсим ID фильтра из текста (формат: #ID Тип - Место)
+    match = re.match(r'#(\d+)', message.text)
+    if match:
+        filter_id = int(match.group(1))
+        filter_data = get_filter_by_id(filter_id, message.from_user.id)
+        
+        if filter_data:
+            async with state.proxy() as data:
+                data['editing_filter'] = filter_data
+                data['filter_id'] = filter_id
+            
+            expiry_date_nice = format_date_nice(datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date())
+            last_change_nice = format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date())
+            
+            await EditFilterStates.waiting_field_selection.set()
+            await message.answer(
+                f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
+                f"🔧 <b>Тип:</b> {filter_data['filter_type']}\n"
+                f"📍 <b>Место:</b> {filter_data['location']}\n"
+                f"📅 <b>Заменен:</b> {last_change_nice}\n"
+                f"⏱️ <b>Срок службы:</b> {filter_data['lifetime_days']} дн.\n"
+                f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n\n"
+                f"🔄 <b>Что вы хотите изменить?</b>",
+                parse_mode='HTML',
+                reply_markup=get_edit_filter_keyboard()
+            )
+        else:
+            await message.answer(
+                "❌ <b>Фильтр не найден!</b>\n\n"
+                "💡 <i>Выберите фильтр из списка</i>",
+                parse_mode='HTML',
+                reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "edit")
+            )
+    else:
+        await message.answer(
+            "❌ <b>Неверный формат!</b>\n\n"
+            "💡 <i>Выберите фильтр из списка кнопок</i>",
+            parse_mode='HTML',
+            reply_markup=get_filters_list_keyboard(get_user_filters(message.from_user.id), "edit")
+        )
+
+@dp.message_handler(state=EditFilterStates.waiting_field_selection)
+async def process_edit_field_selection(message: types.Message, state: FSMContext):
+    if message.text == "🔙 Главное меню":
+        await state.finish()
+        await message.answer("🏠 Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    if message.text == "🔙 К списку фильтров":
+        await EditFilterStates.waiting_filter_selection.set()
+        filters = get_user_filters(message.from_user.id)
+        filters_list = "\n".join([f"• #{f['id']} {f['filter_type']} - {f['location']}" for f in filters])
+        
+        await message.answer(
+            f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
+            f"📋 <b>Ваши фильтры:</b>\n{filters_list}\n\n"
+            f"🔢 <b>Выберите фильтр для редактирования:</b>",
+            parse_mode='HTML',
+            reply_markup=get_filters_list_keyboard(filters, "edit")
+        )
+        return
+    
+    async with state.proxy() as data:
+        filter_data = data['editing_filter']
+    
+    if message.text == "✏️ Тип фильтра":
+        await EditFilterStates.waiting_new_value.set()
+        data['editing_field'] = 'filter_type'
+        await message.answer(
+            f"✏️ <b>ИЗМЕНЕНИЕ ТИПА ФИЛЬТРА</b>\n\n"
+            f"🔧 <b>Текущий тип:</b> {filter_data['filter_type']}\n\n"
+            f"📝 <b>Введите новый тип фильтра:</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+    
+    elif message.text == "📍 Место установки":
+        await EditFilterStates.waiting_new_value.set()
+        data['editing_field'] = 'location'
+        await message.answer(
+            f"✏️ <b>ИЗМЕНЕНИЕ МЕСТА УСТАНОВКИ</b>\n\n"
+            f"📍 <b>Текущее место:</b> {filter_data['location']}\n\n"
+            f"📝 <b>Введите новое место установки:</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+    
+    elif message.text == "📅 Дата замены":
+        await EditFilterStates.waiting_new_value.set()
+        data['editing_field'] = 'last_change'
+        last_change_nice = format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date())
+        await message.answer(
+            f"✏️ <b>ИЗМЕНЕНИЕ ДАТЫ ЗАМЕНЫ</b>\n\n"
+            f"📅 <b>Текущая дата замены:</b> {last_change_nice}\n\n"
+            f"📝 <b>Введите новую дату замены (ДД.ММ.ГГ):</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+    
+    elif message.text == "⏱️ Срок службы":
+        await EditFilterStates.waiting_new_value.set()
+        data['editing_field'] = 'lifetime_days'
+        await message.answer(
+            f"✏️ <b>ИЗМЕНЕНИЕ СРОКА СЛУЖБЫ</b>\n\n"
+            f"⏱️ <b>Текущий срок службы:</b> {filter_data['lifetime_days']} дней\n\n"
+            f"📝 <b>Введите новый срок службы в днях:</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=EditFilterStates.waiting_new_value)
+async def process_edit_new_value(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await EditFilterStates.waiting_field_selection.set()
+        async with state.proxy() as data:
+            filter_data = data['editing_filter']
+        
+        expiry_date_nice = format_date_nice(datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date())
+        last_change_nice = format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date())
+        
+        await message.answer(
+            f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА</b>\n\n"
+            f"🔧 <b>Тип:</b> {filter_data['filter_type']}\n"
+            f"📍 <b>Место:</b> {filter_data['location']}\n"
+            f"📅 <b>Заменен:</b> {last_change_nice}\n"
+            f"⏱️ <b>Срок службы:</b> {filter_data['lifetime_days']} дн.\n"
+            f"🗓️ <b>Годен до:</b> {expiry_date_nice}\n\n"
+            f"🔄 <b>Что вы хотите изменить?</b>",
+            parse_mode='HTML',
+            reply_markup=get_edit_filter_keyboard()
+        )
+        return
+    
+    async with state.proxy() as data:
+        filter_data = data['editing_filter']
+        field = data['editing_field']
+        filter_id = data['filter_id']
+    
+    try:
+        if field == 'filter_type':
+            new_value = validate_filter_name(message.text)
+            update_query = "UPDATE filters SET filter_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            params = (new_value, filter_id)
+        
+        elif field == 'location':
+            new_value = safe_db_string(message.text)
+            update_query = "UPDATE filters SET location = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            params = (new_value, filter_id)
+        
+        elif field == 'last_change':
+            new_value = parse_date(message.text)
+            # При изменении даты замены пересчитываем expiry_date
+            lifetime = filter_data['lifetime_days']
+            new_expiry_date = new_value + timedelta(days=lifetime)
+            update_query = "UPDATE filters SET last_change = ?, expiry_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            params = (new_value, new_expiry_date, filter_id)
+        
+        elif field == 'lifetime_days':
+            new_value = validate_lifetime(message.text)
+            # При изменении срока службы пересчитываем expiry_date
+            last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
+            new_expiry_date = last_change + timedelta(days=new_value)
+            update_query = "UPDATE filters SET lifetime_days = ?, expiry_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            params = (new_value, new_expiry_date, filter_id)
+        
+        # Выполняем обновление в БД
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(update_query, params)
+            conn.commit()
+        
+        field_names = {
+            'filter_type': 'тип фильтра',
+            'location': 'место установки',
+            'last_change': 'дата замены',
+            'lifetime_days': 'срок службы'
+        }
+        
+        await message.answer(
+            f"✅ <b>ИЗМЕНЕНИЯ СОХРАНЕНЫ!</b>\n\n"
+            f"✏️ <b>Изменено поле:</b> {field_names[field]}\n"
+            f"🔧 <b>Фильтр:</b> #{filter_id}\n\n"
+            f"💫 <i>Данные успешно обновлены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        await state.finish()
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в данных!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <i>Попробуйте ввести данные еще раз</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+# ========== ОБНОВЛЕННЫЙ РАЗДЕЛ НЕСКОЛЬКИХ ФИЛЬТРОВ ==========
+
+@dp.message_handler(lambda message: message.text == "📦 Несколько фильтров")
+async def cmd_multiple_filters(message: types.Message, state: FSMContext):
+    """Начало процесса добавления нескольких фильтров"""
+    # Проверяем лимит фильтров
+    if check_filters_limit(message.from_user.id):
+        await message.answer(
+            f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
+            f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
+            f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+        
+    await MultipleFiltersStates.waiting_filters_list.set()
+    
+    # Инициализируем список выбранных фильтров
+    async with state.proxy() as data:
+        data['selected_filters'] = []
+    
+    await message.answer(
+        "📦 <b>Добавление нескольких фильтров</b>\n\n"
+        "💡 <i>Используйте кнопки ниже для добавления фильтров:</i>\n\n"
+        "• <b>➕ Добавить фильтр</b> - выбрать из списка типов\n"
+        "• <b>➕ 1 фильтр</b> - быстро добавить один фильтр\n"
+        "• <b>✅ Готово</b> - завершить добавление\n\n"
+        "📝 <b>Текущий список:</b>\n"
+        "<i>Пока пусто</i>",
+        parse_mode='HTML',
+        reply_markup=get_multiple_filters_keyboard()
+    )
+
+@dp.message_handler(state=MultipleFiltersStates.waiting_filters_list)
+async def process_multiple_filters_selection(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        if 'selected_filters' not in data:
+            data['selected_filters'] = []
+    
+    # Обработка кнопки отмены
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтров отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    # Обработка кнопки "Готово"
+    if message.text == "✅ Готово":
+        if not data['selected_filters']:
+            await message.answer(
+                "❌ <b>Список фильтров пуст!</b>\n\n"
+                "💡 <i>Добавьте хотя бы один фильтр перед завершением</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+            return
+        
+        # Проверяем общий лимит фильтров
+        current_filters_count = len(get_user_filters(message.from_user.id))
+        if current_filters_count + len(data['selected_filters']) > MAX_FILTERS_PER_USER:
+            await message.answer(
+                f"❌ <b>Превышен лимит фильтров!</b>\n\n"
+                f"📊 <i>Текущее количество: {current_filters_count}</i>\n"
+                f"📦 <i>Пытаетесь добавить: {len(data['selected_filters'])}</i>\n"
+                f"💡 <i>Максимум: {MAX_FILTERS_PER_USER}</i>\n\n"
+                f"🔄 <i>Удалите некоторые фильтры или уменьшите список</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+            return
+        
+        await MultipleFiltersStates.waiting_location.set()
+        
+        # Формируем красивый список фильтров
+        filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+        
+        await message.answer(
+            f"✅ <b>Список фильтров сохранен!</b>\n\n"
+            f"📦 <b>Будет добавлено фильтров:</b> {len(data['selected_filters'])}\n\n"
+            f"🔧 <b>Список фильтров:</b>\n{filters_text}\n\n"
+            f"📍 <b>Укажите место установки для всех фильтров:</b>\n\n"
+            f"💡 <i>Все фильтры будут установлены в одном месте</i>",
+            parse_mode='HTML',
+            reply_markup=get_location_keyboard()
+        )
+        return
+    
+    # Обработка кнопки "Добавить фильтр"
+    if message.text == "➕ Добавить фильтр":
+        await message.answer(
+            "🔧 <b>Выберите тип фильтра:</b>\n\n"
+            "💡 <i>Доступны все варианты фильтров</i>",
+            parse_mode='HTML',
+            reply_markup=get_filter_type_keyboard()
+        )
+        return
+    
+    # Обработка кнопки "+ 1 фильтр"
+    if message.text == "➕ 1 фильтр":
+        # Просто добавляем "Фильтр" в список
+        new_filter = "Фильтр"
+        data['selected_filters'].append(new_filter)
+        
+        # Формируем текущий список для отображения
+        if data['selected_filters']:
+            filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+            status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
+        else:
+            status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
+        
+        await message.answer(
+            f"✅ <b>Добавлен:</b> {new_filter}\n\n"
+            f"{status_text}\n\n"
+            f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
+            parse_mode='HTML',
+            reply_markup=get_multiple_filters_keyboard()
+        )
+        return
+    
+    # Обработка выбора типа фильтра из списка
+    filter_mapping = {
+        "🔧 Магистральный SL10": "Магистральный SL10",
+        "🔧 Магистральный SL20": "Магистральный SL20",
+        "💧 Гейзер": "Гейзер",
+        "💧 Аквафор": "Аквафор"
+    }
+    
+    if message.text in filter_mapping:
+        filter_name = filter_mapping[message.text]
+        if filter_name not in data['selected_filters']:
+            data['selected_filters'].append(filter_name)
+            
+            # Формируем текущий список для отображения
+            if data['selected_filters']:
+                filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+                status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
+            else:
+                status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
+            
+            await message.answer(
+                f"✅ <b>Добавлен:</b> {filter_name}\n\n"
+                f"{status_text}\n\n"
+                f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        else:
+            await message.answer(
+                f"ℹ️ <b>Фильтр уже в списке:</b> {filter_name}",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        return
+    
+    # Обработка текстового ввода (пользователь ввел свой фильтр)
+    if message.text and message.text not in ["✅ Готово", "➕ Добавить фильтр", "➕ 1 фильтр", "❌ Отмена"]:
+        try:
+            validated_filter = validate_filter_name(message.text)
+            if validated_filter not in data['selected_filters']:
+                data['selected_filters'].append(validated_filter)
+                
+                # Формируем обновленный список
+                filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+                
+                await message.answer(
+                    f"✅ <b>Добавлен:</b> {validated_filter}\n\n"
+                    f"📊 Всего в списке: {len(data['selected_filters'])}\n\n"
+                    f"🔧 <b>Текущий список:</b>\n{filters_text}",
+                    parse_mode='HTML',
+                    reply_markup=get_multiple_filters_keyboard()
+                )
+            else:
+                await message.answer(
+                    f"ℹ️ <b>Фильтр уже в списке:</b> {validated_filter}",
+                    parse_mode='HTML',
+                    reply_markup=get_multiple_filters_keyboard()
+                )
+        except ValueError as e:
+            await message.answer(
+                f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
+                f"💡 <i>{str(e)}</i>",
+                parse_mode='HTML',
+                reply_markup=get_multiple_filters_keyboard()
+            )
+        return
+    
+    # Обновляем отображение списка при любом другом сообщении
+    if data['selected_filters']:
+        filters_text = "\n".join([f"• {f}" for f in data['selected_filters']])
+        status_text = f"✅ <b>Выбрано фильтров:</b> {len(data['selected_filters'])}\n\n{filters_text}"
+    else:
+        status_text = "📝 <b>Список пуст</b>\n\n<i>Добавьте фильтры с помощью кнопок</i>"
+    
+    await message.answer(
+        f"📦 <b>Добавление фильтров</b>\n\n"
+        f"{status_text}\n\n"
+        f"💡 <i>Продолжайте добавлять фильтры или нажмите '✅ Готово'</i>",
+        parse_mode='HTML',
+        reply_markup=get_multiple_filters_keyboard()
+    )
+
+# ========== АДМИН ПАНЕЛЬ ==========
+
+def is_admin(user_id: int) -> bool:
+    """Проверка прав администратора"""
+    return user_id == ADMIN_ID
+
+@dp.message_handler(lambda message: message.text == "👑 Админ панель")
+async def cmd_admin_panel(message: types.Message):
+    """Админ панель"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        return
+    
+    await message.answer(
+        "👑 <b>АДМИН ПАНЕЛЬ</b>\n\n"
+        "💡 <i>Управление базой данных и статистика</i>",
+        parse_mode='HTML',
+        reply_markup=get_admin_keyboard()
+    )
+
+@dp.message_handler(lambda message: message.text == "📊 Общая статистика")
+async def cmd_admin_stats(message: types.Message):
+    """Общая статистика для админа"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        return
+    
+    stats = get_all_users_stats()
+    users = get_all_users()
+    
+    response = (
+        "📊 <b>ОБЩАЯ СТАТИСТИКА СИСТЕМЫ</b>\n\n"
+        f"👥 <b>Всего пользователей:</b> {stats['total_users']}\n"
+        f"📦 <b>Всего фильтров:</b> {stats['total_filters']}\n"
+        f"🔴 <b>Просрочено фильтров:</b> {stats['expired_filters']}\n"
+        f"🟡 <b>Скоро истекает:</b> {stats['expiring_soon']}\n\n"
+    )
+    
+    if users:
+        response += "👥 <b>ТОП пользователей по количеству фильтров:</b>\n"
+        for i, user in enumerate(users[:10], 1):
+            response += f"{i}. ID {user['user_id']}: {user['filter_count']} фильтров\n"
+    
+    await message.answer(response, parse_mode='HTML', reply_markup=get_admin_keyboard())
+
+@dp.message_handler(lambda message: message.text == "👥 Пользователи")
+async def cmd_admin_users(message: types.Message):
+    """Список пользователей для админа"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        return
+    
+    users = get_all_users()
+    
+    if not users:
+        await message.answer("📭 <b>Нет пользователей в базе</b>", parse_mode='HTML')
+        return
+    
+    response = "👥 <b>СПИСОК ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
+    for i, user in enumerate(users, 1):
+        response += f"{i}. <b>ID {user['user_id']}</b>: {user['filter_count']} фильтров\n"
+    
+    await message.answer(response, parse_mode='HTML', reply_markup=get_admin_keyboard())
+
+@dp.message_handler(lambda message: message.text == "🗑️ Очистить базу")
+async def cmd_clear_database(message: types.Message):
+    """Очистка всей базы данных"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ запрещен!</b>", parse_mode='HTML')
+        return
+    
+    stats = get_all_users_stats()
+    
+    await message.answer(
+        f"🚨 <b>ПОДТВЕРЖДЕНИЕ ОЧИСТКИ БАЗЫ</b>\n\n"
+        f"📊 <b>Текущая статистика:</b>\n"
+        f"• Пользователей: {stats['total_users']}\n"
+        f"• Фильтров: {stats['total_filters']}\n\n"
+        f"⚠️ <b>ВНИМАНИЕ!</b>\n"
+        f"Это действие удалит ВСЕ данные из базы!\n"
+        f"<i>Восстановление будет невозможно</i>\n\n"
+        f"❓ <b>Вы уверены что хотите очистить всю базу?</b>",
+        parse_mode='HTML',
+        reply_markup=get_confirmation_keyboard(action="clear_db")
+    )
+
+@dp.callback_query_handler(lambda c: c.data == 'confirm_clear_db')
+async def process_confirm_clear_db(callback_query: types.CallbackQuery):
+    """Подтверждение очистки базы"""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("❌ Доступ запрещен!")
+        return
+    
+    deleted_count = clear_all_filters()
+    
+    await callback_query.message.edit_text(
+        f"✅ <b>БАЗА ДАННЫХ ОЧИЩЕНА!</b>\n\n"
+        f"🗑️ <b>Удалено записей:</b> {deleted_count}\n\n"
+        f"💫 <i>Все данные успешно удалены</i>",
+        parse_mode='HTML'
+    )
+    
+    await bot.send_message(
+        ADMIN_ID,
+        "🏠 Возврат в админ панель",
+        reply_markup=get_admin_keyboard()
+    )
+
+@dp.callback_query_handler(lambda c: c.data == 'cancel_clear_db')
+async def process_cancel_clear_db(callback_query: types.CallbackQuery):
+    """Отмена очистки базы"""
+    await callback_query.message.edit_text(
+        "🚫 <b>ОЧИСТКА БАЗЫ ОТМЕНЕНА</b>\n\n"
+        "💡 <i>Данные не были удалены</i>",
+        parse_mode='HTML'
+    )
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        "🏠 Возврат в админ панель",
+        reply_markup=get_admin_keyboard()
+    )
+
+# ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
+
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
+        "💧 <i>Умный помощник для своевременной замены фильтров</i>\n\n"
+        "📦 <b>Основные возможности:</b>\n"
+        "• 📋 Просмотр всех ваших фильтров\n"
+        "• ✨ Добавление новых фильтров\n"
+        "• ⏳ Контроль сроков замены\n"
+        "• ⚙️ Полное управление базой\n"
+        "• 📊 Детальная статистика\n"
+        "• 🔔 Автоматические напоминания",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+# Обработка кнопки "Главное меню"
+@dp.message_handler(lambda message: message.text == "🔙 Главное меню")
+async def cmd_back(message: types.Message):
+    await message.answer(
+        "🏠 <b>Главное меню</b>\n\n"
+        "Выберите нужный раздел:",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+# Обработка кнопки "Управление"
+@dp.message_handler(lambda message: message.text == "⚙️ Управление")
+async def cmd_management(message: types.Message):
+    await message.answer(
+        "🛠️ <b>Центр управления фильтрами</b>\n\n"
+        "Выберите действие:",
+        parse_mode='HTML',
+        reply_markup=get_management_keyboard()
+    )
+
+# Добавление фильтра - выбор типа добавления
+@dp.message_handler(lambda message: message.text == "✨ Добавить фильтр")
+async def cmd_add(message: types.Message):
+    # Проверяем лимит фильтров
+    if check_filters_limit(message.from_user.id):
+        await message.answer(
+            f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
+            f"💡 <i>Максимальное количество фильтров: {MAX_FILTERS_PER_USER}</i>\n"
+            f"📊 <i>Удалите некоторые фильтры перед добавлением новых</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        return
+        
+    await message.answer(
+        "🔧 <b>Выберите тип добавления:</b>\n\n"
+        "💡 <i>Можно добавить один фильтр или сразу несколько</i>",
+        parse_mode='HTML',
+        reply_markup=get_add_filter_keyboard()
+    )
+
+# Обработка выбора типа добавления
+@dp.message_handler(lambda message: message.text in ["🔧 Один фильтр", "📦 Несколько фильтров"])
+async def process_add_type(message: types.Message, state: FSMContext):
+    if message.text == "🔧 Один фильтр":
+        await FilterStates.waiting_filter_type.set()
+        await message.answer(
+            "🔧 <b>Выберите тип фильтра:</b>\n\n"
+            "💡 <i>Доступны все варианты фильтров</i>",
+            parse_mode='HTML',
+            reply_markup=get_filter_type_keyboard()
+        )
+
+# Обработка выбора типа фильтра для ОДНОГО фильтра
+@dp.message_handler(state=FilterStates.waiting_filter_type)
+async def process_filter_type(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+        
+    if message.text == "📝 Другой тип":
+        await message.answer(
+            "📝 <b>Введите тип фильтра:</b>\n"
+            "<i>Например: Угольный фильтр, Механический фильтр и т.д.</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    # Обработка всех типов фильтров из списка
+    filter_mapping = {
+        "🔧 Магистральный SL10": "Магистральный SL10",
+        "🔧 Магистральный SL20": "Магистральный SL20",
+        "💧 Гейзер": "Гейзер",
+        "💧 Аквафор": "Аквафор"
+    }
+    
+    filter_name = None
+    
+    if message.text in filter_mapping:
+        filter_name = filter_mapping[message.text]
+    else:
+        # Пользователь ввел свой вариант
+        try:
+            filter_name = validate_filter_name(message.text)
+        except ValueError as e:
+            await message.answer(
+                f"❌ <b>Ошибка в названии фильтра:</b>\n\n"
+                f"💡 <i>{str(e)}</i>",
+                parse_mode='HTML',
+                reply_markup=get_filter_type_keyboard()
+            )
+            return
+    
+    if filter_name:
+        async with state.proxy() as data:
+            data['filter_type'] = filter_name
+            data['lifetime'] = get_lifetime_by_type(filter_name)
+
+        await FilterStates.next()
+        await message.answer(
+            "📍 <b>Укажите место установки фильтра:</b>\n\n"
+            "💡 <i>Нажмите кнопку ниже чтобы указать место</i>",
+            parse_mode='HTML',
+            reply_markup=get_location_keyboard()
+        )
+
+# ========== ОБРАБОТЧИКИ МЕСТА УСТАНОВКИ И ДАТЫ ==========
+
+@dp.message_handler(state=[FilterStates.waiting_location, MultipleFiltersStates.waiting_location])
+async def process_location(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+        
+    if message.text == "📍 Указать место установки":
+        await message.answer(
+            "📍 <b>Введите место установки фильтра:</b>\n\n"
+            "💡 <i>Например: Кухня, Ванная комната, Под раковиной, Гостиная, Офис, Балкон, Гараж и т.д.</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    current_state = await state.get_state()
+    
+    if current_state == FilterStates.waiting_location.state:
+        # Для одного фильтра
+        async with state.proxy() as data:
+            data['location'] = safe_db_string(message.text)
+
+        await FilterStates.next()
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"📅 <b>Дата последней замены</b>\n\n"
+            f"🔧 <i>Фильтр:</i> {data['filter_type']}\n"
+            f"📍 <i>Место:</i> {data['location']}\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+    else:
+        # Для нескольких фильтров
+        async with state.proxy() as data:
+            data['location'] = safe_db_string(message.text)
+
+        await MultipleFiltersStates.next()
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"📅 <b>Дата последней замены для всех фильтров</b>\n\n"
+            f"📍 <i>Место для всех фильтров:</i> {data['location']}\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=FilterStates.waiting_change_date)
+async def process_change_date(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    try:
+        change_date = validate_date(message.text)
+        
+        async with state.proxy() as data:
+            data['change_date'] = change_date
+            filter_type = data['filter_type']
+            lifetime = data.get('lifetime', get_lifetime_by_type(filter_type))
+        
+        expiry_date = change_date + timedelta(days=lifetime)
+        expiry_date_nice = format_date_nice(expiry_date)
+        
+        await FilterStates.next()
+        
+        await message.answer(
+            f"⏱️ <b>Срок службы фильтра</b>\n\n"
+            f"🔧 <i>Фильтр:</i> {filter_type}\n"
+            f"📍 <i>Место:</i> {data['location']}\n"
+            f"📅 <i>Дата замены:</i> {format_date_nice(change_date)}\n"
+            f"🗓️ <i>Годен до:</i> {expiry_date_nice}\n\n"
+            f"📝 <b>Выберите или введите срок службы в днях:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+        
+    except ValueError as e:
+        today_nice = format_date_nice(datetime.now().date())
+        await message.answer(
+            f"❌ <b>Ошибка в дате!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите дату замены в формате ДД.ММ.ГГ:</b>\n"
+            f"<i>Например: {today_nice}</i>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.message_handler(state=FilterStates.waiting_lifetime)
+async def process_lifetime(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("🚫 Добавление фильтра отменено", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    lifetime_mapping = {
+        "3️⃣ 90 дней": 90,
+        "6️⃣ 180 дней": 180,
+        "1️⃣ 365 дней": 365
+    }
+    
+    try:
+        if message.text in lifetime_mapping:
+            lifetime = lifetime_mapping[message.text]
+        elif message.text == "📅 Другое количество":
+            await message.answer(
+                "📅 <b>Введите срок службы в днях:</b>\n\n"
+                "💡 <i>Например: 30, 60, 90, 180, 365 и т.д.</i>",
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+        else:
+            lifetime = validate_lifetime(message.text)
+        
+        async with state.proxy() as data:
+            change_date = data['change_date']
+            filter_type = data['filter_type']
+            location = data['location']
+            
+            expiry_date = change_date + timedelta(days=lifetime)
+            
+            # Сохраняем в БД
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('''INSERT INTO filters 
+                            (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                            VALUES (?, ?, ?, ?, ?, ?)''',
+                            (message.from_user.id, filter_type, location, change_date, expiry_date, lifetime))
+                conn.commit()
+        
+        await message.answer(
+            f"🎉 <b>ФИЛЬТР УСПЕШНО ДОБАВЛЕН!</b>\n\n"
+            f"🔧 <b>Тип:</b> {filter_type}\n"
+            f"📍 <b>Место:</b> {location}\n"
+            f"📅 <b>Дата замены:</b> {format_date_nice(change_date)}\n"
+            f"⏱️ <b>Срок службы:</b> {lifetime} дней\n"
+            f"🗓️ <b>Годен до:</b> {format_date_nice(expiry_date)}\n\n"
+            f"💫 <i>Теперь вы можете отслеживать срок его замены</i>",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        
+        await state.finish()
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в сроке службы!</b>\n\n"
+            f"💡 <i>{str(e)}</i>\n\n"
+            f"📝 <b>Введите корректное число дней:</b>",
+            parse_mode='HTML',
+            reply_markup=get_lifetime_keyboard()
+        )
+
+# Обработка отмены
+@dp.message_handler(lambda message: message.text == "❌ Отмена", state='*')
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    
+    await state.finish()
+    await message.answer("🚫 Действие отменено", reply_markup=get_main_keyboard(message.from_user.id))
+
+# Обработка других сообщений
+@dp.message_handler()
+async def handle_other_messages(message: types.Message):
+    await message.answer(
+        "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
+        "💧 <i>Выберите действие с помощью кнопок ниже:</i>",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+# Запуск бота
+if __name__ == '__main__':
+    # Проверка обязательных переменных
+    if not API_TOKEN:
+        logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        exit(1)
+    
+    init_db()
+    
+    # Запуск с обработчиком startup
+    executor.start_polling(
+        dp, 
+        skip_updates=True,
+        on_startup=on_startup
+    )
