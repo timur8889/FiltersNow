@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from transaction_manager import TransactionManager
 from google_sheets import GoogleSheetsSync
 import json
@@ -38,6 +38,7 @@ class FinanceTracker:
         self.setup_sync_tab(sync_frame)
     
     def setup_finance_tab(self, parent):
+        # ... (предыдущий код без изменений)
         # Форма добавления транзакции
         form_frame = ttk.LabelFrame(parent, text="Добавить транзакцию", padding=10)
         form_frame.grid(row=0, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
@@ -127,16 +128,31 @@ class FinanceTracker:
         sync_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
         # Информация о синхронизации
-        info_text = """Для работы синхронизации с Google Sheets необходимо:
+        info_text = """ВНИМАНИЕ: Чтобы избежать блокировки ключа Google:
 
-1. Создать проект в Google Cloud Console
-2. Включить Google Sheets API
-3. Создать сервисный аккаунт и скачать credentials.json
-4. Положить файл credentials.json в папку с приложением
-5. Предоставить доступ к таблице для сервисного аккаунта"""
+1. НЕ публикуйте файл credentials.json в интернете
+2. НЕ используйте один ключ для нескольких приложений
+3. Ограничьте доступ к таблице только для себя
+4. Используйте отдельный проект в Google Cloud для каждого приложения
+
+Для настройки:
+1. Создайте проект в Google Cloud Console
+2. Включите Google Sheets API
+3. Создайте сервисный аккаунт
+4. Скачайте JSON-ключ и переименуйте в credentials.json"""
         
-        info_label = ttk.Label(sync_frame, text=info_text, justify='left')
+        info_label = ttk.Label(sync_frame, text=info_text, justify='left', foreground='darkred')
         info_label.pack(pady=10)
+        
+        # Выбор файла credentials
+        creds_frame = ttk.Frame(sync_frame)
+        creds_frame.pack(fill='x', pady=10)
+        
+        ttk.Label(creds_frame, text="Файл credentials.json:").pack(side='left')
+        self.creds_path_label = ttk.Label(creds_frame, text="credentials.json", foreground='blue')
+        self.creds_path_label.pack(side='left', padx=5)
+        ttk.Button(creds_frame, text="Выбрать файл", 
+                  command=self.select_credentials_file).pack(side='left', padx=5)
         
         # Кнопки синхронизации
         button_frame = ttk.Frame(sync_frame)
@@ -157,23 +173,48 @@ class FinanceTracker:
         # Статус синхронизации
         self.sync_status = ttk.Label(sync_frame, text="Статус: Не подключено", foreground='red')
         self.sync_status.pack(pady=10)
+        
+        # Дополнительная информация
+        self.sync_details = ttk.Label(sync_frame, text="", justify='left', foreground='gray')
+        self.sync_details.pack(pady=5)
+    
+    def select_credentials_file(self):
+        """Выбор файла credentials.json"""
+        file_path = filedialog.askopenfilename(
+            title="Выберите файл credentials.json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if file_path:
+            self.google_sheets.set_credentials_file(file_path)
+            self.creds_path_label.config(text=file_path)
+            self.sync_status.config(text="Статус: Файл выбран, подключитесь", foreground='orange')
     
     def test_connection(self):
         """Тестирование подключения к Google Sheets"""
-        if self.google_sheets.authenticate():
+        success, message = self.google_sheets.authenticate()
+        if success:
             self.sync_status.config(text="Статус: Подключено", foreground='green')
+            self.sync_details.config(text=message)
             messagebox.showinfo("Успех", "Успешное подключение к Google Sheets!")
         else:
             self.sync_status.config(text="Статус: Ошибка подключения", foreground='red')
-            messagebox.showerror("Ошибка", "Не удалось подключиться к Google Sheets")
+            self.sync_details.config(text=message)
+            messagebox.showerror("Ошибка", f"Не удалось подключиться к Google Sheets:\n{message}")
     
     def upload_to_sheets(self):
         """Загрузка данных в Google Sheets"""
         transactions = self.transaction_manager.get_all_transactions()
-        if self.google_sheets.upload_data(transactions):
+        if not transactions:
+            messagebox.showwarning("Предупреждение", "Нет данных для загрузки")
+            return
+            
+        success, message = self.google_sheets.upload_data(transactions)
+        if success:
             messagebox.showinfo("Успех", "Данные успешно загружены в Google Sheets!")
+            self.sync_details.config(text=message)
         else:
-            messagebox.showerror("Ошибка", "Не удалось загрузить данные в Google Sheets")
+            messagebox.showerror("Ошибка", f"Не удалось загрузить данные в Google Sheets:\n{message}")
+            self.sync_details.config(text=message)
     
     def download_from_sheets(self):
         """Загрузка данных из Google Sheets"""
@@ -190,7 +231,7 @@ class FinanceTracker:
             self.transaction_manager.transactions = transactions
             self.transaction_manager.save_data()
             self.refresh_transactions()
-            messagebox.showinfo("Успех", "Данные успешно загружены из Google Sheets!")
+            messagebox.showinfo("Успех", f"Загружено {len(transactions)} записей из Google Sheets!")
         else:
             messagebox.showerror("Ошибка", "Не удалось загрузить данные из Google Sheets")
     
@@ -202,6 +243,7 @@ class FinanceTracker:
         else:
             messagebox.showwarning("Предупреждение", "Сначала подключитесь к Google Sheets")
     
+    # ... остальные методы (add_transaction, delete_selected, refresh_transactions, etc.)
     def add_transaction(self):
         try:
             transaction = {
