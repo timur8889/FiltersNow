@@ -11,6 +11,7 @@ import aiosqlite
 import json
 import pandas as pd
 import io
+import aiofiles
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Callable, Any, Awaitable, Union
@@ -75,6 +76,218 @@ def setup_logging():
     })
 
 setup_logging()
+
+# ========== УЛУЧШЕНИЕ: ОНЛАЙН EXCEL С СИНХРОНИЗАЦИЕЙ ==========
+class OnlineExcelManager:
+    def __init__(self):
+        self.active_sessions: Dict[int, Dict] = {}  # user_id -> session_data
+        self.sync_interval = 300  # 5 минут
+        self.auto_save_task = None
+    
+    async def start_auto_save(self):
+        """Запуск автоматического сохранения"""
+        if not self.auto_save_task:
+            self.auto_save_task = asyncio.create_task(self._auto_save_loop())
+    
+    async def _auto_save_loop(self):
+        """Цикл автоматического сохранения"""
+        while True:
+            try:
+                await asyncio.sleep(self.sync_interval)
+                await self.sync_all_sessions()
+            except Exception as e:
+                logging.error(f"Ошибка в авто-сохранении: {e}")
+    
+    async def create_session(self, user_id: int, filters: List[Dict]) -> str:
+        """Создание сессии онлайн Excel"""
+        try:
+            # Создаем DataFrame
+            df = self._create_dataframe(filters)
+            
+            # Сохраняем в файл
+            filename = f"online_excel_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            filepath = f"temp/{filename}"
+            
+            # Создаем временную директорию если нужно
+            os.makedirs("temp", exist_ok=True)
+            
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='Фильтры', index=False)
+                
+                # Настраиваем форматирование
+                worksheet = writer.sheets['Фильтры']
+                self._apply_excel_formatting(worksheet, df)
+            
+            # Сохраняем сессию
+            self.active_sessions[user_id] = {
+                'filepath': filepath,
+                'filename': filename,
+                'filters': filters,
+                'last_update': datetime.now(),
+                'is_modified': False
+            }
+            
+            return filepath
+            
+        except Exception as e:
+            logging.error(f"Ошибка создания сессии Excel: {e}")
+            raise
+    
+    def _create_dataframe(self, filters: List[Dict]) -> pd.DataFrame:
+        """Создание DataFrame из фильтров"""
+        today = datetime.now().date()
+        data = []
+        
+        for f in filters:
+            expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+            last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
+            days_until_expiry = (expiry_date - today).days
+            
+            icon, status = get_status_icon_and_text(days_until_expiry)
+            
+            data.append({
+                'ID': f['id'],
+                'Тип фильтра': f['filter_type'],
+                'Местоположение': f['location'],
+                'Дата последней замены': last_change.strftime('%d.%m.%Y'),
+                'Дата истечения срока': expiry_date.strftime('%d.%m.%Y'),
+                'Осталось дней': days_until_expiry,
+                'Статус': status,
+                'Иконка статуса': icon,
+                'Срок службы (дни)': f['lifetime_days'],
+                'Дата создания': f['created_at'],
+                'Последнее обновление': f.get('updated_at', '')
+            })
+        
+        return pd.DataFrame(data)
+    
+    def _apply_excel_formatting(self, worksheet, df):
+        """Применение форматирования к Excel файлу"""
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        
+        # Заголовки
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        alignment = Alignment(horizontal="center", vertical="center")
+        
+        for col_num, column_title in enumerate(df.columns, 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = alignment
+        
+        # Настройка ширины колонок
+        for col_num, column_title in enumerate(df.columns, 1):
+            max_length = 0
+            column_letter = get_column_letter(col_num)
+            
+            for row_num in range(1, worksheet.max_row + 1):
+                cell_value = str(worksheet[f"{column_letter}{row_num}"].value)
+                if len(cell_value) > max_length:
+                    max_length = len(cell_value)
+            
+            adjusted_width = min(max_length + 2, 50)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        # Условное форматирование для статусов
+        self._apply_conditional_formatting(worksheet, df)
+    
+    def _apply_conditional_formatting(self, worksheet, df):
+        """Применение условного форматирования"""
+        from openpyxl.formatting.rule import FormulaRule
+        from openpyxl.styles import PatternFill
+        
+        # Красный для просроченных (колонка F - "Осталось дней")
+        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        red_rule = FormulaRule(formula=['$F2<=0'], fill=red_fill)
+        worksheet.conditional_formatting.add(f"F2:F{len(df)+1}", red_rule)
+        
+        # Желтый для скоро истекающих
+        yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+        yellow_rule = FormulaRule(formula=['AND($F2>0, $F2<=7)'], fill=yellow_fill)
+        worksheet.conditional_formatting.add(f"F2:F{len(df)+1}", yellow_rule)
+        
+        # Оранжевый для предупреждения
+        orange_fill = PatternFill(start_color="FFD699", end_color="FFD699", fill_type="solid")
+        orange_rule = FormulaRule(formula=['AND($F2>7, $F2<=30)'], fill=orange_fill)
+        worksheet.conditional_formatting.add(f"F2:F{len(df)+1}", orange_rule)
+    
+    async def update_session(self, user_id: int, new_filters: List[Dict]) -> bool:
+        """Обновление сессии новыми данными"""
+        if user_id not in self.active_sessions:
+            return False
+        
+        try:
+            session = self.active_sessions[user_id]
+            session['filters'] = new_filters
+            session['last_update'] = datetime.now()
+            session['is_modified'] = True
+            
+            # Пересоздаем файл
+            df = self._create_dataframe(new_filters)
+            with pd.ExcelWriter(session['filepath'], engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='Фильтры', index=False)
+                worksheet = writer.sheets['Фильтры']
+                self._apply_excel_formatting(worksheet, df)
+            
+            return True
+        except Exception as e:
+            logging.error(f"Ошибка обновления сессии: {e}")
+            return False
+    
+    async def sync_session(self, user_id: int) -> bool:
+        """Синхронизация сессии с текущими данными из БД"""
+        if user_id not in self.active_sessions:
+            return False
+        
+        try:
+            current_filters = await get_user_filters(user_id)
+            return await self.update_session(user_id, current_filters)
+        except Exception as e:
+            logging.error(f"Ошибка синхронизации сессии: {e}")
+            return False
+    
+    async def sync_all_sessions(self):
+        """Синхронизация всех активных сессий"""
+        for user_id in list(self.active_sessions.keys()):
+            try:
+                await self.sync_session(user_id)
+                logging.info(f"Сессия пользователя {user_id} синхронизирована")
+            except Exception as e:
+                logging.error(f"Ошибка синхронизации сессии {user_id}: {e}")
+    
+    async def get_session_file(self, user_id: int) -> Optional[str]:
+        """Получение пути к файлу сессии"""
+        if user_id in self.active_sessions:
+            return self.active_sessions[user_id]['filepath']
+        return None
+    
+    async def close_session(self, user_id: int):
+        """Закрытие сессии и удаление файла"""
+        if user_id in self.active_sessions:
+            try:
+                filepath = self.active_sessions[user_id]['filepath']
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                del self.active_sessions[user_id]
+            except Exception as e:
+                logging.error(f"Ошибка закрытия сессии: {e}")
+    
+    async def cleanup_old_sessions(self):
+        """Очистка старых сессий (старше 24 часов)"""
+        now = datetime.now()
+        users_to_remove = []
+        
+        for user_id, session in self.active_sessions.items():
+            if (now - session['last_update']).total_seconds() > 86400:  # 24 часа
+                users_to_remove.append(user_id)
+        
+        for user_id in users_to_remove:
+            await self.close_session(user_id)
+
+# Инициализация менеджера Excel
+excel_manager = OnlineExcelManager()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_main_keyboard():
@@ -151,6 +364,16 @@ def get_edit_keyboard():
     builder.button(text="🔙 Назад")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
+
+async def get_online_excel_keyboard():
+    """Клавиатура для управления онлайн Excel"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Синхронизировать", callback_data="sync_excel")
+    builder.button(text="📥 Скачать актуальную версию", callback_data="download_excel")
+    builder.button(text="📊 Статистика файла", callback_data="excel_stats")
+    builder.button(text="❌ Закрыть сессию", callback_data="close_excel")
+    builder.adjust(1)
+    return builder.as_markup()
 
 def get_status_icon_and_text(days_until_expiry: int):
     """Получение иконки и текста статуса"""
@@ -686,7 +909,8 @@ async def cmd_start(message: types.Message):
         "• ⚙️ Полное управление базой\n"
         "• 📊 Детальная статистика\n"
         "• 📤 Импорт/экспорт Excel\n"
-        "• 🔔 Автоматические напоминания",
+        "• 🔔 Автоматические напоминания\n"
+        "• 📊 Онлайн Excel с синхронизацией",
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
     )
@@ -699,11 +923,15 @@ async def cmd_help(message: types.Message):
         "📋 <b>Основные команды:</b>\n"
         "• /start - Начать работу\n"
         "• /help - Показать справку\n"
-        "• /status - Статус бота (админ)\n\n"
+        "• /status - Статус бота (админ)\n"
+        "• /sync_excel - Синхронизировать Excel\n"
+        "• /close_excel - Закрыть онлайн Excel\n"
+        "• /excel_status - Статус Excel сессии\n\n"
         "💡 <b>Как использовать:</b>\n"
         "1. Добавьте фильтры через меню\n"
         "2. Следите за сроками замены\n"
-        "3. Получайте уведомления\n\n"
+        "3. Получайте уведомления\n"
+        "4. Используйте онлайн Excel для удобства\n\n"
         "⚙️ <b>Управление:</b>\n"
         "• 📋 Мои фильтры - просмотр всех\n"
         "• ✨ Добавить фильтр - новый фильтр\n"
@@ -1368,10 +1596,12 @@ async def process_filter_deletion(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-# ========== ОНЛАЙН EXCEL ==========
+# ========== ОБНОВЛЕННЫЙ ОНЛАЙН EXCEL С СИНХРОНИЗАЦИЕЙ ==========
 @dp.message(F.text == "📊 Онлайн Excel")
 async def cmd_online_excel(message: types.Message):
-    """Показать данные в формате онлайн Excel"""
+    """Улучшенный онлайн Excel с синхронизацией"""
+    health_monitor.record_message(message.from_user.id)
+    
     filters = await get_user_filters(message.from_user.id)
     
     if not filters:
@@ -1383,53 +1613,223 @@ async def cmd_online_excel(message: types.Message):
         )
         return
     
-    # Создаем DataFrame
-    data = []
-    today = datetime.now().date()
-    
-    for f in filters:
-        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-        last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
-        days_until_expiry = (expiry_date - today).days
+    try:
+        # Создаем или обновляем сессию
+        filepath = await excel_manager.create_session(message.from_user.id, filters)
         
-        icon, status = get_status_icon_and_text(days_until_expiry)
+        # Отправляем файл
+        with open(filepath, 'rb') as file:
+            await message.answer_document(
+                types.BufferedInputFile(file.read(), filename="мои_фильтры_online.xlsx"),
+                caption=(
+                    "📊 <b>ОНЛАЙН EXCEL АКТИВИРОВАН</b>\n\n"
+                    "💡 <b>Возможности онлайн режима:</b>\n"
+                    "• 🔄 Автосинхронизация каждые 5 минут\n"
+                    "• 📱 Редактирование в реальном времени\n"
+                    "• 💾 Автосохранение изменений\n"
+                    "• 🔔 Уведомления об обновлениях\n\n"
+                    "🔄 <b>Команды управления:</b>\n"
+                    "• /sync_excel - принудительная синхронизация\n"
+                    "• /close_excel - закрыть онлайн сессию\n"
+                    "• /excel_status - статус сессии"
+                ),
+                parse_mode='HTML',
+                reply_markup=await get_online_excel_keyboard()
+            )
         
-        data.append({
-            'ID': f['id'],
-            'Тип': f['filter_type'],
-            'Местоположение': f['location'],
-            'Замена': format_date_nice(last_change),
-            'Годен до': format_date_nice(expiry_date),
-            'Осталось дней': days_until_expiry,
-            'Статус': f"{icon} {status}",
-            'Срок службы': f"{f['lifetime_days']} дн."
-        })
-    
-    df = pd.DataFrame(data)
-    
-    # Форматируем таблицу как текст
-    excel_like_output = "📊 <b>ОНЛАЙН EXCEL - ВАШИ ФИЛЬТРЫ</b>\n\n"
-    
-    # Заголовки
-    headers = ["ID", "Тип", "Место", "Замена", "Годен до", "Дней", "Статус"]
-    excel_like_output += "┌" + "─" * 8 + "┬" + "─" * 15 + "┬" + "─" * 12 + "┬" + "─" * 10 + "┬" + "─" * 10 + "┬" + "─" * 6 + "┬" + "─" * 12 + "┐\n"
-    excel_like_output += "│" + "".join(f"{h:^{width}}" for h, width in zip(headers, [8, 15, 12, 10, 10, 6, 12])) + "│\n"
-    excel_like_output += "├" + "─" * 8 + "┼" + "─" * 15 + "┼" + "─" * 12 + "┼" + "─" * 10 + "┼" + "─" * 10 + "┼" + "─" * 6 + "┼" + "─" * 12 + "┤\n"
-    
-    # Данные
-    for _, row in df.iterrows():
-        excel_like_output += f"│{row['ID']:^8}│{row['Тип'][:13]:^15}│{row['Местоположение'][:10]:^12}│{row['Замена']:^10}│{row['Годен до']:^10}│{row['Осталось дней']:^6}│{row['Статус'][:10]:^12}│\n"
-    
-    excel_like_output += "└" + "─" * 8 + "┴" + "─" * 15 + "┴" + "─" * 12 + "┴" + "─" * 10 + "┴" + "─" * 10 + "┴" + "─" * 6 + "┴" + "─" * 12 + "┘\n\n"
-    
-    # Статистика
-    expired = len([f for f in filters if (datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - today).days <= 0])
-    expiring_soon = len([f for f in filters if 0 < (datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - today).days <= 7])
-    normal = len([f for f in filters if (datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date() - today).days > 7])
-    
-    excel_like_output += f"📈 <b>СТАТИСТИКА:</b> Всего: {len(filters)} | 🟢 Норма: {normal} | 🟡 Скоро: {expiring_soon} | 🔴 Просрочено: {expired}"
-    
-    await message.answer(excel_like_output, parse_mode='HTML', reply_markup=get_management_keyboard())
+    except Exception as e:
+        logging.error(f"Ошибка создания онлайн Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при создании онлайн Excel!</b>\n\n"
+            "Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+
+# ========== КОМАНДЫ УПРАВЛЕНИЯ ONLINE EXCEL ==========
+@dp.message(Command("sync_excel"))
+async def cmd_sync_excel(message: types.Message):
+    """Принудительная синхронизация онлайн Excel"""
+    try:
+        success = await excel_manager.sync_session(message.from_user.id)
+        
+        if success:
+            await message.answer(
+                "✅ <b>Excel файл синхронизирован!</b>\n\n"
+                "💫 Все изменения из базы данных перенесены в ваш онлайн файл.",
+                parse_mode='HTML',
+                reply_markup=await get_online_excel_keyboard()
+            )
+        else:
+            await message.answer(
+                "❌ <b>Активная сессия не найдена!</b>\n\n"
+                "Запустите онлайн Excel через меню управления.",
+                parse_mode='HTML'
+            )
+            
+    except Exception as e:
+        logging.error(f"Ошибка синхронизации Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка синхронизации!</b>",
+            parse_mode='HTML'
+        )
+
+@dp.message(Command("close_excel"))
+async def cmd_close_excel(message: types.Message):
+    """Закрытие онлайн сессии Excel"""
+    try:
+        await excel_manager.close_session(message.from_user.id)
+        await message.answer(
+            "✅ <b>Онлайн сессия Excel закрыта</b>\n\n"
+            "📁 Временный файл удален.\n"
+            "💫 Вы можете создать новую сессию когда потребуется.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+    except Exception as e:
+        logging.error(f"Ошибка закрытия Excel сессии: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при закрытии сессии!</b>",
+            parse_mode='HTML'
+        )
+
+@dp.message(Command("excel_status"))
+async def cmd_excel_status(message: types.Message):
+    """Статус онлайн Excel сессии"""
+    try:
+        session = excel_manager.active_sessions.get(message.from_user.id)
+        
+        if session:
+            filters_count = len(session['filters'])
+            last_update = session['last_update'].strftime('%d.%m.%Y %H:%M:%S')
+            is_modified = "Да" if session['is_modified'] else "Нет"
+            
+            status_text = (
+                "📊 <b>СТАТУС ONLINE EXCEL СЕССИИ</b>\n\n"
+                f"📁 <b>Файл:</b> {session['filename']}\n"
+                f"📦 <b>Фильтров в файле:</b> {filters_count}\n"
+                f"🕒 <b>Последнее обновление:</b> {last_update}\n"
+                f"✏️ <b>Изменения:</b> {is_modified}\n"
+                f"🔄 <b>Автосинхронизация:</b> Каждые 5 минут\n\n"
+                f"💡 <i>Сессия активна и синхронизируется автоматически</i>"
+            )
+        else:
+            status_text = (
+                "📊 <b>СТАТУС ONLINE EXCEL СЕССИИ</b>\n\n"
+                "❌ <b>Активная сессия не найдена</b>\n\n"
+                "💫 Запустите онлайн Excel через меню управления фильтрами."
+            )
+        
+        await message.answer(status_text, parse_mode='HTML')
+        
+    except Exception as e:
+        logging.error(f"Ошибка получения статуса Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка получения статуса!</b>",
+            parse_mode='HTML'
+        )
+
+# ========== INLINE ОБРАБОТЧИКИ ДЛЯ ONLINE EXCEL ==========
+@dp.callback_query(F.data == "sync_excel")
+async def callback_sync_excel(callback: types.CallbackQuery):
+    """Обработчик синхронизации через inline кнопку"""
+    try:
+        success = await excel_manager.sync_session(callback.from_user.id)
+        
+        if success:
+            await callback.message.edit_caption(
+                caption=(
+                    callback.message.caption + "\n\n✅ <b>Синхронизировано только что!</b>"
+                ),
+                parse_mode='HTML'
+            )
+            await callback.answer("Файл синхронизирован!")
+        else:
+            await callback.answer("Сессия не найдена!", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка inline синхронизации: {e}")
+        await callback.answer("Ошибка синхронизации!", show_alert=True)
+
+@dp.callback_query(F.data == "download_excel")
+async def callback_download_excel(callback: types.CallbackQuery):
+    """Обработчик скачивания актуальной версии"""
+    try:
+        filepath = await excel_manager.get_session_file(callback.from_user.id)
+        
+        if filepath and os.path.exists(filepath):
+            with open(filepath, 'rb') as file:
+                await callback.message.answer_document(
+                    types.BufferedInputFile(file.read(), filename="актуальные_фильтры.xlsx"),
+                    caption="📥 <b>Актуальная версия ваших фильтров</b>",
+                    parse_mode='HTML'
+                )
+            await callback.answer("Файл отправлен!")
+        else:
+            await callback.answer("Файл не найден!", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка скачивания Excel: {e}")
+        await callback.answer("Ошибка скачивания!", show_alert=True)
+
+@dp.callback_query(F.data == "excel_stats")
+async def callback_excel_stats(callback: types.CallbackQuery):
+    """Статистика Excel файла"""
+    try:
+        session = excel_manager.active_sessions.get(callback.from_user.id)
+        
+        if session:
+            filters = session['filters']
+            today = datetime.now().date()
+            
+            expired = 0
+            expiring_soon = 0
+            normal = 0
+            
+            for f in filters:
+                expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+                days_until = (expiry_date - today).days
+                
+                if days_until <= 0:
+                    expired += 1
+                elif days_until <= 7:
+                    expiring_soon += 1
+                else:
+                    normal += 1
+            
+            stats_text = (
+                "📈 <b>СТАТИСТИКА EXCEL ФАЙЛА</b>\n\n"
+                f"📊 <b>Всего фильтров:</b> {len(filters)}\n"
+                f"🟢 <b>Норма:</b> {normal}\n"
+                f"🟡 <b>Скоро истечет:</b> {expiring_soon}\n"
+                f"🔴 <b>Просрочено:</b> {expired}\n\n"
+                f"💾 <b>Размер файла:</b> {os.path.getsize(session['filepath']) // 1024} КБ\n"
+                f"🕒 <b>Обновлен:</b> {session['last_update'].strftime('%d.%m.%Y %H:%M')}"
+            )
+            
+            await callback.message.answer(stats_text, parse_mode='HTML')
+            await callback.answer()
+        else:
+            await callback.answer("Сессия не найдена!", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка статистики Excel: {e}")
+        await callback.answer("Ошибка получения статистики!", show_alert=True)
+
+@dp.callback_query(F.data == "close_excel")
+async def callback_close_excel(callback: types.CallbackQuery):
+    """Закрытие сессии через inline кнопку"""
+    try:
+        await excel_manager.close_session(callback.from_user.id)
+        await callback.message.edit_caption(
+            caption="❌ <b>Онлайн сессия Excel закрыта</b>\n\nФайл удален.",
+            parse_mode='HTML'
+        )
+        await callback.answer("Сессия закрыта!")
+        
+    except Exception as e:
+        logging.error(f"Ошибка закрытия Excel: {e}")
+        await callback.answer("Ошибка закрытия сессии!", show_alert=True)
 
 # ========== ИМПОРТ/ЭКСПОРТ ==========
 @dp.message(F.text == "📤 Импорт/Экспорт")
@@ -1817,6 +2217,25 @@ async def schedule_daily_check():
         
         await asyncio.sleep(60)
 
+# ========== УЛУЧШЕНИЕ: ФОНОВЫЕ ЗАДАЧИ ДЛЯ ONLINE EXCEL ==========
+async def schedule_online_excel_tasks():
+    """Фоновые задачи для онлайн Excel"""
+    # Запускаем авто-сохранение
+    await excel_manager.start_auto_save()
+    
+    while True:
+        try:
+            # Синхронизация всех активных сессий каждые 5 минут
+            await asyncio.sleep(300)  # 5 минут
+            await excel_manager.sync_all_sessions()
+            
+            # Очистка старых сессий каждые 6 часов
+            await excel_manager.cleanup_old_sessions()
+            
+        except Exception as e:
+            logging.error(f"Ошибка в фоновых задачах Excel: {e}")
+            await asyncio.sleep(60)
+
 # ========== УЛУЧШЕНИЕ: ОБНОВЛЕННЫЙ ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ==========
 @dp.errors()
 async def errors_handler(update: types.Update, exception: Exception):
@@ -1857,6 +2276,7 @@ async def on_startup():
     
     # Запускаем фоновые задачи
     asyncio.create_task(schedule_daily_check())
+    asyncio.create_task(schedule_online_excel_tasks())  # Новые задачи для Excel
     
     # Уведомляем администратора о запуске
     try:
@@ -1865,7 +2285,8 @@ async def on_startup():
             ADMIN_ID, 
             f"🤖 <b>Бот успешно запущен!</b>\n\n"
             f"⏰ <b>Время запуска:</b> {health_monitor.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"💫 <b>Статус:</b> Работает в нормальном режиме",
+            f"💫 <b>Статус:</b> Работает в нормальном режиме\n"
+            f"📊 <b>Online Excel:</b> Активирован",
             parse_mode='HTML'
         )
     except Exception as e:
@@ -1876,11 +2297,16 @@ async def on_shutdown():
     """Действия при остановке бота"""
     logging.info("Бот останавливается")
     
+    # Закрываем все активные сессии Excel
+    for user_id in list(excel_manager.active_sessions.keys()):
+        await excel_manager.close_session(user_id)
+    
     try:
         await bot.send_message(
             ADMIN_ID,
             "🛑 <b>Бот остановлен</b>\n\n"
-            f"⏰ <b>Время работы:</b> {datetime.now() - health_monitor.start_time}",
+            f"⏰ <b>Время работы:</b> {datetime.now() - health_monitor.start_time}\n"
+            f"📊 <b>Закрыто сессий Excel:</b> {len(excel_manager.active_sessions)}",
             parse_mode='HTML'
         )
     except Exception as e:
