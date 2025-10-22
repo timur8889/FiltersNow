@@ -27,12 +27,21 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram import BaseMiddleware
 from dotenv import load_dotenv
 
+# Импорты для Google Sheets
+import gspread
+from google_sheets import init_google_sheets, google_sheets_manager
+
 # Загрузка переменных окружения
 load_dotenv()
 
 # Настройки
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
+
+# Google Sheets настройки
+GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS', 'credentials.json')
+GOOGLE_SHEETS_ID = os.getenv('GOOGLE_SHEETS_ID')
+AUTO_SYNC_SHEETS = os.getenv('AUTO_SYNC_SHEETS', 'True').lower() == 'true'
 
 # Проверка обязательных переменных
 if not API_TOKEN:
@@ -76,6 +85,116 @@ def setup_logging():
     })
 
 setup_logging()
+
+# ========== УЛУЧШЕНИЕ: GOOGLE SHEETS СИНХРОНИЗАЦИЯ ==========
+async def sync_user_to_sheets(user_id: int):
+    """Синхронизация данных пользователя с Google Sheets"""
+    if not google_sheets_manager:
+        return False
+    
+    try:
+        filters = await get_user_filters(user_id)
+        if not filters:
+            return True
+        
+        # Получаем информацию о пользователе
+        try:
+            user = await bot.get_chat(user_id)
+            user_info = {
+                'username': user.username or '',
+                'first_name': user.first_name or '',
+                'last_name': user.last_name or ''
+            }
+        except:
+            user_info = {'username': 'N/A'}
+        
+        # Синхронизируем с Google Sheets
+        await google_sheets_manager.sync_filters_to_sheets(filters, user_info)
+        
+        # Обновляем статистику
+        await google_sheets_manager.create_summary_sheet()
+        
+        logging.info(f"✅ Данные пользователя {user_id} синхронизированы с Google Sheets")
+        return True
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка синхронизации пользователя {user_id} с Google Sheets: {e}")
+        return False
+
+async def sync_all_to_sheets():
+    """Синхронизация всех данных с Google Sheets"""
+    if not google_sheets_manager:
+        return False
+    
+    try:
+        async with get_db_connection() as conn:
+            cur = await conn.cursor()
+            
+            # Получаем всех пользователей
+            await cur.execute("SELECT DISTINCT user_id FROM filters")
+            user_ids = [row[0] for row in await cur.fetchall()]
+            
+            all_filters = []
+            total_synced = 0
+            
+            for user_id in user_ids:
+                await cur.execute("SELECT * FROM filters WHERE user_id = ?", (user_id,))
+                user_filters = await cur.fetchall()
+                
+                for filter_row in user_filters:
+                    filter_dict = dict(filter_row)
+                    
+                    # Добавляем информацию о пользователе
+                    try:
+                        user = await bot.get_chat(user_id)
+                        filter_dict['user_info'] = {
+                            'username': user.username or '',
+                            'first_name': user.first_name or '',
+                            'last_name': user.last_name or ''
+                        }
+                    except:
+                        filter_dict['user_info'] = {'username': 'N/A'}
+                    
+                    all_filters.append(filter_dict)
+                
+                total_synced += len(user_filters)
+        
+        # Синхронизируем все данные
+        if all_filters:
+            await google_sheets_manager.sync_filters_to_sheets(all_filters)
+            await google_sheets_manager.create_summary_sheet()
+            
+            logging.info(f"✅ Все данные синхронизированы с Google Sheets: {total_synced} фильтров")
+            return total_synced
+        else:
+            logging.info("ℹ️ Нет данных для синхронизации с Google Sheets")
+            return 0
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка синхронизации всех данных с Google Sheets: {e}")
+        return False
+
+# ========== ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ АВТОСИНХРОНИЗАЦИИ ==========
+async def add_filter_with_sync(user_id: int, **kwargs) -> bool:
+    """Добавление фильтра с синхронизацией"""
+    success = await add_filter_to_db(user_id, **kwargs)
+    if success and AUTO_SYNC_SHEETS:
+        await sync_user_to_sheets(user_id)
+    return success
+
+async def update_filter_with_sync(filter_id: int, user_id: int, **kwargs) -> bool:
+    """Обновление фильтра с синхронизацией"""
+    success = await update_filter_in_db(filter_id, user_id, **kwargs)
+    if success and AUTO_SYNC_SHEETS:
+        await sync_user_to_sheets(user_id)
+    return success
+
+async def delete_filter_with_sync(filter_id: int, user_id: int) -> bool:
+    """Удаление фильтра с синхронизацией"""
+    success = await delete_filter_from_db(filter_id, user_id)
+    if success and AUTO_SYNC_SHEETS:
+        await sync_user_to_sheets(user_id)
+    return success
 
 # ========== УЛУЧШЕНИЕ: ОНЛАЙН EXCEL С СИНХРОНИЗАЦИЕЙ ==========
 class OnlineExcelManager:
@@ -893,6 +1012,278 @@ async def init_db():
                 logging.error(f"Не удалось создать резервную копию: {backup_error}")
         raise
 
+# ========== КОМАНДЫ ДЛЯ GOOGLE SHEETS ==========
+@dp.message(Command("google_sheets"))
+async def cmd_google_sheets(message: types.Message):
+    """Управление Google Sheets"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ только для администратора!</b>", parse_mode='HTML')
+        return
+    
+    if not google_sheets_manager:
+        await message.answer(
+            "❌ <b>Google Sheets не настроен!</b>\n\n"
+            "💡 Проверьте настройки в .env файле:\n"
+            "• GOOGLE_SHEETS_CREDENTIALS\n"
+            "• GOOGLE_SHEETS_ID\n\n"
+            "🔄 Используйте /create_sheets для создания новой таблицы",
+            parse_mode='HTML'
+        )
+        return
+    
+    url = google_sheets_manager.get_spreadsheet_url()
+    sheet_id = google_sheets_manager.get_spreadsheet_id()
+    
+    # Создаем inline клавиатуру для управления
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Синхронизировать все", callback_data="sync_all_sheets")
+    builder.button(text="📊 Обновить статистику", callback_data="update_stats")
+    builder.button(text="🔗 Открыть таблицу", url=url)
+    builder.button(text="❌ Закрыть", callback_data="close_sheets_menu")
+    builder.adjust(2)
+    
+    await message.answer(
+        f"📊 <b>GOOGLE SHEETS УПРАВЛЕНИЕ</b>\n\n"
+        f"🔗 <b>Ссылка на таблицу:</b>\n<code>{url}</code>\n\n"
+        f"🆔 <b>ID таблицы:</b>\n<code>{sheet_id}</code>\n\n"
+        f"⚙️ <b>Настройки:</b>\n"
+        f"• Автосинхронизация: {'✅ ВКЛ' if AUTO_SYNC_SHEETS else '❌ ВЫКЛ'}\n"
+        f"• Статус: {'✅ Активен' if google_sheets_manager else '❌ Неактивен'}\n\n"
+        f"💡 <b>Доступные команды:</b>\n"
+        f"• /sync_all_to_sheets - принудительная синхронизация\n"
+        f"• /sheets_status - статус синхронизации\n"
+        f"• /create_sheets - создать новую таблицу\n"
+        f"• /auto_sync_on - включить автосинхронизацию\n"
+        f"• /auto_sync_off - выключить автосинхронизацию",
+        parse_mode='HTML',
+        reply_markup=builder.as_markup()
+    )
+
+@dp.message(Command("sync_all_to_sheets"))
+async def cmd_sync_all_to_sheets(message: types.Message):
+    """Синхронизация всех данных с Google Sheets"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ только для администратора!</b>", parse_mode='HTML')
+        return
+    
+    if not google_sheets_manager:
+        await message.answer("❌ Google Sheets не настроен!", parse_mode='HTML')
+        return
+    
+    try:
+        # Показываем сообщение о начале синхронизации
+        progress_msg = await message.answer("🔄 <b>Начинаю синхронизацию с Google Sheets...</b>", parse_mode='HTML')
+        
+        # Выполняем синхронизацию
+        synced_count = await sync_all_to_sheets()
+        
+        if synced_count:
+            await progress_msg.edit_text(
+                f"✅ <b>СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА</b>\n\n"
+                f"📊 Загружено фильтров: {synced_count}\n"
+                f"🔗 Таблица: {google_sheets_manager.get_spreadsheet_url()}\n\n"
+                f"💫 Все данные успешно обновлены в Google Sheets",
+                parse_mode='HTML'
+            )
+        else:
+            await progress_msg.edit_text(
+                "ℹ️ <b>Нет данных для синхронизации</b>\n\n"
+                "💡 Добавьте фильтры через бота",
+                parse_mode='HTML'
+            )
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка синхронизации с Google Sheets: {e}")
+        await message.answer(
+            f"❌ <b>Ошибка синхронизации!</b>\n\n{str(e)}",
+            parse_mode='HTML'
+        )
+
+@dp.message(Command("create_sheets"))
+async def cmd_create_sheets(message: types.Message):
+    """Создание новой таблицы Google Sheets"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ только для администратора!</b>", parse_mode='HTML')
+        return
+    
+    try:
+        global google_sheets_manager
+        
+        # Показываем сообщение о создании
+        progress_msg = await message.answer("🔄 <b>Создаю новую таблицу Google Sheets...</b>", parse_mode='HTML')
+        
+        title = f"Фильтр-Трекер {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        google_sheets_manager = GoogleSheetsManager()
+        url = google_sheets_manager.create_spreadsheet(title)
+        google_sheets_manager.setup_worksheet()
+        
+        # Создаем статистику
+        await google_sheets_manager.create_summary_sheet()
+        
+        sheet_id = google_sheets_manager.get_spreadsheet_id()
+        
+        await progress_msg.edit_text(
+            f"✅ <b>НОВАЯ ТАБЛИЦА СОЗДАНА</b>\n\n"
+            f"📊 <b>Название:</b> {title}\n"
+            f"🔗 <b>Ссылка:</b>\n<code>{url}</code>\n\n"
+            f"🆔 <b>ID таблицы:</b>\n<code>{sheet_id}</code>\n\n"
+            f"💡 Сохраните этот ID в переменную GOOGLE_SHEETS_ID\n\n"
+            f"📝 Таблица включает:\n"
+            f"• 📊 Основной лист с фильтрами\n"
+            f"• 📈 Лист статистики\n"
+            f"• 🎨 Автоформатирование\n"
+            f"• 🔍 Фильтры данных\n"
+            f"• ⚠️ Условное форматирование",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка создания таблицы: {e}")
+        await message.answer(
+            f"❌ <b>Ошибка создания таблицы!</b>\n\n{str(e)}",
+            parse_mode='HTML'
+        )
+
+@dp.message(Command("sheets_status"))
+async def cmd_sheets_status(message: types.Message):
+    """Статус Google Sheets синхронизации"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ только для администратора!</b>", parse_mode='HTML')
+        return
+    
+    try:
+        if not google_sheets_manager:
+            await message.answer(
+                "❌ <b>Google Sheets не настроен</b>\n\n"
+                "💡 Используйте /create_sheets для создания таблицы",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Получаем статистику из БД
+        stats = await get_all_users_stats()
+        
+        # Получаем информацию о таблице
+        url = google_sheets_manager.get_spreadsheet_url()
+        sheet_id = google_sheets_manager.get_spreadsheet_id()
+        
+        status_text = (
+            f"📊 <b>СТАТУС GOOGLE SHEETS</b>\n\n"
+            f"🔗 <b>Таблица:</b> {google_sheets_manager.spreadsheet.title}\n"
+            f"🆔 <b>ID:</b> <code>{sheet_id}</code>\n"
+            f"🔗 <b>Ссылка:</b> <code>{url}</code>\n\n"
+            f"⚙️ <b>Настройки:</b>\n"
+            f"• Автосинхронизация: {'✅ ВКЛ' if AUTO_SYNC_SHEETS else '❌ ВЫКЛ'}\n"
+            f"• Статус подключения: ✅ Активно\n\n"
+            f"📈 <b>Статистика БД:</b>\n"
+            f"• 👥 Пользователей: {stats['total_users']}\n"
+            f"• 📦 Фильтров: {stats['total_filters']}\n"
+            f"• 🔴 Просрочено: {stats['expired_filters']}\n"
+            f"• 🟡 Скоро истечет: {stats['expiring_soon']}\n\n"
+            f"💡 <b>Последние действия:</b>\n"
+            f"• Таблица создана/открыта\n"
+            f"• Форматирование применено\n"
+            f"• Готов к синхронизации"
+        )
+        
+        await message.answer(status_text, parse_mode='HTML')
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения статуса Google Sheets: {e}")
+        await message.answer(
+            f"❌ <b>Ошибка получения статуса!</b>\n\n{str(e)}",
+            parse_mode='HTML'
+        )
+
+@dp.message(Command("auto_sync_on"))
+async def cmd_auto_sync_on(message: types.Message):
+    """Включение автосинхронизации"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ только для администратора!</b>", parse_mode='HTML')
+        return
+    
+    global AUTO_SYNC_SHEETS
+    AUTO_SYNC_SHEETS = True
+    
+    await message.answer(
+        "✅ <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА</b>\n\n"
+        "💫 Теперь все изменения будут автоматически синхронизироваться с Google Sheets",
+        parse_mode='HTML'
+    )
+
+@dp.message(Command("auto_sync_off"))
+async def cmd_auto_sync_off(message: types.Message):
+    """Выключение автосинхронизации"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ <b>Доступ только для администратора!</b>", parse_mode='HTML')
+        return
+    
+    global AUTO_SYNC_SHEETS
+    AUTO_SYNC_SHEETS = False
+    
+    await message.answer(
+        "❌ <b>АВТОСИНХРОНИЗАЦИЯ ВЫКЛЮЧЕНА</b>\n\n"
+        "💡 Изменения больше не будут автоматически синхронизироваться с Google Sheets\n"
+        "🔄 Используйте /sync_all_to_sheets для ручной синхронизации",
+        parse_mode='HTML'
+    )
+
+# ========== INLINE ОБРАБОТЧИКИ ДЛЯ GOOGLE SHEETS ==========
+@dp.callback_query(F.data == "sync_all_sheets")
+async def callback_sync_all_sheets(callback: types.CallbackQuery):
+    """Обработчик синхронизации через inline кнопку"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен!", show_alert=True)
+        return
+    
+    try:
+        await callback.message.edit_text("🔄 <b>Синхронизирую с Google Sheets...</b>", parse_mode='HTML')
+        
+        synced_count = await sync_all_to_sheets()
+        
+        if synced_count:
+            await callback.message.edit_text(
+                f"✅ <b>Синхронизировано {synced_count} фильтров</b>\n\n"
+                f"💫 Данные успешно обновлены в Google Sheets",
+                parse_mode='HTML'
+            )
+        else:
+            await callback.message.edit_text(
+                "ℹ️ <b>Нет данных для синхронизации</b>",
+                parse_mode='HTML'
+            )
+        
+        await callback.answer()
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка inline синхронизации: {e}")
+        await callback.answer("❌ Ошибка синхронизации!", show_alert=True)
+
+@dp.callback_query(F.data == "update_stats")
+async def callback_update_stats(callback: types.CallbackQuery):
+    """Обработчик обновления статистики"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен!", show_alert=True)
+        return
+    
+    try:
+        await google_sheets_manager.create_summary_sheet()
+        await callback.message.edit_text(
+            callback.message.text + "\n\n✅ <b>Статистика обновлена!</b>",
+            parse_mode='HTML'
+        )
+        await callback.answer("Статистика обновлена!")
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка обновления статистики: {e}")
+        await callback.answer("❌ Ошибка обновления!", show_alert=True)
+
+@dp.callback_query(F.data == "close_sheets_menu")
+async def callback_close_sheets_menu(callback: types.CallbackQuery):
+    """Закрытие меню Google Sheets"""
+    await callback.message.delete()
+    await callback.answer()
+
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -910,7 +1301,8 @@ async def cmd_start(message: types.Message):
         "• 📊 Детальная статистика\n"
         "• 📤 Импорт/экспорт Excel\n"
         "• 🔔 Автоматические напоминания\n"
-        "• 📊 Онлайн Excel с синхронизацией",
+        "• 📊 Онлайн Excel с синхронизацией\n"
+        "• 📈 Google Sheets интеграция",
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
     )
@@ -941,6 +1333,18 @@ async def cmd_help(message: types.Message):
         "❌ <b>Отмена операций:</b>\n"
         "Используйте кнопку '❌ Отмена' для отмены текущей операции"
     )
+    
+    if is_admin(message.from_user.id):
+        help_text += (
+            "\n\n👑 <b>Админ команды:</b>\n"
+            "• /google_sheets - управление Google Sheets\n"
+            "• /sync_all_to_sheets - синхронизация всех данных\n"
+            "• /create_sheets - создать новую таблицу\n"
+            "• /sheets_status - статус синхронизации\n"
+            "• /auto_sync_on - включить автосинхронизацию\n"
+            "• /auto_sync_off - выключить автосинхронизацию"
+        )
+    
     await message.answer(help_text, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📋 Мои фильтры")
@@ -1138,8 +1542,8 @@ async def process_lifetime(message: types.Message, state: FSMContext):
     change_date = user_data['change_date']
     expiry_date = change_date + timedelta(days=lifetime)
     
-    # Сохранение в БД
-    success = await add_filter_to_db(
+    # Сохранение в БД с синхронизацией
+    success = await add_filter_with_sync(
         user_id=message.from_user.id,
         filter_type=user_data['filter_type'],
         location=user_data['location'],
@@ -1233,8 +1637,8 @@ async def process_multiple_filters(message: types.Message, state: FSMContext):
             lifetime = DEFAULT_LIFETIMES.get(filter_type.lower(), 180)
             expiry_date = change_date + timedelta(days=lifetime)
             
-            # Сохранение в БД
-            success = await add_filter_to_db(
+            # Сохранение в БД с синхронизацией
+            success = await add_filter_with_sync(
                 user_id=message.from_user.id,
                 filter_type=filter_type,
                 location=location,
@@ -1472,7 +1876,7 @@ async def process_new_value(message: types.Message, state: FSMContext):
                 # Пересчитываем дату истечения
                 filter_data = user_data['current_filter']
                 expiry_date = change_date + timedelta(days=filter_data['lifetime_days'])
-                await update_filter_in_db(filter_id, user_id, expiry_date=expiry_date.strftime('%Y-%m-%d'))
+                await update_filter_with_sync(filter_id, user_id, expiry_date=expiry_date.strftime('%Y-%m-%d'))
                 
             except ValueError as e:
                 await message.answer(f"❌ {str(e)}\n\nПожалуйста, введите дату в правильном формате:", reply_markup=get_back_keyboard())
@@ -1489,11 +1893,11 @@ async def process_new_value(message: types.Message, state: FSMContext):
             filter_data = user_data['current_filter']
             last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
             expiry_date = last_change + timedelta(days=lifetime)
-            await update_filter_in_db(filter_id, user_id, expiry_date=expiry_date.strftime('%Y-%m-%d'))
+            await update_filter_with_sync(filter_id, user_id, expiry_date=expiry_date.strftime('%Y-%m-%d'))
         
-        # Обновляем поле в БД
+        # Обновляем поле в БД с синхронизацией
         if field not in ["last_change", "lifetime_days"]:  # Эти поля уже обработаны выше
-            success = await update_filter_in_db(filter_id, user_id, **{field: new_value})
+            success = await update_filter_with_sync(filter_id, user_id, **{field: new_value})
         else:
             success = True
         
@@ -1574,8 +1978,8 @@ async def process_filter_deletion(message: types.Message, state: FSMContext):
         await message.answer("❌ Фильтр не найден.", reply_markup=get_back_keyboard())
         return
     
-    # Удаляем фильтр
-    success = await delete_filter_from_db(filter_id, user_id)
+    # Удаляем фильтр с синхронизацией
+    success = await delete_filter_with_sync(filter_id, user_id)
     
     if success:
         await message.answer(
@@ -2063,8 +2467,8 @@ async def process_excel_import(message: types.Message, state: FSMContext):
                 # Расчет даты истечения
                 expiry_date = change_date + timedelta(days=lifetime)
                 
-                # Сохранение в БД
-                success = await add_filter_to_db(
+                # Сохранение в БД с синхронизацией
+                success = await add_filter_with_sync(
                     user_id=message.from_user.id,
                     filter_type=filter_type,
                     location=location,
@@ -2188,6 +2592,25 @@ async def cmd_backup(message: types.Message):
     else:
         await message.answer("❌ <b>Ошибка при создании резервной копии!</b>", parse_mode='HTML')
 
+# ========== ФОНОВАЯ ЗАДАЧА ДЛЯ АВТОСИНХРОНИЗАЦИИ GOOGLE SHEETS ==========
+async def schedule_google_sheets_sync():
+    """Автоматическая синхронизация с Google Sheets"""
+    while True:
+        try:
+            if google_sheets_manager and AUTO_SYNC_SHEETS:
+                # Синхронизируем каждые 2 часа
+                await asyncio.sleep(7200)  # 2 часа
+                
+                synced_count = await sync_all_to_sheets()
+                if synced_count:
+                    logging.info(f"✅ Автосинхронизация: {synced_count} фильтров")
+                else:
+                    logging.info("ℹ️ Автосинхронизация: нет данных для синхронизации")
+                    
+        except Exception as e:
+            logging.error(f"❌ Ошибка автосинхронизации Google Sheets: {e}")
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+
 # ========== УЛУЧШЕНИЕ: ОБНОВЛЕННЫЕ ФОНОВЫЕ ЗАДАЧИ ==========
 async def schedule_daily_check():
     """Улучшенный планировщик ежедневных проверок"""
@@ -2265,32 +2688,45 @@ async def errors_handler(update: types.Update, exception: Exception):
 # ========== ОБНОВЛЕННАЯ ФУНКЦИЯ ЗАПУСКА ==========
 async def on_startup():
     """Улучшенные действия при запуске бота"""
-    logging.info("Бот запущен")
+    logging.info("🤖 Бот запущен")
     
     # Инициализация БД
     await init_db()
     
+    # Инициализация Google Sheets
+    if GOOGLE_SHEETS_ID:
+        await init_google_sheets(
+            credentials_file=GOOGLE_SHEETS_CREDENTIALS,
+            spreadsheet_id=GOOGLE_SHEETS_ID
+        )
+        logging.info("✅ Google Sheets инициализирован")
+    
     # Создаем резервную копию при запуске
     if backup_database():
-        logging.info("Резервная копия создана при запуске")
+        logging.info("✅ Резервная копия создана при запуске")
     
     # Запускаем фоновые задачи
     asyncio.create_task(schedule_daily_check())
-    asyncio.create_task(schedule_online_excel_tasks())  # Новые задачи для Excel
+    asyncio.create_task(schedule_online_excel_tasks())
+    asyncio.create_task(schedule_google_sheets_sync())  # Новая задача для Google Sheets
     
     # Уведомляем администратора о запуске
     try:
         health = await health_monitor.get_health_status()
+        sheets_status = "✅ Настроен" if google_sheets_manager else "❌ Не настроен"
+        
         await bot.send_message(
             ADMIN_ID, 
             f"🤖 <b>Бот успешно запущен!</b>\n\n"
             f"⏰ <b>Время запуска:</b> {health_monitor.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"💫 <b>Статус:</b> Работает в нормальном режиме\n"
-            f"📊 <b>Online Excel:</b> Активирован",
+            f"📊 <b>Online Excel:</b> Активирован\n"
+            f"📈 <b>Google Sheets:</b> {sheets_status}\n"
+            f"🔄 <b>Автосинхронизация:</b> {'✅ ВКЛ' if AUTO_SYNC_SHEETS else '❌ ВЫКЛ'}",
             parse_mode='HTML'
         )
     except Exception as e:
-        logging.error(f"Не удалось отправить уведомление администратору: {e}")
+        logging.error(f"❌ Не удалось отправить уведомление администратору: {e}")
 
 # ========== ОБНОВЛЕННАЯ ФУНКЦИЯ ОСТАНОВКИ ==========
 async def on_shutdown():
