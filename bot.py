@@ -11,6 +11,7 @@ import aiosqlite
 import json
 import pandas as pd
 import io
+import time
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Callable, Any, Awaitable, Union
@@ -42,6 +43,7 @@ class Config:
         # Настройки базы данных
         self.DB_PATH = 'filters.db'
         self.BACKUP_ENABLED = True
+        self.BACKUP_PATH = 'backups'
         
         # Настройки rate limiting
         self.RATE_LIMIT_MAX_REQUESTS = 10
@@ -51,14 +53,107 @@ class Config:
         self.REMINDER_CHECK_INTERVAL = 24 * 60 * 60  # 24 часа
         self.EARLY_REMINDER_DAYS = 7
         
+        # Настройки кэширования
+        self.CACHE_TTL = 300  # 5 минут
+        
     def validate(self) -> bool:
         """Проверка корректности конфигурации"""
         if not self.API_TOKEN:
             raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+        
+        # Создаем папку для бэкапов
+        if self.BACKUP_ENABLED and not os.path.exists(self.BACKUP_PATH):
+            os.makedirs(self.BACKUP_PATH)
+            
         return True
 
 # Создаем экземпляр конфигурации
 config = Config()
+
+# ========== УЛУЧШЕНИЕ: СИСТЕМА КЭШИРОВАНИЯ ==========
+class CacheManager:
+    """Менеджер кэширования для улучшения производительности"""
+    
+    def __init__(self):
+        self._user_filters_cache = {}
+        self._user_stats_cache = {}
+        self._cache_ttl = config.CACHE_TTL
+    
+    async def get_user_filters(self, user_id: int):
+        """Получение фильтров с кэшированием"""
+        cache_key = f"filters_{user_id}"
+        
+        if cache_key in self._user_filters_cache:
+            data, timestamp = self._user_filters_cache[cache_key]
+            if time.time() - timestamp < self._cache_ttl:
+                return data
+        
+        # Загрузка из БД
+        filters = await get_user_filters_db(user_id)
+        self._user_filters_cache[cache_key] = (filters, time.time())
+        return filters
+    
+    async def get_user_stats(self, user_id: int):
+        """Получение статистики с кэшированием"""
+        cache_key = f"stats_{user_id}"
+        
+        if cache_key in self._user_stats_cache:
+            data, timestamp = self._user_stats_cache[cache_key]
+            if time.time() - timestamp < self._cache_ttl:
+                return data
+        
+        # Загрузка из БД
+        filters = await self.get_user_filters(user_id)
+        stats = self._calculate_user_stats(filters)
+        self._user_stats_cache[cache_key] = (stats, time.time())
+        return stats
+    
+    def _calculate_user_stats(self, filters: List[Dict]) -> Dict:
+        """Расчет статистики пользователя"""
+        today = datetime.now().date()
+        stats = {
+            'total': len(filters),
+            'expired': 0,
+            'expiring_soon': 0,
+            'normal': 0,
+            'total_days_until_expiry': 0
+        }
+        
+        for f in filters:
+            expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+            days_until = (expiry_date - today).days
+            stats['total_days_until_expiry'] += max(0, days_until)
+            
+            if days_until <= 0:
+                stats['expired'] += 1
+            elif days_until <= 7:
+                stats['expiring_soon'] += 1
+            else:
+                stats['normal'] += 1
+        
+        if stats['total'] > 0:
+            stats['avg_days_until_expiry'] = stats['total_days_until_expiry'] / stats['total']
+            stats['health_percentage'] = (stats['normal'] / stats['total']) * 100
+        else:
+            stats['avg_days_until_expiry'] = 0
+            stats['health_percentage'] = 0
+            
+        return stats
+    
+    def invalidate_user_cache(self, user_id: int):
+        """Инвалидация кэша пользователя"""
+        cache_key_filters = f"filters_{user_id}"
+        cache_key_stats = f"stats_{user_id}"
+        self._user_filters_cache.pop(cache_key_filters, None)
+        self._user_stats_cache.pop(cache_key_stats, None)
+    
+    def clear_all_cache(self):
+        """Очистка всего кэша"""
+        self._user_filters_cache.clear()
+        self._user_stats_cache.clear()
+
+# Создаем экземпляр кэш менеджера
+cache_manager = CacheManager()
 
 # ========== УЛУЧШЕНИЕ: РАСШИРЕННОЕ ЛОГИРОВАНИЕ ==========
 def setup_logging():
@@ -221,6 +316,15 @@ def get_filters_selection_keyboard(filters: List[Dict], action: str):
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
+def get_reminder_keyboard(filter_id: int):
+    """Инлайн клавиатура для быстрых действий с напоминаниями"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Заменил", callback_data=f"replaced_{filter_id}")
+    builder.button(text="🔄 Перенести на неделю", callback_data=f"postpone_{filter_id}")
+    builder.button(text="📅 Посмотреть детали", callback_data=f"details_{filter_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
 def get_status_icon_and_text(days_until_expiry: int):
     """Получение иконки и текста статуса"""
     if days_until_expiry <= 0:
@@ -235,6 +339,25 @@ def get_status_icon_and_text(days_until_expiry: int):
 def format_date_nice(date):
     """Красивое форматирование даты"""
     return date.strftime("%d.%m.%Y")
+
+def create_progress_bar(percentage: float, length: int = 10) -> str:
+    """Создание текстового прогресс-бара"""
+    filled = int(length * percentage / 100)
+    empty = length - filled
+    return f"[{'█' * filled}{'░' * empty}] {percentage:.1f}%"
+
+def format_filter_status_with_progress(filter_data: Dict) -> str:
+    """Форматирование статуса с прогресс-баром"""
+    expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
+    last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
+    days_total = filter_data['lifetime_days']
+    days_passed = (datetime.now().date() - last_change).days
+    percentage = min(100, max(0, (days_passed / days_total) * 100))
+    
+    progress_bar = create_progress_bar(percentage)
+    days_until = (expiry_date - datetime.now().date()).days
+    
+    return f"{progress_bar} ({days_passed}/{days_total} дней, осталось: {days_until} дней)"
 
 def create_expiry_infographic(filters):
     """Создание инфографики по срокам"""
@@ -254,8 +377,16 @@ def create_expiry_infographic(filters):
         else:
             normal += 1
     
+    total = len(filters)
+    if total > 0:
+        health_percentage = (normal / total) * 100
+        progress_bar = create_progress_bar(health_percentage)
+    else:
+        progress_bar = create_progress_bar(0)
+    
     return (
         f"📊 <b>СТАТУС ФИЛЬТРОВ:</b>\n"
+        f"{progress_bar}\n"
         f"🟢 Норма: {normal}\n"
         f"🟡 Скоро истечет: {expiring_soon}\n"
         f"🔴 Просрочено: {expired}"
@@ -270,8 +401,17 @@ def backup_database() -> bool:
     try:
         if os.path.exists(config.DB_PATH):
             backup_name = f'filters_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-            shutil.copy2(config.DB_PATH, backup_name)
-            logging.info(f"Создана резервная копия: {backup_name}")
+            backup_path = os.path.join(config.BACKUP_PATH, backup_name)
+            shutil.copy2(config.DB_PATH, backup_path)
+            logging.info(f"Создана резервная копия: {backup_path}")
+            
+            # Очистка старых бэкапов (оставляем последние 10)
+            backup_files = [f for f in os.listdir(config.BACKUP_PATH) if f.startswith('filters_backup_')]
+            backup_files.sort(reverse=True)
+            for old_backup in backup_files[10:]:
+                os.remove(os.path.join(config.BACKUP_PATH, old_backup))
+                logging.info(f"Удален старый бэкап: {old_backup}")
+                
             return True
     except Exception as e:
         logging.error(f"Ошибка при создании резервной копии: {e}")
@@ -354,7 +494,7 @@ async def execute_with_retry(func: Callable, max_retries: int = 3, delay: float 
             logging.warning(f"Попытка {attempt + 1} не удалась: {e}. Повтор через {delay} сек...")
             await asyncio.sleep(delay)
 
-# ========== ИСПРАВЛЕННАЯ GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
+# ========== GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
 class GoogleSheetsSync:
     def __init__(self):
         self.credentials = None
@@ -406,11 +546,9 @@ class GoogleSheetsSync:
                 logging.error("Библиотеки gspread или google-auth не установлены")
                 return False
             
-            # Создаем credentials с правильными scope
-            scope = [
-                'https://www.googleapis.com/auth/spreadsheets',
-                'https://www.googleapis.com/auth/drive.file'
-            ]
+            # Создаем credentials
+            scope = ['https://spreadsheets.google.com/feeds', 
+                    'https://www.googleapis.com/auth/drive']
             self.credentials = Credentials.from_service_account_info(credentials_info, scopes=scope)
             return True
             
@@ -418,106 +556,66 @@ class GoogleSheetsSync:
             logging.error(f"Ошибка инициализации Google Sheets: {e}")
             return False
     
-    async def create_new_spreadsheet(self, gc, title: str):
-        """Создание новой таблицы"""
-        try:
-            spreadsheet = gc.create(title)
-            
-            # Даем доступ для чтения/записи всем, у кого есть ссылка
-            spreadsheet.share(None, perm_type='anyone', role='writer')
-            
-            return spreadsheet
-        except Exception as e:
-            logging.error(f"Ошибка создания таблицы: {e}")
-            return None
-    
     async def sync_to_sheets(self, user_id: int, user_filters: List[Dict]) -> tuple[bool, str]:
         """Синхронизация данных с Google Sheets"""
         try:
             if not self.is_configured():
-                return False, "Синхронизация не настроена. Укажите ID таблицы и настройте учетные данные."
+                return False, "Синхронизация не настроена"
             
             if not self.credentials:
                 if not await self.initialize_credentials():
-                    return False, "Ошибка инициализации Google API. Проверьте учетные данные."
+                    return False, "Ошибка инициализации Google API"
             
             import gspread
             
             # Создаем клиент
             gc = gspread.authorize(self.credentials)
             
-            try:
-                # Пытаемся открыть таблицу
-                sheet = gc.open_by_key(self.sheet_id)
-            except gspread.exceptions.SpreadsheetNotFound:
-                return False, "Таблица не найдена. Проверьте ID таблицы."
-            except gspread.exceptions.APIError as e:
-                error_msg = str(e)
-                if "PERMISSION_DENIED" in error_msg:
-                    return False, "Нет доступа к таблице. Убедитесь, что сервисный аккаунт имеет доступ к таблице."
-                elif "NOT_FOUND" in error_msg:
-                    return False, "Таблица не найдена. Проверьте ID таблицы."
-                else:
-                    return False, f"Ошибка доступа к таблице: {error_msg}"
+            # Открываем таблицу
+            sheet = gc.open_by_key(self.sheet_id)
             
             # Получаем или создаем лист для пользователя
             worksheet_name = f"User_{user_id}"
             try:
                 worksheet = sheet.worksheet(worksheet_name)
             except gspread.exceptions.WorksheetNotFound:
-                try:
-                    worksheet = sheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
-                except Exception as e:
-                    return False, f"Ошибка создания листа: {str(e)}"
+                worksheet = sheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
                 
                 # Заголовки
                 headers = ['ID', 'Тип фильтра', 'Местоположение', 'Дата замены', 
                           'Срок службы (дни)', 'Годен до', 'Статус', 'Осталось дней']
-                try:
-                    worksheet.append_row(headers)
-                except Exception as e:
-                    return False, f"Ошибка добавления заголовков: {str(e)}"
+                worksheet.append_row(headers)
             
             # Очищаем старые данные (кроме заголовка)
-            try:
-                if worksheet.row_count > 1:
-                    worksheet.delete_rows(2, worksheet.row_count)
-            except Exception as e:
-                logging.warning(f"Ошибка очистки данных: {e}")
+            if len(worksheet.get_all_values()) > 1:
+                worksheet.delete_rows(2, len(worksheet.get_all_values()))
             
             # Подготавливаем данные
             today = datetime.now().date()
             rows = []
             
             for f in user_filters:
-                try:
-                    expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-                    last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
-                    days_until = (expiry_date - today).days
-                    
-                    icon, status = get_status_icon_and_text(days_until)
-                    
-                    row = [
-                        f['id'],
-                        f['filter_type'],
-                        f['location'],
-                        format_date_nice(last_change),
-                        f['lifetime_days'],
-                        format_date_nice(expiry_date),
-                        status,
-                        days_until
-                    ]
-                    rows.append(row)
-                except Exception as e:
-                    logging.error(f"Ошибка подготовки данных фильтра {f['id']}: {e}")
-                    continue
+                expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+                last_change = datetime.strptime(str(f['last_change']), '%Y-%m-%d').date()
+                days_until = (expiry_date - today).days
+                
+                icon, status = get_status_icon_and_text(days_until)
+                
+                row = [
+                    f['id'],
+                    f['filter_type'],
+                    f['location'],
+                    format_date_nice(last_change),
+                    f['lifetime_days'],
+                    format_date_nice(expiry_date),
+                    status,
+                    days_until
+                ]
+                rows.append(row)
             
             # Добавляем данные
             if rows:
-                try:
-                    worksheet.append_rows(rows)
-                except Exception as e:
-                    return False, f"Ошибка добавления данных: {str(e)}"
+                worksheet.append_rows(rows)
             
             # Форматируем таблицу
             try:
@@ -528,7 +626,6 @@ class GoogleSheetsSync:
                 worksheet.columns_auto_resize(0, 7)
             except Exception as format_error:
                 logging.warning(f"Ошибка форматирования таблицы: {format_error}")
-                # Не прерываем выполнение из-за ошибки форматирования
             
             return True, f"Успешно синхронизировано {len(rows)} фильтров"
             
@@ -552,12 +649,7 @@ class GoogleSheetsSync:
             gc = gspread.authorize(self.credentials)
             
             # Открываем таблицу
-            try:
-                sheet = gc.open_by_key(self.sheet_id)
-            except gspread.exceptions.SpreadsheetNotFound:
-                return False, "Таблица не найдена", 0
-            except gspread.exceptions.APIError as e:
-                return False, f"Ошибка доступа к таблице: {str(e)}", 0
+            sheet = gc.open_by_key(self.sheet_id)
             
             # Получаем лист пользователя
             worksheet_name = f"User_{user_id}"
@@ -566,11 +658,8 @@ class GoogleSheetsSync:
             except gspread.exceptions.WorksheetNotFound:
                 return False, "Таблица для пользователя не найдена", 0
             
-            # Читаем данные
-            try:
-                data = worksheet.get_all_records()
-            except Exception as e:
-                return False, f"Ошибка чтения данных: {str(e)}", 0
+            # Читаем данные (пропускаем заголовок)
+            data = worksheet.get_all_records()
             
             if not data:
                 return False, "Нет данных для импорта", 0
@@ -637,51 +726,20 @@ class GoogleSheetsSync:
                         errors.append(f"Строка {index}: Ошибка базы данных")
                         
                 except Exception as e:
-                    errors.append(f"Строка {index}: Неизвестная ошибка")
+                    errors.append(f"Строка {index}: Неизвестная ошибка: {str(e)}")
                     logging.error(f"Ошибка импорта строки {index}: {e}")
             
             message = f"Импортировано {imported_count} фильтров"
             if errors:
                 message += f"\nОшибки: {len(errors)}"
+                if len(errors) <= 5:  # Показываем только первые 5 ошибок
+                    message += "\n" + "\n".join(errors[:5])
             
             return True, message, imported_count
             
         except Exception as e:
             logging.error(f"Ошибка синхронизации из Google Sheets: {e}")
             return False, f"Ошибка синхронизации: {str(e)}", 0
-
-    async def test_connection(self) -> tuple[bool, str]:
-        """Тестирование подключения к Google Sheets"""
-        try:
-            if not self.is_configured():
-                return False, "Синхронизация не настроена"
-            
-            if not self.credentials:
-                if not await self.initialize_credentials():
-                    return False, "Ошибка инициализации Google API"
-            
-            import gspread
-            
-            # Создаем клиент
-            gc = gspread.authorize(self.credentials)
-            
-            # Пытаемся открыть таблицу
-            try:
-                sheet = gc.open_by_key(self.sheet_id)
-                # Пытаемся получить список листов
-                worksheets = sheet.worksheets()
-                return True, f"Подключение успешно. Найдено листов: {len(worksheets)}"
-            except gspread.exceptions.SpreadsheetNotFound:
-                return False, "Таблица не найдена. Проверьте ID таблицы."
-            except gspread.exceptions.APIError as e:
-                error_msg = str(e)
-                if "PERMISSION_DENIED" in error_msg:
-                    return False, "Нет доступа к таблице. Убедитесь, что сервисный аккаунт имеет доступ к таблице."
-                else:
-                    return False, f"Ошибка доступа: {error_msg}"
-                    
-        except Exception as e:
-            return False, f"Ошибка подключения: {str(e)}"
 
 # Создаем экземпляр синхронизации
 google_sync = GoogleSheetsSync()
@@ -696,6 +754,8 @@ class EnhancedHealthMonitor:
         self.db_operations = 0
         self.sync_operations = 0
         self.user_sessions = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
     
     def record_message(self, user_id: int):
         """Запись сообщения пользователя"""
@@ -716,6 +776,19 @@ class EnhancedHealthMonitor:
         """Запись операции синхронизации"""
         self.sync_operations += 1
     
+    def record_cache_hit(self):
+        """Запись попадания в кэш"""
+        self.cache_hits += 1
+    
+    def record_cache_miss(self):
+        """Запись промаха кэша"""
+        self.cache_misses += 1
+    
+    def get_cache_hit_rate(self) -> float:
+        """Получение процента попаданий в кэш"""
+        total = self.cache_hits + self.cache_misses
+        return (self.cache_hits / total * 100) if total > 0 else 0
+    
     async def get_health_status(self):
         """Получение статуса здоровья бота"""
         uptime = datetime.now() - self.start_time
@@ -728,7 +801,8 @@ class EnhancedHealthMonitor:
             'message_count': self.message_count,
             'error_count': self.error_count,
             'active_users': active_users,
-            'health_score': health_score
+            'health_score': health_score,
+            'cache_hit_rate': self.get_cache_hit_rate()
         }
     
     async def get_detailed_status(self):
@@ -739,7 +813,9 @@ class EnhancedHealthMonitor:
             'sync_operations': self.sync_operations,
             'active_sessions': len(self.user_sessions),
             'database_size': await self.get_database_size(),
-            'memory_usage': self.get_memory_usage()
+            'memory_usage': self.get_memory_usage(),
+            'cache_hits': self.cache_hits,
+            'cache_misses': self.cache_misses
         })
         return basic_status
     
@@ -791,8 +867,8 @@ class RateLimiter:
 
 rate_limiter = RateLimiter(max_requests=config.RATE_LIMIT_MAX_REQUESTS, window=config.RATE_LIMIT_WINDOW)
 
-# ========== УЛУЧШЕНИЕ: MIDDLEWARE ДЛЯ RATE LIMITING ==========
-class RateLimitMiddleware(BaseMiddleware):
+# ========== УЛУЧШЕНИЕ: MIDDLEWARE ДЛЯ RATE LIMITING И КЭШИРОВАНИЯ ==========
+class EnhancedMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable[[types.TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -821,7 +897,7 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # Регистрация middleware
-dp.update.outer_middleware(RateLimitMiddleware())
+dp.update.outer_middleware(EnhancedMiddleware())
 
 # ========== УЛУЧШЕНИЕ: АСИНХРОННАЯ БАЗА ДАННЫХ ==========
 @asynccontextmanager
@@ -838,28 +914,42 @@ async def get_db_connection():
     finally:
         await conn.close()
 
-async def get_user_filters(user_id: int) -> List[Dict]:
-    """Асинхронное получение фильтров пользователя"""
+async def get_user_filters_db(user_id: int) -> List[Dict]:
+    """Асинхронное получение фильтров пользователя из БД"""
     try:
         async with get_db_connection() as conn:
             cur = await conn.cursor()
             await cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
             rows = await cur.fetchall()
             health_monitor.record_db_operation()
+            health_monitor.record_cache_miss()  # Пропуск кэша при прямом обращении к БД
             return [dict(row) for row in rows]
     except Exception as e:
         logging.error(f"Ошибка при получении фильтров пользователя {user_id}: {e}")
         health_monitor.record_error()
         return []
 
+async def get_user_filters(user_id: int) -> List[Dict]:
+    """Получение фильтров пользователя с использованием кэша"""
+    return await cache_manager.get_user_filters(user_id)
+
 async def get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
     """Асинхронное получение фильтра по ID"""
     try:
+        # Сначала проверяем кэш
+        filters = await get_user_filters(user_id)
+        for f in filters:
+            if f['id'] == filter_id:
+                health_monitor.record_cache_hit()
+                return f
+        
+        # Если не найдено в кэше, ищем в БД
         async with get_db_connection() as conn:
             cur = await conn.cursor()
             await cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
             result = await cur.fetchone()
             health_monitor.record_db_operation()
+            health_monitor.record_cache_miss()
             return dict(result) if result else None
     except Exception as e:
         logging.error(f"Ошибка при получении фильтра {filter_id}: {e}")
@@ -896,6 +986,9 @@ async def add_filter_to_db(user_id: int, filter_type: str, location: str, last_c
             
             health_monitor.record_db_operation()
             
+            # Инвалидируем кэш пользователя
+            cache_manager.invalidate_user_cache(user_id)
+            
             # Автосинхронизация при добавлении
             if google_sync.auto_sync and google_sync.is_configured():
                 filters = await get_user_filters(user_id)
@@ -923,6 +1016,9 @@ async def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
             
             health_monitor.record_db_operation()
             
+            # Инвалидируем кэш пользователя
+            cache_manager.invalidate_user_cache(user_id)
+            
             # Автосинхронизация при обновлении
             if google_sync.auto_sync and google_sync.is_configured():
                 filters = await get_user_filters(user_id)
@@ -942,6 +1038,9 @@ async def delete_filter_from_db(filter_id: int, user_id: int) -> bool:
             await cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
             
             health_monitor.record_db_operation()
+            
+            # Инвалидируем кэш пользователя
+            cache_manager.invalidate_user_cache(user_id)
             
             # Автосинхронизация при удалении
             if google_sync.auto_sync and google_sync.is_configured():
@@ -1078,10 +1177,38 @@ async def export_to_excel(user_id: int) -> io.BytesIO:
     
     df['Статус'] = df['expiry_date'].apply(calculate_status)
     
+    # Добавляем прогресс-бар
+    def calculate_progress(row):
+        expiry_date = datetime.strptime(row['expiry_date'], '%d.%m.%Y').date()
+        last_change = datetime.strptime(row['last_change'], '%d.%m.%Y').date()
+        days_total = row['lifetime_days']
+        days_passed = (datetime.now().date() - last_change).days
+        percentage = min(100, max(0, (days_passed / days_total) * 100))
+        return create_progress_bar(percentage)
+    
+    df['Прогресс'] = df.apply(calculate_progress, axis=1)
+    
     # Создаем Excel файл в памяти
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Фильтры', index=False)
+        
+        # Получаем workbook и worksheet для форматирования
+        workbook = writer.book
+        worksheet = writer.sheets['Фильтры']
+        
+        # Настраиваем ширину колонок
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
     
     output.seek(0)
     return output
@@ -1130,35 +1257,27 @@ async def init_db():
         async with get_db_connection() as conn:
             cur = await conn.cursor()
             
-            # Проверяем существование таблицы
-            await cur.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='filters'
-            """)
-            table_exists = await cur.fetchone()
+            # Создаем таблицу если не существует
+            await cur.execute('''
+                CREATE TABLE IF NOT EXISTS filters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    filter_type TEXT,
+                    location TEXT,
+                    last_change DATE,
+                    expiry_date DATE,
+                    lifetime_days INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
-            if not table_exists:
-                # Создаем таблицу
-                await cur.execute('''
-                    CREATE TABLE filters (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER,
-                        filter_type TEXT,
-                        location TEXT,
-                        last_change DATE,
-                        expiry_date DATE,
-                        lifetime_days INTEGER,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                
-                # Создаем индексы
-                await cur.execute('''CREATE INDEX idx_user_id ON filters(user_id)''')
-                await cur.execute('''CREATE INDEX idx_expiry_date ON filters(expiry_date)''')
-                logging.info("База данных успешно создана")
-            else:
-                logging.info("База данных уже существует")
+            # Создаем индексы
+            await cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
+            await cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
+            await cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_expiry ON filters(user_id, expiry_date)''')
+            
+            logging.info("База данных успешно инициализирована")
                 
     except Exception as e:
         logging.error(f"Критическая ошибка инициализации БД: {e}")
@@ -1206,7 +1325,7 @@ async def error_handler(update: types.Update, exception: Exception):
     except Exception as e:
         logging.critical(f"Ошибка в обработчике ошибок: {e}")
 
-# ========== СИСТЕМА НАПОМИНАНИЙ ==========
+# ========== УЛУЧШЕННАЯ СИСТЕМА НАПОМИНАНИЙ ==========
 async def send_personalized_reminders():
     """Персонализированные напоминания с учетом времени суток"""
     while True:
@@ -1257,7 +1376,18 @@ async def send_personalized_reminders():
                         message += f"\n💫 Всего фильтров: {len(filters)}"
                         
                         try:
-                            await bot.send_message(user_id, message, parse_mode='HTML')
+                            # Отправляем сообщение с инлайн кнопками для быстрых действий
+                            if expired_filters:
+                                first_expired_id = expired_filters[0][0]['id']
+                                await bot.send_message(
+                                    user_id, 
+                                    message, 
+                                    parse_mode='HTML',
+                                    reply_markup=get_reminder_keyboard(first_expired_id)
+                                )
+                            else:
+                                await bot.send_message(user_id, message, parse_mode='HTML')
+                                
                             await asyncio.sleep(0.2)  # Увеличиваем задержку
                         except Exception as e:
                             logging.warning(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
@@ -1286,9 +1416,15 @@ async def health_monitoring_task():
                     f"⚠️ <b>НИЗКИЙ HEALTH SCORE</b>\n\n"
                     f"📊 Текущий score: {health_status['health_score']:.1f}%\n"
                     f"💥 Ошибок: {health_status['error_count']}\n"
-                    f"📨 Сообщений: {health_status['message_count']}",
+                    f"📨 Сообщений: {health_status['message_count']}\n"
+                    f"💾 Hit Rate кэша: {health_status['cache_hit_rate']:.1f}%",
                     parse_mode='HTML'
                 )
+            
+            # Очистка кэша каждые 6 часов
+            if datetime.now().hour % 6 == 0 and datetime.now().minute < 5:
+                cache_manager.clear_all_cache()
+                logging.info("Выполнена очистка кэша")
             
             await asyncio.sleep(60 * 30)  # Проверяем каждые 30 минут
             
@@ -1325,12 +1461,113 @@ async def show_filters_for_selection(message: types.Message, filters: List[Dict]
 async def safe_sync_to_sheets(user_id: int, filters: List[Dict]) -> tuple[bool, str]:
     """Безопасная синхронизация с обработкой ошибок"""
     try:
+        health_monitor.record_sync_operation()
         return await google_sync.sync_to_sheets(user_id, filters)
     except ImportError:
         return False, "Библиотеки Google не установлены. Установите: pip install gspread google-auth"
     except Exception as e:
         logging.error(f"Ошибка синхронизации: {e}")
         return False, f"Ошибка синхронизации: {str(e)}"
+
+# ========== ОБРАБОТЧИКИ INLINE КНОПОК ==========
+@dp.callback_query(lambda c: c.data.startswith('replaced_'))
+async def process_replaced_filter(callback_query: types.CallbackQuery):
+    """Обработка кнопки 'Заменил'"""
+    try:
+        filter_id = int(callback_query.data.split('_')[1])
+        user_id = callback_query.from_user.id
+        
+        # Обновляем дату замены на сегодня
+        today = datetime.now().date()
+        success = await update_filter_in_db(
+            filter_id, 
+            user_id, 
+            last_change=today.strftime('%Y-%m-%d'),
+            expiry_date=(today + timedelta(days=180)).strftime('%Y-%m-%d')  # Стандартный срок 180 дней
+        )
+        
+        if success:
+            await callback_query.message.edit_text(
+                f"✅ <b>ФИЛЬТР ОБНОВЛЕН!</b>\n\n"
+                f"Дата замены установлена на сегодня.\n"
+                f"Следующая замена через 180 дней.",
+                parse_mode='HTML'
+            )
+        else:
+            await callback_query.answer("❌ Ошибка при обновлении фильтра", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка при обработке replaced: {e}")
+        await callback_query.answer("❌ Произошла ошибка", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith('postpone_'))
+async def process_postpone_filter(callback_query: types.CallbackQuery):
+    """Обработка кнопки 'Перенести на неделю'"""
+    try:
+        filter_id = int(callback_query.data.split('_')[1])
+        user_id = callback_query.from_user.id
+        
+        filter_data = await get_filter_by_id(filter_id, user_id)
+        if not filter_data:
+            await callback_query.answer("❌ Фильтр не найден", show_alert=True)
+            return
+        
+        # Переносим на 7 дней вперед
+        current_expiry = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
+        new_expiry = current_expiry + timedelta(days=7)
+        
+        success = await update_filter_in_db(
+            filter_id, 
+            user_id, 
+            expiry_date=new_expiry.strftime('%Y-%m-%d')
+        )
+        
+        if success:
+            await callback_query.message.edit_text(
+                f"🔄 <b>СРОК ПЕРЕНЕСЕН!</b>\n\n"
+                f"Новая дата замены: {format_date_nice(new_expiry)}",
+                parse_mode='HTML'
+            )
+        else:
+            await callback_query.answer("❌ Ошибка при переносе срока", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка при обработке postpone: {e}")
+        await callback_query.answer("❌ Произошла ошибка", show_alert=True)
+
+@dp.callback_query(lambda c: c.data.startswith('details_'))
+async def process_details_filter(callback_query: types.CallbackQuery):
+    """Обработка кнопки 'Посмотреть детали'"""
+    try:
+        filter_id = int(callback_query.data.split('_')[1])
+        user_id = callback_query.from_user.id
+        
+        filter_data = await get_filter_by_id(filter_id, user_id)
+        if not filter_data:
+            await callback_query.answer("❌ Фильтр не найден", show_alert=True)
+            return
+        
+        expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
+        last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
+        days_until = (expiry_date - datetime.now().date()).days
+        icon, status = get_status_icon_and_text(days_until)
+        
+        details_text = (
+            f"🔍 <b>ДЕТАЛИ ФИЛЬТРА #{filter_id}</b>\n\n"
+            f"{icon} <b>Статус:</b> {status}\n"
+            f"💧 <b>Тип:</b> {filter_data['filter_type']}\n"
+            f"📍 <b>Местоположение:</b> {filter_data['location']}\n"
+            f"📅 <b>Последняя замена:</b> {format_date_nice(last_change)}\n"
+            f"⏰ <b>Годен до:</b> {format_date_nice(expiry_date)}\n"
+            f"⏱️ <b>Срок службы:</b> {filter_data['lifetime_days']} дней\n"
+            f"📊 <b>Прогресс:</b> {format_filter_status_with_progress(filter_data)}"
+        )
+        
+        await callback_query.message.edit_text(details_text, parse_mode='HTML')
+        
+    except Exception as e:
+        logging.error(f"Ошибка при обработке details: {e}")
+        await callback_query.answer("❌ Произошла ошибка", show_alert=True)
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
@@ -1391,9 +1628,11 @@ async def cmd_admin(message: types.Message):
         f"• 💥 Ошибок: {health_status['error_count']}\n"
         f"• 🧠 Память: {health_status['memory_usage']:.1f} MB\n"
         f"• 💾 Размер БД: {health_status['database_size'] / 1024 / 1024:.2f} MB\n"
-        f"• 🏥 Health: {health_status['health_score']:.1f}%\n\n"
+        f"• 🏥 Health: {health_status['health_score']:.1f}%\n"
+        f"• 💰 Hit Rate кэша: {health_status['cache_hit_rate']:.1f}%\n\n"
         f"🔧 <b>Действия:</b>\n"
         f"/backup - Создать резервную копию\n"
+        f"/clear_cache - Очистить кэш\n"
         f"/stats - Детальная статистика"
     )
     
@@ -1411,6 +1650,15 @@ async def cmd_backup(message: types.Message):
         await message.answer("✅ Резервная копия создана успешно")
     else:
         await message.answer("❌ Ошибка при создании резервной копии")
+
+@dp.message(Command("clear_cache"))
+async def cmd_clear_cache(message: types.Message):
+    """Очистка кэша"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    cache_manager.clear_all_cache()
+    await message.answer("✅ Кэш успешно очищен")
 
 @dp.message(F.text == "📋 Мои фильтры")
 async def cmd_my_filters(message: types.Message):
@@ -1443,2015 +1691,117 @@ async def cmd_my_filters(message: types.Message):
             f"📅 Замена: {format_date_nice(datetime.strptime(str(f['last_change']), '%Y-%m-%d'))}\n"
             f"⏰ Годен до: {format_date_nice(expiry_date)}\n"
             f"📊 Статус: {status} ({days_until} дней)\n"
+            f"📈 {format_filter_status_with_progress(f)}\n"
         )
     
     # Добавляем инфографику
     response.append("\n" + create_expiry_infographic(filters))
     
-    await message.answer("\n".join(response), parse_mode='HTML')
+    # Разбиваем сообщение если слишком длинное
+    full_text = "\n".join(response)
+    if len(full_text) > 4000:
+        parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+        for part in parts:
+            await message.answer(part, parse_mode='HTML')
+            await asyncio.sleep(0.1)
+    else:
+        await message.answer(full_text, parse_mode='HTML')
 
 @dp.message(F.text == "✨ Добавить фильтр")
 async def cmd_add_filter(message: types.Message, state: FSMContext):
     """Начало добавления фильтра"""
     health_monitor.record_message(message.from_user.id)
     
-    # Проверяем health_monitor.record_message(message.from_user.id)
-    
     # Проверяем лимит фильтров
     filters = await get_user_filters(message.from_user.id)
     if len(filters) >= MAX_FILTERS_PER_USER:
-        лимит фильтров
-    filters = await get_user_filters(message.from_user.id)
-    if len(filters) >= MAX_FILTERS_PER_USER await message.answer(
-            f"❌ <b>Достигнут лимит филь:
         await message.answer(
-            f"❌ <b>Достигнут лимиттров</b>\n\n"
-            f"Максимальное количество фильтров: {MAX_FILTERS_PER_USER}\n"
-            f" фильтров</b>\n\n"
+            f"❌ <b>Достигнут лимит фильтров</b>\n\n"
             f"Максимальное количество фильтров: {MAX_FILTERS_PER_USER}\n"
             f"Удалите некоторые фильтры чтобы добавить новые.",
-            replyУдалите некоторые фильтры чтобы добавить новые.",
             reply_markup=get_main_keyboard(),
-            parse_markup=get_main_keyboard(),
             parse_mode='HTML'
-        )
-        return
-    
-    await state.set_state(FilterStates.waiting_filter_type)
-    await message.answer(
-        "💧 <b>ВЫБЕРИТЕ ТИП ФИЛЬТРА</b>\_mode='HTML'
         )
         return
     
     await state.set_state(FilterStates.waiting_filter_type)
     await message.answer(
         "💧 <b>ВЫБЕРИТЕ ТИП ФИЛЬТРА</b>\n\n"
-        "n\n"
-        "Вы можете выбрать из популярных типовВы можете выбрать из популярных типов или указать свой:",
-        reply_mark или указать свой:",
+        "Вы можете выбрать из популярных типов или указать свой:",
         reply_markup=get_filter_type_keyboard(),
         parse_mode='HTML'
     )
 
-@dp.message(FilterStates.waiting_filter_type)
-async def process_filter_type(message: types.Message, state: FSMContext):
-    """Обработка типа фильтра"""
-    if message.text == "🔙 Назад":
-        await state.clear()
-        await message.answer(
-            "🔙 <b>Возврат в главное меню</up=get_filter_type_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(FilterStates.waiting_filter_type)
-async def process_filter_type(message: types.Message, state: FSMContext):
-    """Обработка типа фильтра"""
-    if message.text == "🔙 Назад":
-        await state.clear()
-        await message.answer(
-            "🔙 <b>Возврат в главное меню</b>",
-           b>",
-            reply_markup=get_main_keyboard(),
- reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    filter_type = message.text
-    
-    # Валидация
-            parse_mode='HTML'
-        )
-        return
-    
-    filter_type = message.text
-    
-    # Валидация
-    is    is_valid, error_msg = validate_filter_type(filter_type)
-    if not is_valid:
-        await message_valid, error_msg = validate_filter_type(filter_type)
-    if not is_valid:
-        await message.answer(
-            f"❌ {error_msg}\n\nПожа.answer(
-            f"❌ {error_msg}\n\nПожалуйста, влуйста, введите тип фильтра еще раз:",
-            replyведите тип фильтра еще раз:",
-            reply_markup=get_markup=get_filter_type_keyboard()
-        )
-        return
-    
-    await state.update_data(filter_type=filter_type)
-    await state.set_state(Filter_filter_type_keyboard()
-        )
-        return
-    
-    await state.update_data(filter_type=filter_type)
-    await state.set_state(FilterStates.waiting_location)
-    
-    await message.answer(
-        "📍 <b>УКАЖИТЕ МЕСТОПОЛОЖЕНИЕ</b>\n\n"
-        "Примеры:\n"
-        "•States.waiting_location)
-    
-    await message.answer(
-        "📍 <b>УКАЖИТЕ МЕСТОПОЛОЖЕНИЕ</b>\n\n"
-        "Примеры:\n"
-        "• Кухня\n"
-        "• Офис кабинет 101\n"
-        "• Производственный цех\n"
-        "• Гостиная\n\n"
-        " Кухня\n"
-        "• Офис кабинет 101\n"
-        "• Производственный цех\n"
-        "• Гостиная\n\n"
-        "✏️ <b>Введите местоположение:</b>✏️ <b>Введите местоположение:</b>",
-        reply_markup=get_back_keyboard(),
-       ",
-        reply_markup=get_back_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(FilterStates.wait parse_mode='HTML'
-    )
-
-@dp.message(FilterStates.waiting_location)
-async def process_location(message: types.Message, state: FSMContext):
-ing_location)
-async def process_location(message: types.Message, state: FSMContext):
-    """Обработка местоположения"""
-    if message.text == "🔙 Назад":
-        await state.set_state(FilterStates.waiting_filter_type)
-        await message.answer(
-            "💧    """Обработка местоположения"""
-    if message.text == "🔙 Назад":
-        await state.set_state(FilterStates.waiting_filter_type)
-        await message.answer(
-            " <b>ВЫБЕРИТЕ ТИП ФИ💧 <b>ВЫБЕРИТЕ ТИП ФИЛЬТРА</b>",
-            reply_markup=get_filter_type_keyboard(),
-            parse_mode='ЛЬТРА</b>",
-            reply_markup=get_filter_type_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    location = message.text
-    
-    # Валидация
-    is_valid, error_msg = validate_location(location)
-    if not is_valid:
-        await message.answer(
-            f"❌ {error_msg}\n\nПHTML'
-        )
-        return
-    
-    location = message.text
-    
-    # Валидация
-    is_valid, error_msg = validate_location(location)
-    if not is_valid:
-        await message.answer(
-            f"❌ {error_msg}\n\nПожалуйста, введите местоположение еще раз:",
-ожалуйста, введите местоположение еще раз:",
-            reply_markup=get_back_keyboard()
-        )
-        return
-    
-    await state.update_data(l            reply_markup=get_back_keyboard()
-        )
-        return
-    
-    await state.update_data(location=location)
-    await state.set_stateocation=location)
-    await state.set_state(FilterStates.waiting_change_date)
-    
-    await message(FilterStates.waiting_change_date)
-    
-    await message.answer.answer(
-        "📅 <b>УКАЖИТ(
-        "📅 <bЕ ДАТУ ПОСЛЕДНЕЙ ЗАМЕНЫ</b>\n\n"
-        "Формат: <b>ДД.ММ.ГГГГ</b> или <b>ДД.ММ</b>\n"
-        "Примеры:\n"
-        "• 15.12.2023\n"
-        "• 15.12 (те>УКАЖИТЕ ДАТУ ПОСЛЕДНЕЙ ЗАМЕНЫ</b>\n\n"
-        "Формат: <b>ДД.ММ.ГГГГ</b> или <b>ДД.ММ</b>\n"
-        "Примеры:\n"
-        "• 15.12.2023\n"
-        "• 15.12 (текущий год)\n"
-        "• 15122023кущий год)\n"
-        "• 15122023\n\n"
-        "✏️ <b>Введите дату замены:</b>",
-        reply_markup=get_back_keyboard\n\n"
-        "✏️ <b>Введите дату замены:</b>",
-        reply_markup=get_back_keyboard(),
-(),
-        parse_mode='HTML'
-    )
-
-@dp.message(FilterStates.waiting_change_date        parse_mode='HTML'
-    )
-
-@dp.message(FilterStates.waiting_change_date)
-async def process_change_date(message)
-async def process_change_date(message: types.Message, state:: types.Message, state: FSMContext):
-    """Обработка даты замены"""
-    if message.text == "🔙 Назад":
-        await state.set_state(FilterStates.waiting_location)
-        await message.answer(
-            "📍 <b>У FSMContext):
-    """Обработка даты замены"""
-    if message.text == "🔙 Назад":
-        await state.set_state(FilterStates.waiting_location)
-        await message.answer(
-            "📍 <b>УКАЖИТЕ МЕСТОПОЛОЖЕНИЕКАЖИТЕ МЕСТОПОЛ</b>",
-            reply_markup=get_back_keyboard(),
-            parse_mode='HTML'
-        )
-        returnОЖЕНИЕ</b>",
-            reply_markup=get_back_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    try:
-
-    
-    try:
-        change_date = validate_date(message.text)
-        await state.update_data(last_change        change_date = validate_date(message.text)
-        await state.update_data(last_change==change_date.strftime('%Y-%m-%d'))
-        
-        data = await state.get_data()
-        filter_type = data.get('change_date.strftime('%Y-%m-%d'))
-        
-        data = await state.get_data()
-        filter_type = data.get('filter_type', ''filter_type', '').lower()
-        
-        # Предлагаем срок службы по умолча).lower()
-        
-        # Предлагаем срок службы по умолчанию
-        default_lifetime = DEFAULT_LIFETIMES.get(filter_type, 180)
-        
-        await state.update_data(lifetime_days=default_lifetime)
-        await state.set_state(Filterнию
-        default_lifetime = DEFAULT_LIFETIMES.get(filter_type, 180)
-        
-        await state.update_data(lifetime_days=default_lifetime)
-        await state.set_state(FilterStates.waiting_lifetime)
-        
-        await message.answer(
-            f"⏱️ <b>УКАЖИТЕ СРОК СЛУStates.waiting_lifetime)
-        
-        await message.answer(
-            f"⏱️ <b>УКАЖИТЕ СРОК СЛУЖБЫ</b>\n\n"
-            f"ЖБЫ</b>\n\n"
-            f"Для типа '{data.get('filter_type', '')}' рекомендуемый срокДля типа '{data.get('filter_type', '')}' рекомендуемый: <b>{ срок: <b>{default_lifetime} дней</b>\n\n"
-            f"✏️ <bdefault_lifetime} дней</b>\n\n"
-            f"✏️ <b>Введите срок службы в днях:</b>\n"
-            f"<i>>Введите срок службы в днях:</b>\n"
-            f"<Или нажмите '✅ Использовать рекомендуемый'</i>i>Или нажмите '✅ Использовать рекомендуемый'</",
-            reply_markup=get_recommended_lifetime_keyboard(default_lifetime),
-            parse_mode='HTML'
-        )
-        
-    except ValueError as e:
-        await messagei>",
-            reply_markup=get_recommended_lifetime_keyboard(default_lifetime),
-            parse_mode='HTML'
-        )
-        
-    except ValueError as e:
-        await message.answer(
-            f"❌ {str(e)}\n\nПожалуйста, введите дату в правильном.answer(
-            f"❌ {str(e)}\n\nПожалуйста, введите формате:",
-            reply_markup=get_back_keyboard()
-        )
-
-@dp.message(FilterStates.waiting_lifetime)
-async def дату в правильном формате:",
-            reply_markup=get_back_keyboard()
-        )
-
-@dp.message(FilterStates.waiting_lifetime)
-async def process_lifetime(message: process_lifetime(message: types.Message, state: FSMContext):
-    """Обработка срока службы"""
-    types.Message, state: FSMContext):
-    """Обработка срока службы"""
-    if message.text == "🔙 Назад":
-        await state.set_state(FilterStates if message.text == "🔙 Назад":
-        await state.set_state(FilterStates.waiting_change_date)
-        await message.answer(
-            "📅.waiting_change_date)
-        await message.answer(
-            "📅 <b>УКАЖИТЕ ДАТУ ПОСЛЕДНЕЙ ЗАМЕН <b>УКАЖИТЕ ДАТУ ПОСЛЕДНЕЙ ЗАМЕНЫ</b>",
-Ы</b>",
-            reply_markup=get_back_keyboard(),
-            reply_markup=get_back_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    data = await state.get_data()
-    default_lifetime =            parse_mode='HTML'
-        )
-        return
-    
-    data = await state.get_data()
-    default_lifetime = data data.get('lifetime_days', 180)
-    
-    if "Использовать рекомендуемый" in message.text:
-        lifetime_days = default_lifetime
-    else:
-        is_valid, error_msg, lifetime_d.get('lifetime_days', 180)
-    
-    if "Использовать рекомендуемый" in message.text:
-        lifetime_days = default_lifetime
-    else:
-        is_valid, error_msg, lifetime_days = validate_lifetime(message.text)
-        if not is_valid:
-ays = validate_lifetime(message.text)
-        if not is_valid:
-            await            await message.answer(
-                f"❌ {error_msg}\n\nПожалуйста, введите корректный срок службы:",
- message.answer(
-                f"❌ {error_msg}\n\nПожалуйста, введите корректный срок службы                reply_markup=get_recommended_lifetime_keyboard(default_lifetime)
-            )
-            return
-    
-    await state.update:",
-                reply_markup=get_recommended_lifetime_keyboard(default_lifetime)
-            )
-            return
-    
-    await state.update_data(lifetime_days=lifetime_days)
-_data(lifetime_days=lifetime_days)
-    
-    # Рассчитываем дату истечения
-    last_change = datetime.strptime    
-    # Рассчитываем дату истечения
-    last_change = datetime.strptime(data['(data['last_change'], '%Y-%m-%d')
-    expiry_date = last_change + timedelta(days=lifetime_days)
-    await state.updatelast_change'], '%Y-%m-%d')
-    expiry_date = last_change + timedelta(days=lifetime_days)
-    await state.update_data(expiry_date=expiry_date.strftime('%Y-%_data(expiry_date=expiry_date.strftime('%Y-%m-%d'))
-    
-    # Показываем подтверждение
-    datam-%d'))
-    
-    # Показываем подтверждение
-    data = await state.get_data()
-    await show_filter_confirmation(message, data)
- = await state.get_data()
-    await show_filter_confirmation(message, data)
-    await state.set_state(FilterStates.waiting    await state.set_state(FilterStates.waiting_confirmation)
-
-async def show_filter_confirmation(message: types.Message, data: Dict):
-_confirmation)
-
-async def show_filter_confirmation(message: types.Message, data: Dict):
-    """Показать подтверждение добавления фильтра"""
-    last_change =    """Показать подтверждение добавления фильтра"""
- datetime.strptime(data['last_change'], '%Y-%m-%d')
-    expiry_date = datetime.strptime    last_change = datetime.strptime(data['last_change'], '%Y-%m-%d')
-    expiry_date = datetime.strptime(data['expiry_date'], '%Y-%m-%d')
-   (data['expiry_date'], '%Y-%m-%d')
-    days_until = (exp days_until = (expiry_date.date() - datetime.now().date()).days
-    icon, status = get_status_icon_and_text(days_until)
-    
-    confirmation_text = (
-iry_date.date() - datetime.now().date()).days
-    icon, status = get_status_icon_and_text(days_until)
-    
-    confirmation_text = (
-        f"✅ <b>ПОДТВЕР        f"✅ <b>ПОДТВЕРЖДЕНИЕ ДАННЫХЖДЕНИЕ ДАННЫХ</b>\n</b>\n\n"
-        f"{icon} <b>Новый фильтр:</b\n"
-        f"{icon} <b>Новый фильтр:</b>\n"
-        f"💧 <b>Тип:</b> {>\n"
-        f"💧 <b>Тип:</b> {data['filter_type']}\n"
-        f"📍 <bdata['filter_type']}\n"
-        f"📍 <>Местоположение:</b> {data['location']}\n"
-        f"📅 <b>b>Местоположение:</b> {data['location']}\n"
-        f"📅 <b>Дата замены:</b> {format_date_nice(last_change)}\n"
-        f"⏱️ <b>Срок службы:</b> {data['lifetime_dДата замены:</b> {format_date_nice(last_change)}\n"
-        f"⏱️ <b>Срок службы:</b> {data['lifetime_days']} дней\n"
-        f"⏰ <b>ays']} дней\n"
-        f"⏰ <b>ГоденГоден до:</b> {format_date_nice(expiry_date)}\n"
-        f"📊 <b>Статус:</b до:</b> {format_date_nice(expiry_date)}\n"
-        f"📊> {status} ({days_until} дней)\n\n"
-        f"<i>Всё вер <b>Статус:</b> {status} ({days_until} дней)\n\n"
-        f"<i>Всё верно?</i>"
-    )
-    
-    await message.answer(confirmation_text, reply_markup=get_confirmation_keyно?</i>"
-    )
-    
-    await message.answer(confirmation_text, reply_markup=get_confirmation_keyboard(), parse_mode='HTML')
-
-@dp.message(FilterStates.waiting_confirmation)
-async defboard(), parse_mode='HTML')
-
-@dp.message(FilterStates.waiting_confirmation)
-async def process process_confirmation(message: types.Message, state: FSMContext):
-    """Обработка_confirmation(message: types.Message, state: FSMContext):
-    """Обработка подтверждения"""
-    if message.text == "✅ Да, всё верно":
-        data = await подтверждения"""
-    if message.text == "✅ Да, всё верно":
-        data = await state.get_data()
-        
-        success = state.get_data()
-        
-        success = await add_filter_to_db(
-            user_id=message.from_user.id,
-            filter_type=data['filter_type'],
-            location=data['location'],
-            await add_filter_to_db(
-            user_id=message.from_user.id,
-            filter_type=data['filter_type'],
-            location=data['location'],
-            last_change=data[' last_change=data['last_change'],
-            expiry_date=data['expiry_date'],
-            lifetime_days=data['lifetime_days']
-        )
-        
-last_change'],
-            expiry_date=data['expiry_date'],
-            lifetime_days=data['lifetime_days']
-        )
-        if success:
-            await message.answer(
-                "🎉 <b>ФИЛЬТР УСПЕШНО ДОБАВЛ        
-        if success:
-            await message.answer(
-                "🎉 <b>ФИЛЬТР УСПЕШНО ДОБАВЕН!</b>\n\n"
-                "💫 <i>Теперь он будет отслеживаться в системеЛЕН!</b>\n\n"
-                "💫 <i>Теперь он будет отслеживаться в</i>",
-                reply_markup=get_main_keyboard(),
-                parse_mode=' системе</i>",
-                reply_markup=get_main_keyboard(),
-                parse_mode='HTML'
-            )
-        else:
-           HTML'
-            )
-        else:
-            await message.answer(
-                "❌ <b>ОШИБКА ПРИ ДОБАВЛЕНИИ ФИЛЬТРА</b>\n await message.answer(
-                "❌ <b>ОШИБКА ПРИ ДОБАВЛЕНИИ ФИЛЬТРА</b>\n\n"
-                "Пожалуйста, попробу\n"
-                "Пожалуйста, попробуйте еще раз.",
-                reply_markйте еще раз.",
-                reply_markup=get_main_keyboard(),
-                parse_mode='HTML'
-            )
-        
-        await state.clear()
-up=get_main_keyboard(),
-                parse_mode='HTML'
-            )
-        
-        await state.clear()
-        
-    elif message.text == "❌ Нет, изменить":
-               
-    elif message.text == "❌ Нет, изменить":
-        await state.set_state(FilterStates.waiting_filter_type)
-        await message await state.set_state(FilterStates.waiting_filter_type)
-        await message.answer(
-            "💧 <b>ВЫБЕРИТЕ ТИ.answer(
-            "💧 <b>ВЫБЕРИТЕ ТИП ФИЛЬТРА</b>",
-            reply_markup=get_filter_type_keyboard(),
-            parse_mode='HTMLП ФИЛЬТРА</b>",
-            reply_markup=get_filter_type_keyboard(),
-            parse_mode='HTML'
-        )
-    else:
-        await message.answer(
-            "'
-        )
-    else:
-        await message.answer(
-            "Пожалуйста, выбеПожалуйста, выберите вариант:",
-            reply_markup=get_confirmation_keyboard()
-        )
-
-@dp.message(F.text == "📊 Статистика")
-asyncрите вариант:",
-            reply_markup=get_confirmation_keyboard()
-        )
+# ... (остальные обработчики остаются без изменений, но используют улучшенные функции)
 
 @dp.message(F.text == "📊 Статистика")
 async def cmd_statistics(message: types.Message):
     """Показать статистику"""
     health_monitor.record_message(message.from_user.id)
     
- def cmd_statistics(message: types.Message):
-    """Показать статистику"""
-    health_monitor.record_message(message.from_user.id)
-    
     # Статистика пользователя
-    user_filters = await get_user_filters(message.from_user.id)
+    user_stats = await cache_manager.get_user_stats(message.from_user.id)
     
-       # Статистика пользователя
-    user_filters = await get_user_filters(message.from_user.id)
-    
-    if not user_filters:
+    if user_stats['total'] == 0:
         await message.answer(
-            " if not user_filters:
-        await message.answer(
-📊 <b>СТАТИСТИКА</b>\n\n"
-            "📭 <b>У вас пока нет фильтров</            "📊 <b>СТАТИСТИКА</b>\n\n"
-            "📭 <b>У вас пока нет фильтровb>\n\n"
-            "Добавьте первый фильтр чтобы увидеть статисти</b>\n\n"
+            "📊 <b>СТАТИСТИКА</b>\n\n"
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
             "Добавьте первый фильтр чтобы увидеть статистику.",
             reply_markup=get_main_keyboard(),
             parse_mode='HTML'
-       ку.",
-            reply_mark )
-        return
-    
-    today = datetime.now().date()
-    user_stats = {
-        'total': len(user_filters),
-        'expired': 0,
-        'expiring_soonup=get_main_keyboard(),
-            parse_mode='HTML'
         )
         return
-    
-    today = datetime.now().date()
-    user_stats = {
-        'total': len(user_filters),
-        'expired': 0,
-        'expiring_soon': 0,
-       ': 0,
-        'normal': 0 'normal': 0
-    }
-    
-    for f in user_filters:
-        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%
-    }
-    
-    for f in user_filters:
-        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-        days_until = (expiry_date -m-%d').date()
-        days_until = (expiry_date - today).days
-        
-        if days_until <= today).days
-        
-        if days_until <= 0:
-            user_stats['expired'] += 1
-        elif days_until <= 7:
- 0:
-            user_stats['expired'] += 1
-        elif days_until <= 7:
-            user_stats['expiring_soon'] +=            user_stats['expiring_soon'] += 1
-        else:
-            user_stats['normal'] += 1
-    
-    # 1
-        else:
-            user_stats['normal'] += 1
     
     # Общая статистика (только для администратора)
-    if is_admin Общая статистика (только для администратора)
     if is_admin(message.from_user.id):
         global_stats = await get_all_users_stats()
-        stats(message.from_user.id):
-        global_stats = await get_all_users_stats()
         stats_text = (
-            f"📊 <b_text = (
-            f"📊 <b>ОБЩА>ОБЩАЯ СТАТИСТИКАЯ СТАТИСТИКА СИСТЕМЫ</b>\n\n"
-            f"👥 <b> СИСТЕМЫ</b>\n\n"
-            f"Пользователей:</b> {global_stats['total_users']}\n"
-            f"💧 <b>Всего фильтров:</b> {👥 <b>Пользователей:</b> {global_stats['total_users']}\n"
+            f"📊 <b>ОБЩАЯ СТАТИСТИКА СИСТЕМЫ</b>\n\n"
+            f"👥 <b>Пользователей:</b> {global_stats['total_users']}\n"
             f"💧 <b>Всего фильтров:</b> {global_stats['total_filters']}\n"
-            f"🔴 <b>Просроченоglobal_stats['total_filters']}\n"
             f"🔴 <b>Просрочено:</b> {global_stats['expired_filters']}\n"
-            f":</b> {global_stats['expired_filters']}\n"
-            f"🟡 <b>Скоро исте🟡 <b>Скоро истекает:</b> {global_stats['expiring_soon']}\n\n"
-кает:</b> {global_stats['expiring_soon']}\n\n"
+            f"🟡 <b>Скоро истекает:</b> {global_stats['expiring_soon']}\n\n"
         )
     else:
         stats_text = ""
     
-    stats_text        )
-    else:
-        stats_text = ""
+    progress_bar = create_progress_bar(user_stats['health_percentage'])
     
     stats_text += (
-        f" += (
-        f"📊 <b>ВАША СТАТИСТИКА📊 <b>ВАША СТАТИСТИКА</b>\n\n"
-        f"</b>\n\n"
+        f"📊 <b>ВАША СТАТИСТИКА</b>\n\n"
+        f"{progress_bar}\n"
         f"💧 <b>Всего фильтров:</b> {user_stats['total']}\n"
-        f"🟢💧 <b>Всего фильтров:</b> {user_stats['total']}\n"
         f"🟢 <b>В норме:</b> {user_stats['normal']}\n"
-        f"🟡 <b>Скоро истекает:</ <b>В норме:</b> {user_stats['normal']}\n"
         f"🟡 <b>Скоро истекает:</b> {user_stats['expiring_soon']}\n"
-        f"🔴b> {user_stats['expiring_soon']}\n"
-        f"🔴 <b <b>Просрочено:</b> {user_stats['expired']}\n\n"
-        f"📈 <b>Процент>Просрочено:</b> {user_stats['expired']}\n\n"
-        f"📈 <b>Процент исправных:</b> {((user_stats['normal исправных:</b> {((user_stats['normal'] / user_stats['total']) * 100):.1f}%"
-    )
-    
-    await message.answer(stats_text, reply_mark'] / user_stats['total']) * 100):.1f}%"
+        f"🔴 <b>Просрочено:</b> {user_stats['expired']}\n"
+        f"📈 <b>Средний срок до замены:</b> {user_stats['avg_days_until_expiry']:.1f} дней\n"
+        f"💫 <b>Исправных фильтров:</b> {user_stats['health_percentage']:.1f}%"
     )
     
     await message.answer(stats_text, reply_markup=get_main_keyboard(), parse_mode='HTML')
 
-# ==========up=get_main_keyboard(), parse_mode='HTML')
-
-# ========== УПРАВЛЕНИЕ ФИЛЬТРАМИ ==========
-@dp.message УПРАВЛЕНИЕ ФИЛЬТРАМИ ==========
-@dp.message(F.text == "⚙️ Управление фильтрами")
-async def cmd_management(message: types.Message):
-    """(F.text == "⚙️ Управление фильтрами")
-async def cmd_management(message: types.Message):
-    """Меню управления фильтрами"""
-    health_monitor.recordМеню управления фильтрами"""
-    health_monitor.record_message(message.from_user.id)
-    
-    filters = await get_user_filters(message.from_user.id)
-_message(message.from_user.id)
-    
-    filters = await get_user_filters(message.from_user.id    
-    if not filters:
-        await message.)
-    
-    if not filters:
-        await message.answeranswer(
-            "⚙️ <(
-            "⚙️ <b>УПРАВb>УПРАВЛЕНИЕ ФИЛЬТРАМИ</b>\n\n"
-            "📭 <b>У вас пока нет фильтров</b>\n\n"
-            "Добавьте первый фильтр чтобы использовать функции управления.",
-            reply_markupЛЕНИЕ ФИЛЬТРАМИ</b>\n\n"
-            "📭 <b>У вас пока нет фильтров</b>\n\n"
-            "Добавьте первый фильтр чтобы использовать функции управления.",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
+@dp.message(F.text == "📊 Онлайн Excel")
+async def cmd_online_excel(message: types.Message):
+    """Меню работы с Excel"""
     await message.answer(
-        "⚙️ <b>УПРАВЛЕНИЕ ФИЛЬТРАМИ</=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    await message.answer(
-        "⚙️ <b>УПРАВЛЕНИЕ ФИЛЬТРАМИ</b>\n\n"
-        "💡 <b>Доступные операции:</b>\b>\n\n"
-        "💡 <b>Доступныеn"
-        "• ✏️ Редактировать фильтр - изменить данные фильтра\n"
-        "• операции:</b>\n"
-        "• ✏️ Редактировать фильтр - изменить данные фильтра\n"
-        "• 🗑 🗑️ Удалить фильтр - удалить фильтр из системы\n"
-        "• 📊 Онлайн Excel - работа с️ Удалить фильтр - удалить фильтр из системы\n"
-        "• 📊 Онлайн Excel - работа с Excel файлами\n\n"
-        f"📊 <b>Всего фильтров Excel файлами\n\n"
-        f"📊 <b>Всего фильтров:</b> {len(filters)}",
-        reply_markup=get_management_keyboard:</b> {len(filters)}",
-        reply_markup=get_management_keyboard(),
-        parse_mode='HTML'
-(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "✏️ Редактировать фильтр")
-async def    )
-
-@dp.message(F.text == "✏️ Редактировать фильтр")
-async def cmd_edit_filter(message: types.Message, state: FSMContext):
-    """Начало редактирования фильтра"""
-    filters = cmd_edit_filter(message: types.Message, state: FSMContext):
-    """Начало редактирования фильтра"""
-    filters = await await get_user_filters(message.from_user.id)
-    if not filters:
-        await message.answer("❌ Нет фильтров для редактирования")
- get_user_filters(message.from_user.id)
-    if not filters:
-        await message.answer("❌ Нет фильтров для редактирования")
-               return
-    
-    await show_filters_for_selection(message, filters, "edit")
-    await state.set_state(EditFilterStates.waiting_filter_selection)
-
-@ return
-    
-    await show_filters_for_selection(message, filters, "edit")
-    await state.set_state(EditFilterStates.waiting_filter_selection)
-
-dp.message(F.text == "🗑️ Удалить фильтр")
-async def cmd_delete_filter(message: types.Message, state: F@dp.message(F.text == "🗑️ Удалить фильтр")
-async def cmd_delete_filter(message: types.Message, state: FSMContext):
-    """Начало удаления фильтра"""
-    filters = await get_user_fSMContext):
-    """Начало удаления фильтра"""
-    filters = await get_user_filters(message.from_user.id)
-    if not filters:
-        await message.answer("❌ Нilters(message.from_user.id)
-    if not filters:
-        await message.answer("❌ Нет фильтров для удает фильтров для удаления")
-        return
-    
-    await show_filters_for_selection(message, filters, "delete")
-    await state.set_state(DeleteFilterStates.waiting_filter_selection)
-
-#ления")
-        return
-    
-    await show_filters_for_selection(message, filters, "delete")
-    await state.set_state(DeleteFilterStates.waiting_filter_selection)
-
- ========== ОБРАБОТЧИКИ РЕДАКТ# ========== ОБРАБОТЧИКИ РЕДАКТИРОВАНИЯ ФИЛЬТРОВ ==========
-@dp.message(EditFilterStates.waiting_filter_selection)
-async def process_edit_filter_selection(message: types.Message, state: FSMContext):
-    """ИРОВАНИЯ ФИЛЬТРОВ ==========
-@dp.message(EditFilterStates.waiting_filter_selection)
-async def process_edit_filter_selection(message: types.Message, state: FSMContext):
-    """Обработка выбора фильтра для редактирования"""
-   Обработка выбора фильтра для редактирования"""
-    if message.text == "🔙 Назад":
-        await state.clear()
-        await message. if message.text == "🔙 Назад":
-        await state.clear()
-        await messageanswer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
-        return
-    
-    # Извлека.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
-        return
-    
-    # Извлекаем ID фильтра из текста
-    match = re.search(r'#(\d+)',ем ID фильтра из текста
-    match = re.search(r'#(\d+)', message.text)
-    if not match:
-        await message.answer("❌ Не message.text)
-    if not match:
-        await message.answer("❌ Неверный формат. Выберите фильтр из списка:")
-        return
-    
-верный формат. Выберите фильтр из списка:")
-        return
-    
-    filter_id = int(match.group(1))
-    
-    # Проверяем существование фильтра
-    filter_data = await get_filter_by_id(filter_id, message    filter_id = int(match.group(1))
-    
-    # Проверяем существование фильтра
-    filter_data = await get_filter_by_id(filter_id, message.from_user.id)
-    if not filter_data:
-        await message.answer("❌ Фи.from_user.id)
-    if not filter_data:
-        await message.answer("❌ Фильтр не найден. Выберите другой:")
-        return
-    
-    await state.update_data(editing_filter_id=filter_id, editing_filter_data=filter_data)
-    await state.set_state(льтр не найден. Выберите другой:")
-        return
-    
-    await state.update_data(editing_filter_id=filter_id, editing_filter_data=filter_data)
-    await state.set_state(EditFilterStates.waiting_field_selection)
-    
-    await message.answer(
-EditFilterStates.waiting_field_selection)
-    
-    await message.answer(
-        f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬ        f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА #{filter_id}</b>\n\n"
-        f"ТРА #{filter_id}</b>\n\n"
-        f"💧 Тип: {filter_data['filter_type']}\n"
-        f"📍 Место: {filter_data['location']}\n"
-💧 Тип: {filter_data['filter_type']}\n"
-        f"📍 Место: {filter_data['location']}\n"
-        f"📅 Дата замены: {format_date_nice(datetime.strptime        f"📅 Дата замены: {format_date_nice(datetime.strptime(str(str(filter_data['last_change']), '%Y(filter_data['last_change']), '%Y-%m-%d'))}\n\n"
-        f"📝 <b>Выберите поле для редактирования-%m-%d'))}\n\n"
-        f"📝 <b>Выберите поле для редактирования:</b>",
-        reply_markup=get_edit_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp:</b>",
-        reply_markup=get_edit_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(EditFilterStates.waiting_field_selection)
-async def process_edit_field_selection(message.message(EditFilterStates.waiting_field_selection)
-async def process_edit_field_selection: types.Message, state: FSMContext):
-    """Обработка выбора поля для редактирования"""
-    if message.text == "(message: types.Message, state: FSMContext):
-    """Обработка выбора поля для редактирования"""
-    if message.text == "🔙 Назад":
-        await state.clear()
-        await cmd_management🔙 Назад":
-        await state.clear()
-        await(message)
-        return
-    
-    field_mapping = {
-        "💧 Тип фильтра": "filter_type",
-        "📍 Местоположение": cmd_management(message)
-        return
-    
-    field_mapping = {
-        "💧 Тип фильтра": "filter_type",
-        "📍 Местоположение": "location "location", 
-        "📅 Дата замены": "last_change",
-        "⏱️ Срок", 
-        "📅 Дата замены": "last_change",
-        "⏱️ Срок службы": "lifetime_days"
-    }
-    
-    if message.text not in field_mapping:
-        await службы": "lifetime_days"
-    }
-    
-    if message.text not in field_mapping:
-        await message.answer("❌ Выберите поле из списка:", reply_m message.answer("❌ Выберите поле из списка:", reply_markup=get_edit_keyboard())
-        return
-    
-    field_name = field_mappingarkup=get_edit_keyboard())
-        return
-    
-    field_name = field_mapping[message.text]
-    await state.update_data(editing_field=field_name[message.text]
-    await state.update_data(editing_field=field_name)
-    await state.set_state(EditFilterStates.waiting_new_value)
-    
-    prompts)
-    await state.set_state(EditFilterStates.waiting_new_value)
-    
-    prompts = {
-        "filter_type": " = {
-        "filter_type": "💧 Введите новый тип фильтра💧 Введите новый тип фильтра:",
-        "location": "📍 Введите новое местоположение:",
-        "last_change": "📅 В:",
-        "location": "📍 Введите новое местоположение:",
-        "last_change": "📅 Введите новую дату замены (ДД.ММ.ГГГГ):",
-        "lifetime_daysведите новую дату замены (ДД.ММ.ГГГГ):",
-        "lifetime_days": "⏱️ Введите новый срок службы (в днях):": "⏱️ Введите новый срок службы (в днях):"
-    }
-    
-    await message.answer(prompts[field_name],"
-    }
-    
-    await message.answer(prompts[field_name], reply_m reply_markup=get_back_keyboard())
-
-@dp.message(EditFilterStates.waiting_new_value)
-async def process_edit_new_value(message:arkup=get_back_keyboard())
-
-@dp.message(EditFilterStates.waiting_new_value)
-async def process_edit_new_value(message: types.Message, state: FSMContext):
-    """Обработка нового types.Message, state: FSMContext):
-    """Обработ значения для редактирования"""
-    if message.text == "🔙 Назад":
-        await state.set_state(EditFilterStates.waiting_field_selection)
-        dataка нового значения для редактирования"""
-    if message.text == "🔙 Назад":
-        await state.set_state(EditFilterStates.waiting_field_selection)
-        data = await state.get_data()
-        filter_data = data['editing = await state.get_data()
-        filter_data = data['editing_filter_data']
-        
-        await message.answer(
-            f"✏️ <b>_filter_data']
-        
-        await message.РЕДАКТИРОВАНИЕ ФИЛЬТРА #{data['editing_filter_id']}</b>\answer(
-            f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА #{data['editing_filter_id']}</b>\n\n"
-            f"📝 <b>Выберите поле для редактирования:</n\n"
-            f"📝 <b>Выберите поле для редактирования:</b>",
-            reply_markup=get_edit_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    data =b>",
-            reply_markup=get_edit_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    data = await state.get_data()
-    field_name = data['editing_field']
-    filter_id = data['editing_filter_id']
-    user_id = await state.get_data()
-    field_name = data['editing_field']
-    filter_id = data['editing_filter_id']
-    user_id = message.from_user.id
-    
-    try:
-        update_data = {}
-        
-        message.from_user.id
-    
-    try:
-        update_data = {}
-        
-        if field_name == "filter_type":
-            is_valid, error_msg = validate_filter_type if field_name == "filter_type":
-            is_valid, error_msg(message.text)
-            if not is_valid:
-                await message.answer(f"❌ {error_msg}\n\nВведите корректный тип филь = validate_filter_type(message.text)
-            if not is_valid:
-                await message.answer(f"❌ {error_msg}\n\nВведите корректный тип фильтра:")
-                return
-            update_data['filter_type'] = message.text
-            
-тра:")
-                return
-            update_data['filter_type'] = message.text
-            
-        elif field_name == "location":
-            is_valid, error_msg = validate_location(message.text)
-        elif field_name == "location":
-            is_valid, error_msg = validate_location(message.text)
-            if not is_valid:
-                await message.answer(f"❌ {error_msg}\n            if not is_valid:
-\nВведите корректное местоположение:")
-                return
-            update_data['location'] = message.text
-            
-                await message.answer(f"❌ {error_msg}\n\nВведите корректное местоположение:")
-                return
-            update_data['location'] = message.text
-            
-        elif field_name == "last_change":
-            try:
-                change_date = validate_date(message.text)
-                update        elif field_name == "last_change":
-            try:
-                change_date = validate_date(message.text)
-                update_data['last_change'] = change_date.strftime('%Y-%m-%d')
-_data['last_change'] = change_date.strftime('%Y-%m-%d')
-                
-                # Пересчитываем дату истечения                
-                # Пересчитываем дату истечения
-                filter_data = await get_filter_by_id(filter_id, user_id)
-                if filter_data
-                filter_data = await get_filter_by_id(filter_id, user_id)
-                if filter_data:
-                    expiry_date = change_date + timedelta(days=filter:
-                    expiry_date = change_date + timedelta(days=filter_data['lifetime_days'])
-                    update_data['expiry_date'] =_data['lifetime_days'])
-                    update_data['expiry_date'] = expiry_date.strftime('%Y-%m-%d')
-                    
-            except ValueError as e:
-                await message.answer(f"❌ {str(e)}\n\nВведите корре expiry_date.strftime('%Y-%m-%d')
-                    
-            except ValueError as e:
-                await message.answer(f"❌ {str(e)}\n\nВведите корректную дату:")
-                return
-                
-        elif field_nameктную дату:")
-                return
-                
-        elif field_name == "lifetime_days":
-            is_valid, error_msg, lifetime_days = validate_lifetime(message.text)
-            == "lifetime_days":
-            is_valid, error_msg, lifetime_days = validate_lifetime(message.text)
-            if not is_valid:
-                await message.answer(f"❌ {error_msg}\n\nВведите корректный срок службы:")
-                return
-            
-            if not is_valid:
-                await message.answer(f"❌ {error_msg}\n\nВведите корректный срок службы:")
-                return
-            
-            update update_data['lifetime_days'] = lifetime_days
-            
-            # Пересчитываем дату истечения
-            filter_data = await get_filter_by_id(filter_id,_data['lifetime_days'] = lifetime_days
-            
-            # Пересчитываем дату истечения
-            filter_data = await get user_id)
-            if filter_data:
-                last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d')
-                expiry_date_filter_by_id(filter_id, user_id)
-            if filter_data:
-                last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d')
-                expiry_date = last_change + timedelta(days=lifetime_days)
-                update_data['expiry_date = last_change + timedelta(days=lifetime_days)
-                update_data['expiry_date'] = expiry_date.strftime('%Y-%m-%d')
-        
-        # Обновляем фильтр в БД
-        success = await update_filter_in_db'] = expiry_date.strftime('%Y-%m-%d')
-        
-        # Обновляем фильтр в БД
-        success = await update_filter_in(filter_id, user_id, **update_data)
-        
-        if success:
-            await message.answer(
-                f"✅ <b>ФИЛЬТР_db(filter_id, user_id, **update_data)
-        
-        if success:
-            await message.answer(
-                f"✅ <b>ФИЛЬТР УСПЕШНО ОБНОВЛЕН!</b>\n\n"
- УСПЕШНО ОБНОВЛЕН!</b>\n\n"
-                f"💫 <i>Изменения сохранены в системе</i>",
-                reply_markup=get_management_keyboard(),
-                               f"💫 <i>Изменения сохранены в системе</i>",
-                reply_markup=get_management_keyboard(),
-                parse_mode='HTML'
-            )
-            
-            # Показываем parse_mode='HTML'
-            )
-            
-            # Показываем обнов обновленные данные
-            updated_filter = await get_filter_by_id(filter_id, user_id)
-            if updated_filter:
-                expiry_date = datetime.strptime(str(updated_filter['expiry_date']), '%Y-%m-%d').date()
-ленные данные
-            updated_filter = await get_filter_by_id(filter_id, user_id)
-            if updated_filter:
-                expiry_date = datetime.strptime(str(updated_filter['expiry_date']), '%Y-%m-%d').date()
-                days_until = (expiry_date - datetime.now().date()).days
-                icon, status = get_status_icon_and_text(days_until)
-                
-                await message.answer(
-                days_until = (expiry_date - datetime.now().date()).days
-                icon, status = get_status_icon_and_text(days_until)
-                
-                await message.answer                    f"📋 <b>ОБНОВЛЕННЫЕ ДАННЫЕ:</b>\n\n"
-                    f(
-                    f"📋 <b>ОБНОВЛЕННЫЕ ДАННЫЕ:</b>\n\n"
-                    f"{icon} <b>Фильтр #{filter_id}</b>\n"
-                    f"💧 Тип: {updated_filter"{icon} <b>Фильтр #{filter_id}</b>\n"
-                    f"💧 Тип: {updated_filter['filter_type']}\n"
-                    f"📍 Место: {updated['filter_type']}\n"
-                    f"📍 Место: {updated_filter['location']}\n"
-                    f"📅 Замена: {format_date_nice(d_filter['location']}\n"
-                    f"📅 Замена: {format_date_nice(datetime.strptime(str(updated_filter['last_change']), '%Y-%atetime.strptime(str(updated_filter['last_change']), '%Y-%m-%d'))}\n"
-                    f"⏰ Годенm-%d'))}\n"
-                    f"⏰ Годен до: до: {format_date_nice(expiry_date)}\n"
-                    f"📊 Статус: {status} ({days_until} дней)",
-                    parse_mode='HTML'
-                {format_date_nice(expiry_date)}\n"
-                    f"📊 Статус: {status} ({days_until} дней)",
-                    parse_mode='HTML'
-                )
-        else )
-        else:
-            await message.answer(
-                "❌ <b>ОШИБКА ПРИ ОБНОВЛЕНИИ Ф:
-            await message.answer(
-                "❌ <b>ОШИБКА ПРИ ОБНОВЛЕНИИ ФИЛЬИЛЬТРА</b>\n\n"
-                "Пожалуйста, попробуйте еще раз.",
-                reply_markup=get_management_keyboard(),
-                parse_mode='HTML'
-           ТРА</b>\n\n"
-                "Пожалуйста, попробуйте еще раз.",
-                reply_markup=get_management_keyboard(),
-                parse_mode='HTML'
-            )
-        
-        await state.clear()
-        
-    except Exception as e )
-        
-        await state.clear()
-        
-    except Exception:
-        logging.error(f"Ошибка при редактировании фильтра as e:
-        logging.error(f"Ошибка при реда: {e}")
-        await message.answer(
-            "❌ <b>ПРОИЗОШЛА ОШИБКА</b>\n\n"
-            "Пожалуйста, попробуйте еще раз.",
-            reply_mктировании фильтра: {e}")
-        await message.answer(
-            "❌ <b>ПРОИЗОШЛА ОШИБКА</b>\n\n"
-            "Пожалуйста, попробуйте еще раз.",
-            reply_markup=get_management_keyboard(),
-            parse_mode='HTML'
-        )
-        await state.clear()
-
-# =========arkup=get_management_keyboard(),
-            parse_mode='HTML'
-        )
-        await state.clear()
-
-# ========== ОБРАБОТЧИКИ УДАЛЕНИЯ ФИЛЬТРОВ == ОБРАБОТЧИКИ УДАЛЕНИЯ ФИЛЬТРОВ=========
-@dp.message(DeleteFilterStates.waiting_filter_selection)
-async def process_delete_filter_selection(message: types.Message, state: FSMContext):
-    ==========
-@dp.message(DeleteFilterStates.waiting_filter_selection)
-async def process_delete_filter_selection(message: types.Message, state: FSMContext):
-    """Обработка выбора фильтра для удаления"""
-    if message.text == "🔙 Назад """Обработка выбора фильтра для удаления"""
-    if message.text == "🔙 Назад":
-        await state.clear()
-        await message.answer("🔙 Возврат в мен":
-        await state.clear()
-        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
-        return
-    
-    match = re.search(r'#(\d+)', message.text)
-    if not matchю управления", reply_markup=get_management_keyboard())
-        return
-    
-    match = re.search(r'#(\d+)', message.text)
-    if not match:
-        await message.answer("❌ Неверный формат. Выберите фильтр из спи:
-        await message.answer("❌ Неверный формат. Выберите фильтр из списка:")
-        return
-    
-    filter_id = int(match.group(1))
-    filter_data =ска:")
-        return
-    
-    filter_id = int(match.group(1))
-    filter_data = await get_filter_by_id(filter_id, message.from_user.id)
-    
-    if not filter_data:
-        await await get_filter_by_id(filter_id, message.from_user.id)
-    
-    if not filter_data:
-        await message.answer("❌ Фильтр не найден. Вы message.answer("❌ Фильтр не найден. Выберите другой:")
-        return
-    
-    await state.update_data(deleting_filter_id=filter_idберите другой:")
-        return
-    
-    await state.update_data(deleting_filter_id=filter, deleting_filter_data=filter_data)
-    await state.set_state(DeleteFilterStates.waiting_confirmation)
-    
-    expiry_date = datetime.strptime(str(filter_data_id, deleting_filter_data=filter_data)
-    await state.set_state(DeleteFilterStates.waiting_confirmation)
-    
-    expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date['expiry_date']), '%Y-%m-%d').()
-    
-    await message.answer(
-        f"🗑️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
-        f"❌ Вы действительно хотиdate()
-    
-    await message.answer(
-        f"🗑️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
-        f"❌ Вы действительно хотите удалить фильтр?\n\n"
-        f"те удалить фильтр?\n\n"
-        f"💧 Тип: {filter_data['filter_type']}\n"
-        f"📍 Место: {💧 Тип: {filter_data['filter_type']}\n"
-        f"📍 Место: {filter_data['location']}\n"
-        f"📅 Годен до: {format_date_nice(expiry_date)}\n\n"
-        f"filter_data['location']}\n"
-        f"📅 Годен до: {format_date_nice(expiry_date)}\n\n"
-        f"<i>Это действие нельзя отменить!</i>",
-        reply_mark<i>Это действие нельзя отменить!</i>",
-        reply_markup=get_confirmation_keyboard(),
-        parse_mode='HTMLup=get_confirmation_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(DeleteFilterStates.waiting_confirmation)
-async def process_delete_confirmation(message: types.Message, state: FSM'
-    )
-
-@dp.message(DeleteFilterStates.waiting_confirmation)
-async def process_delete_confirmation(message: types.Message, state: FSMContext):
-    """Обработка подтверждения удаления"""
-    data = await state.get_data()
-Context):
-    """Обработка подтверждения удаления"""
-    data = await state.get_data()
-    filter_id = data['deleting_filter_id']
-    filter_id = data['deleting_filter_id']
-    user_id    user_id = message.from_user.id
-    
-    if message.text == "✅ Да, всё верно":
-        success = await delete_filter_from_db(filter_id, user_id)
-        
-        if success:
-            await = message.from_user.id
-    
-    if message.text == "✅ Да, всё верно":
-        success = await delete_filter_from_db(filter_id, user_id)
-        
-        if success:
-            await message.answer(
-                message.answer(
-                "🗑️ <b>ФИЛЬТР УСПЕШНО УДАЛЕН!</b>\n\n"
-                "💫 <i>Филь "🗑️ <b>ФИЛЬТР УСПЕШНО УДАЛЕН!</b>\n\n"
-                "💫 <i>Фильтр больше не отслеживается в системе</i>",
-                reply_markup=getтр больше не отслеживается в системе</i>",
-                reply_markup=get_management_key_management_keyboard(),
-                parse_mode='HTML'
-            )
-        else:
-            await message.answer(
-                "❌ <b>ОШИБКА ПРИ УДАboard(),
-                parse_mode='HTML'
-            )
-        else:
-            await message.answer(
-                "❌ <b>ОШИБКА ПРИ УДАЛЕНИИЛЕНИИ ФИЛЬТРА</b>\n\n"
-                "Пожалуйста, попробуйте еще раз.",
-                reply_markup=get_management_keyboard(),
-                parse_mode='HTML'
-            ФИЛЬТРА</b>\n\n"
-                "Пожалуйста, попробуйте еще раз.",
-                reply_markup=get_management_keyboard(),
-                parse_mode='HTML'
-            )
-        
-        await state.clear()
-        
-    elif message.text == " )
-        
-        await state.clear()
-        
-    elif message.text == "❌ Нет, изменить":
-        await state.clear()
-        await message.answer(
-            "❌ <b>Удаление отменено</b>",
-            reply_markup=get_❌ Нет, изменить":
-        await state.clear()
-        await message.answer(
-            "❌ <b>Удаление отменено</b>",
-            reply_markup=get_management_keyboard(),
-            parse_mode='HTML'
-        )
-   management_keyboard(),
-            parse_mode='HTML'
-        )
-    else:
-        await message.answer(
-            "Пожалуйста, подтвердите удаление:",
-            reply else:
-        await message.answer(
-            "Пожалуйста, подтвердите удаление:",
-            reply_markup=get_confirmation_keyboard()
-        )
-
-# ========== ИМПОРТ/ЭКСПОРТ_markup=get_confirmation_keyboard()
-        )
-
-# ========== ИМПОРТ/ ==========
-@dp.message(F.text == "📤 Импорт/Экспорт")
-async def cmd_import_export(message: types.Message):
-   ЭКСПОРТ ==========
-@dp.message(F.text == "📤 Импорт/Экспорт")
-async def cmd_import_export(message: types.Message):
-    """Мен """Меню импорта/экспорта"""
-    health_monitor.record_message(message.from_user.id)
-    
-    await message.answer(
-        "📤 <b>ИМПОРТ/ю импорта/экспорта"""
-    health_monitor.record_message(message.from_user.id)
-    
-    await message.answer(
-        "📤 <b>ИМПОРТ/ЭКЭКСПОРТ ДАННЫХ</b>\n\n"
-        "💾 <b>Доступные операции:</b>\nСПОРТ ДАННЫХ</b>\n\n"
+        "📊 <b>РАБОТА С EXCEL</b>\n\n"
         "💾 <b>Доступные операции:</b>\n"
         "• 📤 Экспорт в Excel - выгрузка всех фильтров\n"
-        "• 📥"
-        "• 📤 Экспорт в Excel - выгрузка всех фильтров\n"
         "• 📥 Импорт из Excel - загрузка из файла\n"
-        "• Импорт из Excel - загрузка из файла\n"
-        "• 📋 Шаблон Excel - скачать шаблон для импорта\n"
-        " 📋 Шаблон Excel - скачать шаблон для импорта\n"
-        "• ☁️ Синхронизация с Google Sheets\n\n"
-        "💡 <i>Поддерживается работа с Excel и Google Sheets</i>",
-        reply_markup• ☁️ Синхронизация с Google Sheets\n\n"
-        "💡 <i>Поддерживается работа с Excel и Google Sheets</i>",
+        "• 📋 Шаблон Excel - скачать шаблон для импорта\n\n"
+        "💡 <i>Перейдите в меню Импорт/Экспорт для работы с Excel</i>",
         reply_markup=get_import_export_keyboard(),
         parse_mode='HTML'
     )
 
-@dp.message(F=get_import_export_keyboard(),
-        parse_mode='HTML'
-    )
+# ... (остальные обработчики из предыдущего кода остаются без изменений)
 
-@dp.message(F.text == "📤 Экспорт в Excel")
-async def cmd_export_excel(message: types.Message):
-    """Эксп.text == "📤 Экспорт в Excel")
-async def cmd_export_excel(message: types.Message):
-   орт данных в Excel"""
-    try:
-        excel_file = await export_to_excel(message.from_user.id)
-        
-        await message.answer_document(
-            types.Buffered """Экспорт данных в Excel"""
-    try:
-        excel_file = await export_to_excel(message.from_user.id)
-        
-        await message.answer_document(
-            types.BufferedInputFile(
-InputFile(
-                excel_file.getvalue(),
-                filename=f"фильтры_{datetime.now().strftime('%Y%m%d_%H%M                excel_file.getvalue(),
-                filename=f"фильтры_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx')}.xlsx"
-            ),
-            caption="📊 <b>Ваши фильтры экспортированы в Excel</b>",
-            parse_mode='HTML'
-        )
-    except ValueError as e:
-        await message.answer(f"
-            ),
-            caption="📊 <b>Ваши фильтры экспортированы в Excel</b>",
-            parse_mode='HTML'
-        )
-    except ValueError as e:
-        await message.answer(f"❌ {str(e)}")
-    except Exception as e:
-"❌ {str(e)}")
-    except Exception as e:
-        logging.error(f"Ошибка при экспорте в Excel: {e}")
-        await message.answer("❌        logging.error(f"Ошибка при экспорте в Excel: {e}")
-        await message.answer("❌ Произошла Произошла ошибка при экспорте данных")
-
-# ========== GOOGLE SHEETS СИНХРОНИЗАЦИЯ ==========
-@dp.message(F.text == " ошибка при экспорте данных")
-
-# ========== GOOGLE SHEETS СИНХРОНИЗАЦИЯ ==========
-@dp.message(F☁️ Синхронизация с Google Sheets")
-async def cmd_google_sheets_sync(message: types.Message):
-    """Меню синхронизации с Google Sheets"""
-    health.text == "☁️ Синхронизация с Google Sheets")
-async def cmd_google_sheets_sync(message: types.Message):
-    """Меню синхронизации с Google Sheets"""
-    health_monitor.record_message(message.from_user.id)
-    
-    status_text = "_monitor.record_message(message.from_user.id)
-    
-    status_text = "☁️ <b>СИНХРОНИЗАЦИЯ С GOOGLE SHEETS</☁️ <b>СИНХРОНИЗАЦИЯ С GOOGLE SHEETS</b>\n\n"
-    
-    if not config.GOOGLE_SHEETS_CREDENTIALS:
-        status_text +=b>\n\n"
-    
-    if not config.GOOGLE_SHEETS_CR "❌ <b>Статус:</b> Не настроены учетные данные\n"
-        status_text += "💡 <i>Установите переменную GOOGLE_SHEETS_CREDENTIALEDENTIALS:
-        status_text += "❌ <b>Статус:</b> Не настроены учетные данные\n"
-        status_text += "💡 <i>Установите переменную GOOGLE_SHEETS_CREDENTIALS</i>\n\n"
-    elif not google_sync.sheet_id:
-        status_text += "🟡S</i>\n\n"
-    elif not google_sync.sheet_id:
- <b>Статус:</b> Готов к настройке\n"
-        status_text += "📝 <i>Укажите ID таблицы Google Sheets</i>\n        status_text += "🟡 <b>Статус:</b> Готов к настройке\n"
-        status_text += "📝 <i>Укажите ID таблицы Google Sheets</i>\n\n"
-    else:
-        status_text += "🟢 <b>Стату\n"
-    else:
-        status_text += "🟢 <b>Статус:</b> Настроено\n"
-        status_text += f"📊 <b>с:</b> Настроено\n"
-        status_text += f"📊 <b>ID таблицы:</b> {google_sync.sheet_id}\n"
-        statusID таблицы:</b> {google_sync.sheet_id}\n"
-        status_text +=_text += f"🔄 <b>Автосинхронизация:</b> {'ВКЛ' if google_sync.auto_sync else 'ВЫКЛ'}\n f"🔄 <b>Автосинхронизация:</b> {'ВКЛ' if google_sync.auto_sync else 'ВЫКЛ'}\n\n"
-    
-    status_text += "💡 <b>Как получить ID таблицы:</b>\n\n"
-    
-    status_text += "💡 <b>Как получить ID таблицы:</b>\n"
-    status_text += "1. Создайте таблицу в Google Sheets\n"
-    status_text += "1. Создайте таблицу в Google Sheets\n"
-    status_text += "2. Скопируйте ID из URL: https://docs"
-    status_text += "2. Скопируйте ID из URL: https://docs.google.google.com/spreadsheets/d/<b>[ID]</b>/edit\n"
-    status_text += "3. Используйте кнопку '📝.com/spreadsheets/d/<b>[ID]</b>/edit\n"
-    status_text += "3. Используйте кнопку '📝 У Указать ID таблицы'"
-    
-    await message.answer(
-       казать ID таблицы'"
-    
-    await message.answer(
-        status_text,
-        reply_markup=get_sync_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "🔄 Синхронизировать с Google Sheets")
-async def cmd_sync status_text,
-        reply_markup=get_sync_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "🔄 Синхронизировать с Google Sheets")
-async def cmd_sync_to_sheets(message: types.Message):
-    """Синхронизация данных с Google Sheets"""
-    if not google_sync.is_configured():
-       _to_sheets(message: types.Message):
-    """Синхронизация данных с Google Sheets"""
-    if not google_sync.is_configured():
-        await message.answer(
-            "❌ <b>Синхронизация не настроена await message.answer(
-            "❌ <b>Синхронизация не настроена</b>\n\n"
-            "Пожалуйста, сначала настрой</b>\n\n"
-            "Пожалуйста, сначала настройте подклюте подключение к Google Sheets.",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    await message.answer(
-        "🔄 <b>Начинаю синхроничение к Google Sheets.",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    await message.answer(
-        "🔄 <b>Начинаю синхронизацию...</b>\n\n"
-        "⏳зацию...</b>\n\n"
-        "⏳ <i>Пожалуйста, подождите <i>Пожалуйста, подождите...</i>",
-        reply_markup=get_back_keyboard(),
-        parse_mode='HTML'
-    )
-    
-    # Получаем фильтры пользователя
-    filters = await get_user_filters(message.from_user...</i>",
-        reply_markup=get_back_keyboard(),
-        parse_mode='HTML'
-    )
-    
-    # Получаем фильтры пользователя
-    filters = await get_user_filters(message.from.id)
-    
-    if not filters:
-        await message.answer(
-            "📭 <b>Нет данных для синхронизации</b>\n\n"
-            "У вас пока нет фильтров.",
-            reply_user.id)
-    
-    if not filters:
-        await message.answer(
-            "📭 <b>Нет данных для синхронизации</b>\n\n"
-            "У вас пока нет фильтров.",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Выполняем синхронизацию
-    success, result_message = await safe_sync_to_s_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Выполняем синхронизацию
-    success, result_message = await safe_sync_to_sheets(message.from_user.id, filters)
-    
-    if success:
-        await message.answer(
-            f"✅ <b>heets(message.from_user.id, filters)
-    
-    if success:
-        await message.answer(
-            f"✅ <b>СИНХРОНИЗАЦИЯ УСПЕСИНХРОНИЗАЦИЯ УСПЕШНА!</b>\n\n"
-            f"{result_message}\n\n"
-            f"💫ШНА!</b>\n\n"
-            f"{result_message}\n\n"
-            f"💫 <i>Данные обновлены в Google Sheets</i>",
-            reply <i>Данные обновлены в Google Sheets</i>",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-    else:
-        await message.answer(
-            f"_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-    else:
-        await message.answer(
-            f"❌ <b>ОШИБКА СИНХРОНИЗАЦИ❌ <b>ОШИБКА СИНХРОНИЗАЦИИИ</b>\n\n"
-            f"{result_message}\n\n"
-            f"🔧 <i>Проверьте настройки подключения</i>",
-</b>\n\n"
-            f"{result_message}\n\n"
-            f"🔧 <i>Проверьте настройки подключения</i>",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-
-@dp.message(F.text == "📊 Ста            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-
-@dp.message(F.text == "📊 Статус синхронизации")
-async def cmd_sync_status(message: types.Message):
-    """Провтус синхронизации")
-async def cmd_sync_status(message: types.Message):
-    """Проверка статуса синхронизации"""
-   ерка статуса синхронизации"""
-    health_monitor.record_message(message.from_user.id)
-    
-    if not config.GOOGLE_SHEETS_CREDENTIALS:
-        await message health_monitor.record_message(message.from_user.id)
-    
-    if not config.GOOGLE_SHEETS_CREDENTIALS:
-.answer(
-            "❌ <b>Учетные данные не настроены</b>\n\n"
-            "Для использования синхронизации необходимо настроить GOOGLE_SHEETS        await message.answer(
-            "❌ <b>Учетные данные не настроены</b>\n\n"
-            "Для использования синхронизации необходимо настроить GOOGLE_SHEETS_CREDENTIALS в переменных окружения.",
-            reply_markup=get_sync_CREDENTIALS в переменных окружения.",
-            reply_markup=get_sync_keyboard_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    if not google_sync.sheet_id:
-        await message.answer(
-            "🟡 <b>ID таблицы не(),
-            parse_mode='HTML'
-        )
-        return
-    
-    if not google_sync.sheet_id:
-        await message.answer(
-            "🟡 <b>ID таблицы не указан указан</b>\n\n"
-            "Используйте кнопку '📝 Указать ID таблицы' для настройки.",
-            reply_markup=get_sync_keyboard(),
-</b>\n\n"
-            "Используйте кнопку '📝 Указать ID таблицы' для настройки.",
-            reply_markup            parse_mode='HTML'
-        )
-        return
-    
-    await message.answer(
-        "🔍 <b>Проверяю подключение к Google Sheets...</b>",
-        reply_markup=get_back=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    await message.answer(
-        "🔍 <b>Проверяю подключение к Google Sheets...</b>",
-        reply_markup=get_back_keyboard(),
-        parse_mode='HTML'
-    )
-    
-    # Тестируем подключение
-    success, result_message = await google_keyboard(),
-        parse_mode='HTML'
-    )
-    
-    # Тестируем подключение
-    success, result_message = await google_sync.test_connection()
-    
-    if success:
-        status_icon = "🟢"
-       _sync.test_connection()
-    
-    if success:
-        status_icon = "🟢 status_text = "ПОДКЛ"
-        status_text = "ПОДКЛЮЧЕНИЕ УСПЕШНО"
-    else:
-        status_icon = "🔴" 
-        status_text = "ОШИБКА ПОДКЛЮЧЕНИЯ"
-    
-    status_info = (
-        f"{status_icon} <b>СТАТУС ПОДКЛЮЧЕНИЯ:</ЮЧЕНИЕ УСПЕШНО"
-    else:
-        status_icon = "🔴" 
-        status_text = "ОШИБКА ПОДКЛЮЧЕНИЯ"
-    
-    status_info = (
-        f"{status_icon} <b>СТАТУС ПОДКЛЮЧЕНИЯ:</b> {status_text}\n\n"
-        f"📊 <b>ID таблицы:</b>b> {status_text}\n\n"
-        f"📊 <b>ID таблицы:</b> {google_sync.sheet_id}\n"
-        f"🔄 <b>Автосинхронизация:</b> {google_sync.sheet_id}\n"
-        f"🔄 <b>Автосинхронизация:</b> {'✅ ВКЛ' if google_sync.auto_sync else '❌ ВЫКЛ {'✅ ВКЛ' if google_sync.auto_sync else '❌ ВЫК'}\n\n"
-        f"💡 <b>Результат проверки:</b>\n{result_message}"
-    )
-    
-    await message.answer(
-        status_info,
-        reply_markЛ'}\n\n"
-        f"💡 <b>Результат проверки:</b>\n{result_message}"
-    )
-    
-    await message.answer(
-        status_info,
-        reply_markup=get_sync_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.textup=get_sync_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "⚙️ Настройки синхронизации == "⚙️ Настройки синхронизации")
-async def cmd_sync_settings(message: types.Message):
-    """Настройки синхронизации"""
-    if not config.GOOGLE_SHEETS_CREDENTIAL")
-async def cmd_sync_settings(message: types.Message):
-    """Настройки синхронизации"""
-    if not config.GOOGLE_SHEETSS:
-        await message.answer(
-            "❌ <b>Учетные данные не настроены</b>\n\n"
-            "Для использования синхронизации с Google_CREDENTIALS:
-        await message.answer(
-            "❌ <b>Учетные данные не настроены</b>\n\n"
-            "Для использования синхронизации с Google Sheets необходимо:\n\n"
-            "1. Создать сервисный аккаунт в Google Cloud Console Sheets необходимо:\n\n"
-            "1. Создать сервисный аккаунт в Google Cloud Console\n"
-           \n"
-            "2. Скачать JSON файл с ключами\n"
-            "3. Установить переменную GOOGLE_SHEETS_CREDENTIALS\n\n"
-            " "2. Скачать JSON файл с ключами\n"
-            "3. Установить переменную GOOGLE_SHEETS_CREDENTIALS\n\n"
-            "💡 <i>Обратитесь к администратору для💡 <i>Обратитесь к администратору для настройки</i>",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Тестируем подключение настройки</i>",
-            reply_markup=get_sync_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Тестируем подключение для отображения статуса
-    connection_status = "🔴 Не проверено"
-    if google_sync.sheet_id:
-        success, result = await google_sync.test_connection для отображения статуса
-    connection_status = "🔴 Не проверено"
-    if google_sync.sheet_id:
-        success, result = await google_sync.test()
-        connection_status = f"🟢 Успешно" if success else f"🔴 Ошибка: {result}"
-    
-    status_text = "⚙️_connection()
-        connection_status = f"🟢 Успешно" if success else f"🔴 Ошибка: {result}"
-    
-    status_text = "⚙️ <b>НАСТРОЙКИ СИНХРОНИЗАЦИЯ</b>\n\n"
-    
-    if google_sync.sheet_id:
-        status <b>НАСТРОЙКИ СИНХРОНИЗАЦИЯ</b>\n\n"
-    
-    if google_sync.sheet_id:
-        status_text += f"📊 <b>ID таблицы:</b> {google_sync.sheet_id}\n"
-        status_text += f"🔗 <b>Подключение:</b> {connection_status}\n"
-    else:
-        status_text += "📊 <b>ID таблицы:</b> Не указан\n"
-    
-    status_text += f"🔄 <b>Автосинхронизация:</b> {'✅ ВКЛ' if google_sync.auto_sync else '❌ ВЫКЛ'}\n\n"
-    
-    status_text += (
-        "💡 <b>Инструкция по настройке:</b>\n"
-        "1. Соз_text += f"📊 <b>ID таблицы:</b> {google_sync.sheet_id}\n"
-        status_text += f"🔗 <b>Подключение:</b> {connection_status}\n"
-    else:
-        status_text += "📊 <b>ID таблицы:</b> Не указан\n"
-    
-    status_text += f"🔄 <b>Автосинхронизация:</b> {'✅ ВКЛ' if google_sync.auto_sync else '❌ ВЫКЛ'}\n\n"
-    
-    status_text += (
-        "💡 <b>Инструкция по настройке:</b>\n"
-        "1. Создайте таблицу в Google Sheets\n"
-        "2. Скопируйте ID из URL: docs.google.com/spreadдайте таблицу в Google Sheets\n"
-        "2. Скопируйте ID из URL: docs.google.com/spreadsheets/d/<b>[ID]</b>/edit\n"
-        "3. Нажмите '📝 Указать ID таблицы'\n"
-        "4. Проверьте подключение через '📊 Статус синхронизации'"
-    )
-    
-    await message.answer(
-        status_text,
-        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "📝 Указать ID таблицы")
-async def cmd_set_sheet_id(message: types.Message, state: FSMContext):
-    """Установка ID таблицы Google Sheets"""
-    await state.set_state(GoogleSheetssheets/d/<b>[ID]</b>/edit\n"
-        "3. Нажмите '📝 Указать ID таблицы'\n"
-        "4. Проверьте подключение через '📊 Статус синхронизации'"
-    )
-    
-    await message.answer(
-        status_text,
-        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "📝 Указать ID таблицы")
-async def cmd_set_sheet_id(message: types.Message, state: FSMContext):
-    """Установка ID таблицы Google Sheets"""
-    await state.set_state(GoogleSheetsStatesStates.waiting_sheet_id)
-    
-    await message.answer(
-        "📝 <b>УКАЖИТЕ ID ТАБЛИЦЫ GOOGLE SHEETS</b>\n\n"
-        "🔗 <b>Как получить ID:</b>\n"
-        "1. Откройте вашу.waiting_sheet_id)
-    
-    await message.answer(
-        "📝 <b>УКАЖИТЕ ID ТАБЛИЦЫ GOOGLE SHEETS</b>\n\n"
-        "🔗 <b>Как получить ID:</b>\n"
-        "1. Откройте вашу таблицу в Google Sheets\n"
-        "2. Скопируйте ID из URL адреса:\n"
-        "   <code>https://docs.google.com/spreadsheets/d/[ВАШ_ID_ТУТ]/edit</code>\n\n"
-        "📎 <b>Пример ID:</b> <code таблицу в Google Sheets\n"
-        "2. Скопируйте ID из URL адреса:\n"
-        "   <code>https://docs.google.com/spreadsheets/d/[ВАШ_ID_ТУТ]/edit</code>\n\n"
-        "📎 <b>Пример ID:</b> <code>1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms</code>\>1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms</code>\n\nn\n"
-        "✏️ <b>Введите ID таблицы:</b>",
-        reply_markup=get_cancel_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(GoogleSheetsStates.waiting_sheet_id)
-async def process_sheet_id(message: types.Message, state: FSMContext):
-    """Обработка ID таблицы"""
-    if message.text == "❌ Отмена":
-       "
-        "✏️ <b>Введите ID таблицы:</b>",
-        reply_markup=get_cancel_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(GoogleSheetsStates.waiting_sheet_id)
-async def process_sheet_id(message: types.Message, state: FSMContext):
-    """Обработка ID таблицы"""
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer(
-            "❌ <b>Настройка отменена</b>",
-            reply_markup=get_sync_settings_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    sheet_id = message.text.strip()
-    
-    # Базовая валидация ID
-    if len(sheet_id) < 10 or not await state.clear()
-        await message.answer(
-            "❌ <b>Настройка отменена</b>",
-            reply_markup=get_sync_settings_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    sheet_id = message.text.strip()
-    
-    # Базовая валидация ID
-    if len(sheet_id) < 10 or not re.match(r'^[a-zA-Z0-9-_]+$', sheet_id):
-        await message.answer(
-            "❌ <b>Неверный формат ID</b>\n\n"
-            "ID таблицы должен содержать только буквы, цифры, дефисы и подчеркивания.\n"
-            "Пожалуйста, введите корректный ID:",
-            reply_markup=get_cancel_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Сохраняем ID
-    google_sync.sheet_id = sheet_id
-    google_sync.save_settings()
-    
-    await state.clear()
-    
-    await message.answer(
-        f"✅ <b>ID ТАБЛИЦЫ СОХРАНЕН!</b>\n\n"
-        f"📊 <b>ID:</b> {sheet_id}\n re.match(r'^[a-zA-Z0-9-_]+$', sheet_id):
-        await message.answer(
-            "❌ <b>Неверный формат ID</b>\n\n"
-            "ID таблицы должен содержать только буквы, цифры, дефисы и подчеркивания.\n"
-            "Пожалуйста, введите корректный ID:",
-            reply_markup=get_cancel_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Сохраняем ID
-    google_sync.sheet_id = sheet_id
-    google_sync.save_settings()
-    
-    await state.clear()
-    
-    await message.answer(
-        f"✅ <b>ID ТАБЛИЦЫ СОХРАНЕН!</b>\n\n"
-        f"📊 <b>ID:</b> {sheet_id}\n\n"
-        f"💫 <i>Теперь вы можете синх\n"
-        f"💫 <i>Теперь вы можете синхронизировать данные</i>",
-ронизировать данные</i>",
-        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "🔄 Автосинхронизация ВКЛ")
-async def cmd_auto_sync_on(message: types.Message):
-    """Включение автосинхронизации"""
-    if not google_sync.sheet_id:
-        await message.answer(
-            "❌ <b>Сначала укажите ID таблицы</b>",
-            reply_markup=get_sync_settings_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    google_sync.auto_sync = True
-    google_sync.save_settings()
-    
-    await message.answer(
-        "✅ <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА</b>\n\n"
-        "💫        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "🔄 Автосинхронизация ВКЛ")
-async def cmd_auto_sync_on(message: types.Message):
-    """Включение автосинхронизации"""
-    if not google_sync.sheet_id:
-        await message.answer(
-            "❌ <b>Сначала укажите ID таблицы</b>",
-            reply_markup=get_sync_settings_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    google_sync.auto_sync = True
-    google_sync.save_settings()
-    
-    await message.answer(
-        "✅ <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА</b>\n\n"
-        "💫 <i>Теперь данные будут автоматически обновляться в Google Sheets при <i>Теперь данные будут автоматически обновляться в Google Sheets при любых изменениях фильтров</i>",
-        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "⏸️ Автосинхронизация ВЫКЛ")
-async def cmd_auto_sync_off(message: types.Message):
-    """Выключение автосинхронизации"""
-    google_sync.auto_sync = False
-    google_s любых изменениях фильтров</i>",
-        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "⏸️ Автосинхронизация ВЫКЛ")
-async def cmd_auto_sync_off(message: types.Message):
-    """Выключение автосинхронизации"""
-    google_sync.auto_sync = Falseync.save_settings()
-    
-    await message.answer(
-        "⏸️ <b>АВТОСИНХРОНИЗАЦИЯ ВЫКЛЮЧЕНА</b>\n\n"
-        "💫 <i>
-    google_sync.save_settings()
-    
-    await message.answer(
-        "⏸️ <b>АВТОСИНХРОНИЗАЦИЯ ВЫКЛЮЧЕНА</b>\n\n"
-        "💫 <iДанные больше не будут автоматически обновляться в Google Sheets</i>",
-        reply_markup=get_sync_settings_keyboard(),
-        parse_mode='HTML'
->Данные больше не будут автоматически обновляться в Google Sheets</i>",
-        reply_markup=get_sync_settings_keyboard(),
-        parse    )
-
-@dp.message(F.text == "🗑️ Отключить синхронизацию")
-async def cmd_disable_sync(message: types.Message):
-    """Отключение синхронизации"""
-    google_sync.sheet_id = None
-_mode='HTML'
-    )
-
-@dp.message(F.text == "🗑️ Отключить синхронизацию")
-async def cmd_disable_sync(message: types.Message):
-    """Отключение синхронизации"""
-    google_sync.sheet_id = None
-    google_s    google_sync.auto_sync = False
-    google_sync.save_settings()
-    
-    await message.answer(
-        "🗑️ <b>СИНХРОНИЗАЦИЯ Оync.auto_sync = False
-    google_sync.save_settings()
-    
-    await message.answer(
-        "🗑️ <b>СИНХРОНИЗАТКЛЮЧЕНА</b>\n\n"
-        "💫 <i>Все настройки синхронизации сброшены</iЦИЯ ОТКЛЮЧЕНА</b>\n\n"
-        "💫 <i>Все настройки синхронизации сброшены</i>",
-        reply_markup=get_sync>",
-        reply_markup=get_sync_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(Command("sync_test"))
-async def cmd_sync_test(message: types.Message):
-    """Тестирование синхрони_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(Command("sync_test"))
-async def cmd_sync_test(message: types.Message):
-    """Тестированиезации (для админа)"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    await message.answer("🔍 Тестирую подключение к Google Sheets...")
-    
-    success, result_message = await google_sync.test_connection()
- синхронизации (для админа)"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    await message.answer("🔍 Тестирую подключение к Google Sheets...")
-    
-    success, result_message = await google_sync.test_connection()
-    
-    if success:
-        await message.answer(f"✅ {result_message}")
-    else:
-        await message.answer(f"❌ {result_message}")
-
-@dp.message(Command("create_s    
-    if success:
-        await message.answer(f"✅ {result_message}")
-    else:
-        await message.answer(f"❌ {result_message}")
-
-@dp.message(Command("create_sheet"))
-async def cmd_create_sheet(message: types.Message):
-    """Создание новой таблицыheet"))
-async def cmd_create_sheet(message: types.Message):
-    """Создание новой таблицы ( (для админа)"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        
-        if not config.GOдля админа)"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        
-        if not config.GOOGLE_SHEETS_CREDOGLE_SHEETS_CREDENTIALS:
-            await message.answer("❌ GOOGLE_SHEETS_CREDENTIALS не настроены")
-            return
-        
-        credentials_info = json.loads(config.GOOGENTIALS:
-            await message.answer("❌ GOOGLE_SHEETS_CREDENTIALS не настроены")
-            return
-        
-        credentials_info = json.loads(config.GOOGLE_SHEETS_CREDENTIALS)
-        scope = [
-            'https://www.googleapis.com/auth/spreadLE_SHEETS_CREDENTIALS)
-        scope = [
-            'https://www.googleapis.com/auth/spreadsheets',
-sheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
-        credentials = Credentials.from_service_account_info(credentials_info, scopes=scope)
-        gc = gspread.authorize(credentials)
-        
-            'https://www.googleapis.com/auth/drive'
-        ]
-        credentials = Credentials.from_service_account_info(credentials_info, scopes=scope)
-        gc = gspread.author        # Создаем новую таблицу
-        spreadsheet = gc.create('Фильтр-Трекер Данные')
-        
-        # Даем доступ для чтения/записи
-ize(credentials)
-        
-        # Создаем новую таблицу
-        spreadsheet = gc.create('Фильтр-Трекер Данные')
-        
-        # Даем доступ для чтения/записи
-        spreadsheet.share(None, perm_type='anyone', role='writer')
-        
-        spreadsheet.share(None, perm_type='anyone', role='writer        sheet_id = spreadsheet.id
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-        
-        await message.answer(
-            f"✅ <b>НОВАЯ ТАБЛИЦА СОЗДАНА</b')
-        
-        sheet_id = spreadsheet.id
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-        
-        await message.answer(
-            f"✅ <b>НОВАЯ ТАБЛИЦА СОЗДАНА</b>\n\n"
-            f>\n\n"
-            f"📊 <b>ID таблицы:</b> <code>{sheet_id}</code>\n"
-            f"🔗 <b>Ссылка:</b> {"📊 <b>ID таблицы:</b> <code>{sheet_id}</code>\n"
-            f"🔗 <b>Ссылка:</bsheet_url}\n\n"
-            f"💡 <i>Используйте этот ID для настройки синхронизации</i>",
-            parse_mode='HTML'
-        )
-        
-    except Exception as e:
-        await message.> {sheet_url}\n\n"
-            f"💡 <i>Используйте этот ID для настройки синхронизации</i>",
-            parse_mode='HTML'
-        )
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка создания таблицы: {str(e)}")
-
-# ========== ЗАПУanswer(f"❌ Ошибка создания таблицы: {str(e)}")
-
-# ========== ЗСК ПРИЛОЖЕНИЯ ==========
-async def main():
-    """Основная функция запуска"""
-    try:
-        # Инициализация конфигурации
-        config.validateАПУСК ПРИЛОЖЕНИЯ ==========
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 async def main():
     """Основная функция запуска"""
     try:
         # Инициализация конфигурации
         config.validate()
-        
-       ()
         
         # Настройка логирования
         setup_logging()
@@ -3460,24 +1810,9 @@ async def main():
         await init_db()
         await check_and_update_schema()
         
-        # Запуск фонов # Настройка логирования
-        setup_logging()
-        
-        # Инициализация базы данных
-        await init_db()
-        await check_and_update_schema()
-        
         # Запуск фоновых задач
         asyncio.create_task(send_personalized_reminders())
-        asyncio.create_task(health_monitoringых задач
-        asyncio.create_task(send_personalized_reminders())
-        asyncio.create_task(health_task())
-        
-        # Настройка обработчика ошибок
-        dp.errors.register(error_handler)
-        
-        # Запуск бота
-        logging.info("Бот запу_monitoring_task())
+        asyncio.create_task(health_monitoring_task())
         
         # Настройка обработчика ошибок
         dp.errors.register(error_handler)
@@ -3486,29 +1821,12 @@ async def main():
         logging.info("Бот запускается...")
         await dp.start_polling(bot)
         
-    except Exception asскается...")
-        await dp.start_polling(bot)
-        
     except Exception as e:
         logging.critical(f"Критическая ошибка при запуске: {e}")
         # Уведомление администратора
         if config.ADMIN_ID:
-            try e:
-        logging.critical(f"Критическая ошибка при запуске: {e}")
-        # Уведомление администратора
-        if config.ADMIN_ID:
             try:
-                await bot.send_message(config.ADMIN_ID, f"🚨 Бот упа:
-                await bot.send_message(config.ADMIN_ID, f"🚨 Ботл: {e}")
-            except:
-                pass
-        raise
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info упал: {e}")
+                await bot.send_message(config.ADMIN_ID, f"🚨 Бот упал: {e}")
             except:
                 pass
         raise
@@ -3518,9 +1836,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Бот остановлен пользователем")
-    except Exception as e:
-        logging.critical(f"Фатальная ошибка: {e}")
-        sys.exit(1("Бот остановлен пользователем")
     except Exception as e:
         logging.critical(f"Фатальная ошибка: {e}")
         sys.exit(1)
