@@ -29,18 +29,36 @@ from dotenv import load_dotenv
 # Загрузка переменных окружения
 load_dotenv()
 
-# Настройки
-API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
+# ========== КОНФИГУРАЦИЯ ==========
+class Config:
+    """Класс конфигурации приложения"""
+    
+    def __init__(self):
+        self.API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
+        self.GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
+        self.GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
+        
+        # Настройки базы данных
+        self.DB_PATH = 'filters.db'
+        self.BACKUP_ENABLED = True
+        
+        # Настройки rate limiting
+        self.RATE_LIMIT_MAX_REQUESTS = 10
+        self.RATE_LIMIT_WINDOW = 30
+        
+        # Настройки уведомлений
+        self.REMINDER_CHECK_INTERVAL = 24 * 60 * 60  # 24 часа
+        self.EARLY_REMINDER_DAYS = 7
+        
+    def validate(self) -> bool:
+        """Проверка корректности конфигурации"""
+        if not self.API_TOKEN:
+            raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+        return True
 
-# Google Sheets настройки
-GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
-GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
-
-# Проверка обязательных переменных
-if not API_TOKEN:
-    logging.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
-    exit(1)
+# Создаем экземпляр конфигурации
+config = Config()
 
 # ========== УЛУЧШЕНИЕ: РАСШИРЕННОЕ ЛОГИРОВАНИЕ ==========
 def setup_logging():
@@ -186,6 +204,23 @@ def get_edit_keyboard():
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
+def get_recommended_lifetime_keyboard(default_lifetime: int):
+    """Клавиатура с рекомендуемым сроком службы"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text=f"✅ Использовать рекомендуемый ({default_lifetime} дней)")
+    builder.button(text="🔙 Назад")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_filters_selection_keyboard(filters: List[Dict], action: str):
+    """Клавиатура для выбора фильтра"""
+    builder = ReplyKeyboardBuilder()
+    for f in filters:
+        builder.button(text=f"#{f['id']} - {f['filter_type']} ({f['location']})")
+    builder.button(text="🔙 Назад")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
 def get_status_icon_and_text(days_until_expiry: int):
     """Получение иконки и текста статуса"""
     if days_until_expiry <= 0:
@@ -228,22 +263,46 @@ def create_expiry_infographic(filters):
 
 def is_admin(user_id: int) -> bool:
     """Проверка прав администратора"""
-    return user_id == ADMIN_ID
+    return user_id == config.ADMIN_ID
 
 def backup_database() -> bool:
     """Создание резервной копии базы данных"""
     try:
-        if os.path.exists('filters.db'):
+        if os.path.exists(config.DB_PATH):
             backup_name = f'filters_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-            shutil.copy2('filters.db', backup_name)
+            shutil.copy2(config.DB_PATH, backup_name)
+            logging.info(f"Создана резервная копия: {backup_name}")
             return True
     except Exception as e:
         logging.error(f"Ошибка при создании резервной копии: {e}")
     return False
 
-# ========== УЛУЧШЕНИЕ: ВАЛИДАЦИЯ ПОЛЬЗОВАТЕЛЬСКОГО ВВОДА ==========
+# ========== УЛУЧШЕНИЕ: ВАЛИДАЦИЯ И БЕЗОПАСНОСТЬ ==========
+def sanitize_input(text: str) -> str:
+    """Санитизация пользовательского ввода"""
+    if not text:
+        return text
+    
+    # Удаляем потенциально опасные символы
+    sanitized = re.sub(r'[<>&\"\']', '', text)
+    return sanitized.strip()
+
+def validate_user_id(user_id: int) -> bool:
+    """Валидация ID пользователя"""
+    return isinstance(user_id, int) and user_id > 0
+
+async def check_user_permission(user_id: int, filter_id: int) -> bool:
+    """Проверка прав пользователя на фильтр"""
+    try:
+        filter_data = await get_filter_by_id(filter_id, user_id)
+        return filter_data is not None
+    except Exception:
+        return False
+
 def validate_filter_type(filter_type: str) -> tuple[bool, str]:
     """Валидация типа фильтра"""
+    filter_type = sanitize_input(filter_type)
+    
     if not filter_type or len(filter_type.strip()) == 0:
         return False, "Тип фильтра не может быть пустым"
     
@@ -258,6 +317,8 @@ def validate_filter_type(filter_type: str) -> tuple[bool, str]:
 
 def validate_location(location: str) -> tuple[bool, str]:
     """Валидация местоположения"""
+    location = sanitize_input(location)
+    
     if not location or len(location.strip()) == 0:
         return False, "Местоположение не может быть пустым"
     
@@ -280,6 +341,18 @@ def validate_lifetime(lifetime: str) -> tuple[bool, str, int]:
         return True, "OK", days
     except ValueError:
         return False, "Срок службы должен быть числом (дни)", 0
+
+# ========== УЛУЧШЕНИЕ: РЕТРИ МЕХАНИЗМЫ ==========
+async def execute_with_retry(func: Callable, max_retries: int = 3, delay: float = 1.0, *args, **kwargs):
+    """Выполнение функции с повторными попытками"""
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            logging.warning(f"Попытка {attempt + 1} не удалась: {e}. Повтор через {delay} сек...")
+            await asyncio.sleep(delay)
 
 # ========== GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
 class GoogleSheetsSync:
@@ -314,16 +387,16 @@ class GoogleSheetsSync:
     
     def is_configured(self) -> bool:
         """Проверка настройки синхронизации"""
-        return bool(self.sheet_id and GOOGLE_SHEETS_CREDENTIALS)
+        return bool(self.sheet_id and config.GOOGLE_SHEETS_CREDENTIALS)
     
     async def initialize_credentials(self):
         """Инициализация учетных данных Google"""
         try:
-            if not GOOGLE_SHEETS_CREDENTIALS:
+            if not config.GOOGLE_SHEETS_CREDENTIALS:
                 return False
             
             # Парсим JSON credentials из переменной окружения
-            credentials_info = json.loads(GOOGLE_SHEETS_CREDENTIALS)
+            credentials_info = json.loads(config.GOOGLE_SHEETS_CREDENTIALS)
             
             # Импортируем здесь, чтобы не требовать установку если не используется
             try:
@@ -528,13 +601,16 @@ class GoogleSheetsSync:
 # Создаем экземпляр синхронизации
 google_sync = GoogleSheetsSync()
 
-# ========== УЛУЧШЕНИЕ: МОНИТОРИНГ ЗДОРОВЬЯ ==========
-class BotHealthMonitor:
+# ========== УЛУЧШЕННЫЙ МОНИТОРИНГ ЗДОРОВЬЯ ==========
+class EnhancedHealthMonitor:
     def __init__(self):
         self.start_time = datetime.now()
         self.message_count = 0
         self.error_count = 0
         self.user_actions = {}
+        self.db_operations = 0
+        self.sync_operations = 0
+        self.user_sessions = {}
     
     def record_message(self, user_id: int):
         """Запись сообщения пользователя"""
@@ -546,6 +622,14 @@ class BotHealthMonitor:
     def record_error(self):
         """Запись ошибки"""
         self.error_count += 1
+    
+    def record_db_operation(self):
+        """Запись операции с БД"""
+        self.db_operations += 1
+    
+    def record_sync_operation(self):
+        """Запись операции синхронизации"""
+        self.sync_operations += 1
     
     async def get_health_status(self):
         """Получение статуса здоровья бота"""
@@ -561,8 +645,38 @@ class BotHealthMonitor:
             'active_users': active_users,
             'health_score': health_score
         }
+    
+    async def get_detailed_status(self):
+        """Получение детального статуса"""
+        basic_status = await self.get_health_status()
+        basic_status.update({
+            'db_operations': self.db_operations,
+            'sync_operations': self.sync_operations,
+            'active_sessions': len(self.user_sessions),
+            'database_size': await self.get_database_size(),
+            'memory_usage': self.get_memory_usage()
+        })
+        return basic_status
+    
+    async def get_database_size(self):
+        """Получение размера базы данных"""
+        try:
+            if os.path.exists(config.DB_PATH):
+                return os.path.getsize(config.DB_PATH)
+            return 0
+        except:
+            return 0
+    
+    def get_memory_usage(self):
+        """Получение использования памяти"""
+        try:
+            import psutil
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024  # MB
+        except ImportError:
+            return 0
 
-health_monitor = BotHealthMonitor()
+health_monitor = EnhancedHealthMonitor()
 
 # ========== УЛУЧШЕНИЕ: RATE LIMITING ==========
 class RateLimiter:
@@ -590,7 +704,7 @@ class RateLimiter:
         self.user_requests[user_id].append(now)
         return True
 
-rate_limiter = RateLimiter(max_requests=10, window=30)
+rate_limiter = RateLimiter(max_requests=config.RATE_LIMIT_MAX_REQUESTS, window=config.RATE_LIMIT_WINDOW)
 
 # ========== УЛУЧШЕНИЕ: MIDDLEWARE ДЛЯ RATE LIMITING ==========
 class RateLimitMiddleware(BaseMiddleware):
@@ -615,7 +729,7 @@ class RateLimitMiddleware(BaseMiddleware):
 
 # Инициализация бота с улучшенными настройками
 bot = Bot(
-    token=API_TOKEN,
+    token=config.API_TOKEN,
     default=DefaultBotProperties(parse_mode='HTML')
 )
 storage = MemoryStorage()
@@ -628,7 +742,7 @@ dp.update.outer_middleware(RateLimitMiddleware())
 @asynccontextmanager
 async def get_db_connection():
     """Асинхронный контекстный менеджер для работы с БД"""
-    conn = await aiosqlite.connect('filters.db')
+    conn = await aiosqlite.connect(config.DB_PATH)
     conn.row_factory = aiosqlite.Row
     try:
         yield conn
@@ -646,6 +760,7 @@ async def get_user_filters(user_id: int) -> List[Dict]:
             cur = await conn.cursor()
             await cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
             rows = await cur.fetchall()
+            health_monitor.record_db_operation()
             return [dict(row) for row in rows]
     except Exception as e:
         logging.error(f"Ошибка при получении фильтров пользователя {user_id}: {e}")
@@ -659,6 +774,7 @@ async def get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
             cur = await conn.cursor()
             await cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
             result = await cur.fetchone()
+            health_monitor.record_db_operation()
             return dict(result) if result else None
     except Exception as e:
         logging.error(f"Ошибка при получении фильтра {filter_id}: {e}")
@@ -676,6 +792,7 @@ async def get_all_users_stats() -> Dict:
                                   SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
                            FROM filters''')
             result = await cur.fetchone()
+            health_monitor.record_db_operation()
             return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
     except Exception as e:
         logging.error(f"Ошибка при получении статистики: {e}")
@@ -691,6 +808,8 @@ async def add_filter_to_db(user_id: int, filter_type: str, location: str, last_c
                               (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
                               VALUES (?, ?, ?, ?, ?, ?)''',
                               (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
+            
+            health_monitor.record_db_operation()
             
             # Автосинхронизация при добавлении
             if google_sync.auto_sync and google_sync.is_configured():
@@ -717,6 +836,8 @@ async def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
             
             await cur.execute(f"UPDATE filters SET {set_clause} WHERE id = ? AND user_id = ?", values)
             
+            health_monitor.record_db_operation()
+            
             # Автосинхронизация при обновлении
             if google_sync.auto_sync and google_sync.is_configured():
                 filters = await get_user_filters(user_id)
@@ -734,6 +855,8 @@ async def delete_filter_from_db(filter_id: int, user_id: int) -> bool:
         async with get_db_connection() as conn:
             cur = await conn.cursor()
             await cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+            
+            health_monitor.record_db_operation()
             
             # Автосинхронизация при удалении
             if google_sync.auto_sync and google_sync.is_configured():
@@ -814,6 +937,70 @@ def validate_date(date_str: str) -> datetime.date:
     
     raise ValueError("Неверный формат даты. Используйте ДД.ММ.ГГ или ДД.ММ")
 
+# ========== УЛУЧШЕНИЕ: МИГРАЦИИ БАЗЫ ДАННЫХ ==========
+async def check_and_update_schema():
+    """Проверка и обновление схемы базы данных"""
+    try:
+        async with get_db_connection() as conn:
+            # Проверяем существование колонок
+            cur = await conn.cursor()
+            await cur.execute("PRAGMA table_info(filters)")
+            columns = [row[1] for row in await cur.fetchall()]
+            
+            # Добавляем недостающие колонки
+            if 'created_at' not in columns:
+                await cur.execute("ALTER TABLE filters ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                logging.info("Добавлена колонка created_at")
+            
+            if 'updated_at' not in columns:
+                await cur.execute("ALTER TABLE filters ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                logging.info("Добавлена колонка updated_at")
+            
+            # Создаем недостающие индексы
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_user_expiry ON filters(user_id, expiry_date)")
+            
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении схемы БД: {e}")
+
+# ========== ЭКСПОРТ В EXCEL ==========
+async def export_to_excel(user_id: int) -> io.BytesIO:
+    """Экспорт фильтров в Excel"""
+    filters = await get_user_filters(user_id)
+    
+    if not filters:
+        raise ValueError("Нет данных для экспорта")
+    
+    # Создаем DataFrame
+    df = pd.DataFrame(filters)
+    
+    # Удаляем служебные колонки
+    columns_to_drop = ['user_id', 'created_at', 'updated_at']
+    for col in columns_to_drop:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    
+    # Добавляем вычисляемые поля
+    today = datetime.now().date()
+    df['last_change'] = pd.to_datetime(df['last_change']).dt.strftime('%d.%m.%Y')
+    df['expiry_date'] = pd.to_datetime(df['expiry_date']).dt.strftime('%d.%m.%Y')
+    
+    # Добавляем статус
+    def calculate_status(expiry_date_str):
+        expiry_date = datetime.strptime(expiry_date_str, '%d.%m.%Y').date()
+        days_until = (expiry_date - today).days
+        icon, status = get_status_icon_and_text(days_until)
+        return f"{icon} {status} ({days_until} дней)"
+    
+    df['Статус'] = df['expiry_date'].apply(calculate_status)
+    
+    # Создаем Excel файл в памяти
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Фильтры', index=False)
+    
+    output.seek(0)
+    return output
+
 # ========== ОСТАЛЬНЫЕ НАСТРОЙКИ ==========
 DEFAULT_LIFETIMES = {
     "магистральный sl10": 180,
@@ -891,10 +1078,10 @@ async def init_db():
     except Exception as e:
         logging.error(f"Критическая ошибка инициализации БД: {e}")
         # Создаем резервную копию при критической ошибке
-        if os.path.exists('filters.db'):
+        if os.path.exists(config.DB_PATH):
             backup_name = f'filters_backup_critical_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
             try:
-                shutil.copy2('filters.db', backup_name)
+                shutil.copy2(config.DB_PATH, backup_name)
                 logging.info(f"Создана критическая резервная копие: {backup_name}")
             except Exception as backup_error:
                 logging.error(f"Не удалось создать резервную копию: {backup_error}")
@@ -909,16 +1096,16 @@ async def error_handler(update: types.Update, exception: Exception):
         health_monitor.record_error()
         
         # Уведомляем администратора
-        if ADMIN_ID:
+        if config.ADMIN_ID:
             error_traceback = "".join(traceback.format_exception(None, exception, exception.__traceback__))
             short_error = str(exception)[:1000]
             
             await bot.send_message(
-                ADMIN_ID,
+                config.ADMIN_ID,
                 f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА</b>\n\n"
                 f"💥 <b>Ошибка:</b> {short_error}\n"
                 f"📱 <b>Update:</b> {update}\n\n"
-                f"🔧 <i>Подробности в логах</i>",
+                f"🔧 <i>Подробности в логаз</i>",
                 parse_mode='HTML'
             )
         
@@ -993,16 +1180,16 @@ async def health_monitoring_task():
     """Фоновая задача мониторинга здоровья"""
     while True:
         try:
-            health_status = await health_monitor.get_health_status()
+            health_status = await health_monitor.get_detailed_status()
             
             # Логируем каждые 30 минут
             if health_status['message_count'] % 30 == 0:
                 logging.info(f"Статус здоровья: {health_status}")
             
             # Уведомляем администратора при низком health score
-            if health_status['health_score'] < 80 and ADMIN_ID:
+            if health_status['health_score'] < 80 and config.ADMIN_ID:
                 await bot.send_message(
-                    ADMIN_ID,
+                    config.ADMIN_ID,
                     f"⚠️ <b>НИЗКИЙ HEALTH SCORE</b>\n\n"
                     f"📊 Текущий score: {health_status['health_score']:.1f}%\n"
                     f"💥 Ошибок: {health_status['error_count']}\n"
@@ -1015,6 +1202,31 @@ async def health_monitoring_task():
         except Exception as e:
             logging.error(f"Ошибка в задаче мониторинга: {e}")
             await asyncio.sleep(60 * 5)
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ ==========
+async def show_filters_for_selection(message: types.Message, filters: List[Dict], action: str):
+    """Показать фильтры для выбора"""
+    if not filters:
+        await message.answer("❌ Нет фильтров для выбора")
+        return
+    
+    text = f"📋 <b>ВЫБЕРИТЕ ФИЛЬТР ДЛЯ {action.upper()}:</b>\n\n"
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until = (expiry_date - datetime.now().date()).days
+        icon, status = get_status_icon_and_text(days_until)
+        
+        text += (
+            f"{icon} <b>#{f['id']}</b> - {f['filter_type']}\n"
+            f"📍 {f['location']} | 📅 {format_date_nice(expiry_date)} | {status}\n\n"
+        )
+    
+    await message.answer(
+        text,
+        reply_markup=get_filters_selection_keyboard(filters, action),
+        parse_mode='HTML'
+    )
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
@@ -1217,14 +1429,6 @@ async def process_change_date(message: types.Message, state: FSMContext):
             reply_markup=get_back_keyboard()
         )
 
-def get_recommended_lifetime_keyboard(default_lifetime: int):
-    """Клавиатура с рекомендуемым сроком службы"""
-    builder = ReplyKeyboardBuilder()
-    builder.button(text=f"✅ Использовать рекомендуемый ({default_lifetime} дней)")
-    builder.button(text="🔙 Назад")
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True)
-
 @dp.message(FilterStates.waiting_lifetime)
 async def process_lifetime(message: types.Message, state: FSMContext):
     """Обработка срока службы"""
@@ -1419,6 +1623,28 @@ async def cmd_management(message: types.Message):
         parse_mode='HTML'
     )
 
+@dp.message(F.text == "✏️ Редактировать фильтр")
+async def cmd_edit_filter(message: types.Message, state: FSMContext):
+    """Начало редактирования фильтра"""
+    filters = await get_user_filters(message.from_user.id)
+    if not filters:
+        await message.answer("❌ Нет фильтров для редактирования")
+        return
+    
+    await show_filters_for_selection(message, filters, "edit")
+    await state.set_state(EditFilterStates.waiting_filter_selection)
+
+@dp.message(F.text == "🗑️ Удалить фильтр")
+async def cmd_delete_filter(message: types.Message, state: FSMContext):
+    """Начало удаления фильтра"""
+    filters = await get_user_filters(message.from_user.id)
+    if not filters:
+        await message.answer("❌ Нет фильтров для удаления")
+        return
+    
+    await show_filters_for_selection(message, filters, "delete")
+    await state.set_state(DeleteFilterStates.waiting_filter_selection)
+
 # ========== ИМПОРТ/ЭКСПОРТ ==========
 @dp.message(F.text == "📤 Импорт/Экспорт")
 async def cmd_import_export(message: types.Message):
@@ -1437,6 +1663,26 @@ async def cmd_import_export(message: types.Message):
         parse_mode='HTML'
     )
 
+@dp.message(F.text == "📤 Экспорт в Excel")
+async def cmd_export_excel(message: types.Message):
+    """Экспорт данных в Excel"""
+    try:
+        excel_file = await export_to_excel(message.from_user.id)
+        
+        await message.answer_document(
+            types.BufferedInputFile(
+                excel_file.getvalue(),
+                filename=f"фильтры_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            ),
+            caption="📊 <b>Ваши фильтры экспортированы в Excel</b>",
+            parse_mode='HTML'
+        )
+    except ValueError as e:
+        await message.answer(f"❌ {str(e)}")
+    except Exception as e:
+        logging.error(f"Ошибка при экспорте в Excel: {e}")
+        await message.answer("❌ Произошла ошибка при экспорте данных")
+
 # ========== GOOGLE SHEETS СИНХРОНИЗАЦИЯ ==========
 @dp.message(F.text == "☁️ Синхронизация с Google Sheets")
 async def cmd_google_sheets_sync(message: types.Message):
@@ -1445,7 +1691,7 @@ async def cmd_google_sheets_sync(message: types.Message):
     
     status_text = "☁️ <b>СИНХРОНИЗАЦИЯ С GOOGLE SHEETS</b>\n\n"
     
-    if not GOOGLE_SHEETS_CREDENTIALS:
+    if not config.GOOGLE_SHEETS_CREDENTIALS:
         status_text += "❌ <b>Статус:</b> Не настроены учетные данные\n"
         status_text += "💡 <i>Установите переменную GOOGLE_SHEETS_CREDENTIALS</i>\n\n"
     elif not google_sync.sheet_id:
@@ -1521,7 +1767,7 @@ async def cmd_sync_to_sheets(message: types.Message):
 @dp.message(F.text == "⚙️ Настройки синхронизации")
 async def cmd_sync_settings(message: types.Message):
     """Настройки синхронизации"""
-    if not GOOGLE_SHEETS_CREDENTIALS:
+    if not config.GOOGLE_SHEETS_CREDENTIALS:
         await message.answer(
             "❌ <b>Учетные данные не настроены</b>\n\n"
             "Для использования синхронизации с Google Sheets необходимо:\n\n"
@@ -1622,4 +1868,61 @@ async def cmd_auto_sync_on(message: types.Message):
     
     await message.answer(
         "✅ <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА</b>\n\n"
-        "💫 <i>Теперь данные будут автоматически обновляться в Google Sheets при любых изменениях фильтров
+        "💫 <i>Теперь данные будут автоматически обновляться в Google Sheets при любых изменениях фильтров</i>",
+        reply_markup=get_sync_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "⏸️ Автосинхронизация ВЫКЛ")
+async def cmd_auto_sync_off(message: types.Message):
+    """Выключение автосинхронизации"""
+    google_sync.auto_sync = False
+    google_sync.save_settings()
+    
+    await message.answer(
+        "⏸️ <b>АВТОСИНХРОНИЗАЦИЯ ВЫКЛЮЧЕНА</b>\n\n"
+        "💫 <i>Данные больше не будут автоматически обновляться в Google Sheets</i>",
+        reply_markup=get_sync_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
+async def main():
+    """Основная функция запуска"""
+    try:
+        # Инициализация конфигурации
+        config.validate()
+        
+        # Настройка логирования
+        setup_logging()
+        
+        # Инициализация базы данных
+        await init_db()
+        await check_and_update_schema()
+        
+        # Запуск фоновых задач
+        asyncio.create_task(send_reminders())
+        asyncio.create_task(health_monitoring_task())
+        
+        # Запуск бота
+        logging.info("Бот запускается...")
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logging.critical(f"Критическая ошибка при запуске: {e}")
+        # Уведомление администратора
+        if config.ADMIN_ID:
+            try:
+                await bot.send_message(config.ADMIN_ID, f"🚨 Бот упал: {e}")
+            except:
+                pass
+        raise
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот остановлен пользователем")
+    except Exception as e:
+        logging.critical(f"Фатальная ошибка: {e}")
+        sys.exit(1)
