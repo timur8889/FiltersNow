@@ -1122,14 +1122,16 @@ async def error_handler(update: types.Update, exception: Exception):
         logging.critical(f"Ошибка в обработчике ошибок: {e}")
 
 # ========== СИСТЕМА НАПОМИНАНИЙ ==========
-async def send_reminders():
-    """Фоновая задача для отправки напоминаний"""
+async def send_personalized_reminders():
+    """Персонализированные напоминания с учетом времени суток"""
     while True:
         try:
+            # Получаем текущий час для персонализации
+            current_hour = datetime.now().hour
+            greeting = "Доброе утро" if 5 <= current_hour < 12 else "Добрый день" if 12 <= current_hour < 18 else "Добрый вечер"
+            
             async with get_db_connection() as conn:
                 cur = await conn.cursor()
-                
-                # Находим фильтры, у которых срок истекает через 1, 3, 7 дней или просрочены
                 await cur.execute('''
                     SELECT DISTINCT user_id FROM filters 
                     WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')
@@ -1139,41 +1141,47 @@ async def send_reminders():
                 
                 for user_row in users_to_notify:
                     user_id = user_row['user_id']
-                    
-                    # Получаем фильтры пользователя
                     filters = await get_user_filters(user_id)
+                    
                     expiring_filters = []
+                    expired_filters = []
                     
                     for f in filters:
                         expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
                         days_until = (expiry_date - datetime.now().date()).days
                         
-                        if days_until <= 7:  # Уведомляем за неделю и раньше
+                        if days_until <= 0:
+                            expired_filters.append((f, days_until))
+                        elif days_until <= 7:
                             expiring_filters.append((f, days_until))
                     
-                    if expiring_filters:
-                        message = "🔔 <b>НАПОМИНАНИЕ О ЗАМЕНЕ ФИЛЬТРОВ</b>\n\n"
+                    if expired_filters or expiring_filters:
+                        message = f"{greeting}! 🔔\n\n"
                         
-                        for f, days in expiring_filters:
-                            icon, status = get_status_icon_and_text(days)
-                            message += (
-                                f"{icon} <b>{f['filter_type']}</b>\n"
-                                f"📍 {f['location']} - {status}\n"
-                                f"📅 Заменить до: {format_date_nice(datetime.strptime(str(f['expiry_date']), '%Y-%m-%d'))}\n\n"
-                            )
+                        if expired_filters:
+                            message += "🔴 <b>ПРОСРОЧЕННЫЕ ФИЛЬТРЫ:</b>\n"
+                            for f, days in expired_filters:
+                                message += f"• {f['filter_type']} ({f['location']}) - ПРОСРОЧЕН\n"
+                            message += "\n"
+                        
+                        if expiring_filters:
+                            message += "🟡 <b>СКОРО ИСТЕКАЮТ:</b>\n"
+                            for f, days in expiring_filters:
+                                message += f"• {f['filter_type']} ({f['location']}) - {days} дней\n"
+                        
+                        message += f"\n💫 Всего фильтров: {len(filters)}"
                         
                         try:
                             await bot.send_message(user_id, message, parse_mode='HTML')
-                            await asyncio.sleep(0.1)  # Защита от лимитов
+                            await asyncio.sleep(0.2)  # Увеличиваем задержку
                         except Exception as e:
                             logging.warning(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
             
-            # Проверяем каждые 24 часа
-            await asyncio.sleep(24 * 60 * 60)
+            await asyncio.sleep(23 * 60 * 60)  # Проверяем каждые 23 часа
             
         except Exception as e:
             logging.error(f"Ошибка в задаче напоминаний: {e}")
-            await asyncio.sleep(60 * 60)  # Ждем час при ошибке
+            await asyncio.sleep(60 * 60)
 
 # ========== МОНИТОРИНГ ЗДОРОВЬЯ ==========
 async def health_monitoring_task():
@@ -1228,6 +1236,17 @@ async def show_filters_for_selection(message: types.Message, filters: List[Dict]
         parse_mode='HTML'
     )
 
+# ========== БЕЗОПАСНАЯ СИНХРОНИЗАЦИЯ ==========
+async def safe_sync_to_sheets(user_id: int, filters: List[Dict]) -> tuple[bool, str]:
+    """Безопасная синхронизация с обработкой ошибок"""
+    try:
+        return await google_sync.sync_to_sheets(user_id, filters)
+    except ImportError:
+        return False, "Библиотеки Google не установлены. Установите: pip install gspread google-auth"
+    except Exception as e:
+        logging.error(f"Ошибка синхронизации: {e}")
+        return False, f"Ошибка синхронизации: {str(e)}"
+
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -1249,6 +1268,64 @@ async def cmd_start(message: types.Message):
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
     )
+
+@dp.message(F.text == "🔙 Назад")
+async def cmd_back(message: types.Message, state: FSMContext):
+    """Обработка кнопки Назад"""
+    current_state = await state.get_state()
+    
+    if current_state:
+        await state.clear()
+    
+    await message.answer(
+        "🔙 <b>Возврат в главное меню</b>",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    """Админ панель"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен")
+        return
+    
+    health_status = await health_monitor.get_detailed_status()
+    stats = await get_all_users_stats()
+    
+    admin_text = (
+        "👑 <b>АДМИН ПАНЕЛЬ</b>\n\n"
+        f"📊 <b>Статистика системы:</b>\n"
+        f"• 👥 Пользователей: {stats['total_users']}\n"
+        f"• 💧 Фильтров: {stats['total_filters']}\n"
+        f"• 🔴 Просрочено: {stats['expired_filters']}\n"
+        f"• 🟡 Скоро истечет: {stats['expiring_soon']}\n\n"
+        f"🖥️ <b>Статус бота:</b>\n"
+        f"• ⏱ Аптайм: {health_status['uptime']}\n"
+        f"• 📨 Сообщений: {health_status['message_count']}\n"
+        f"• 💥 Ошибок: {health_status['error_count']}\n"
+        f"• 🧠 Память: {health_status['memory_usage']:.1f} MB\n"
+        f"• 💾 Размер БД: {health_status['database_size'] / 1024 / 1024:.2f} MB\n"
+        f"• 🏥 Health: {health_status['health_score']:.1f}%\n\n"
+        f"🔧 <b>Действия:</b>\n"
+        f"/backup - Создать резервную копию\n"
+        f"/stats - Детальная статистика"
+    )
+    
+    await message.answer(admin_text, parse_mode='HTML')
+
+@dp.message(Command("backup"))
+async def cmd_backup(message: types.Message):
+    """Создание резервной копии"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    await message.answer("🔄 Создание резервной копии...")
+    
+    if backup_database():
+        await message.answer("✅ Резервная копия создана успешно")
+    else:
+        await message.answer("❌ Ошибка при создании резервной копии")
 
 @dp.message(F.text == "📋 Мои фильтры")
 async def cmd_my_filters(message: types.Message):
@@ -1645,6 +1722,267 @@ async def cmd_delete_filter(message: types.Message, state: FSMContext):
     await show_filters_for_selection(message, filters, "delete")
     await state.set_state(DeleteFilterStates.waiting_filter_selection)
 
+# ========== ОБРАБОТЧИКИ РЕДАКТИРОВАНИЯ ФИЛЬТРОВ ==========
+@dp.message(EditFilterStates.waiting_filter_selection)
+async def process_edit_filter_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора фильтра для редактирования"""
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
+        return
+    
+    # Извлекаем ID фильтра из текста
+    match = re.search(r'#(\d+)', message.text)
+    if not match:
+        await message.answer("❌ Неверный формат. Выберите фильтр из списка:")
+        return
+    
+    filter_id = int(match.group(1))
+    
+    # Проверяем существование фильтра
+    filter_data = await get_filter_by_id(filter_id, message.from_user.id)
+    if not filter_data:
+        await message.answer("❌ Фильтр не найден. Выберите другой:")
+        return
+    
+    await state.update_data(editing_filter_id=filter_id, editing_filter_data=filter_data)
+    await state.set_state(EditFilterStates.waiting_field_selection)
+    
+    await message.answer(
+        f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА #{filter_id}</b>\n\n"
+        f"💧 Тип: {filter_data['filter_type']}\n"
+        f"📍 Место: {filter_data['location']}\n"
+        f"📅 Дата замены: {format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d'))}\n\n"
+        f"📝 <b>Выберите поле для редактирования:</b>",
+        reply_markup=get_edit_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(EditFilterStates.waiting_field_selection)
+async def process_edit_field_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора поля для редактирования"""
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await cmd_management(message)
+        return
+    
+    field_mapping = {
+        "💧 Тип фильтра": "filter_type",
+        "📍 Местоположение": "location", 
+        "📅 Дата замены": "last_change",
+        "⏱️ Срок службы": "lifetime_days"
+    }
+    
+    if message.text not in field_mapping:
+        await message.answer("❌ Выберите поле из списка:", reply_markup=get_edit_keyboard())
+        return
+    
+    field_name = field_mapping[message.text]
+    await state.update_data(editing_field=field_name)
+    await state.set_state(EditFilterStates.waiting_new_value)
+    
+    prompts = {
+        "filter_type": "💧 Введите новый тип фильтра:",
+        "location": "📍 Введите новое местоположение:",
+        "last_change": "📅 Введите новую дату замены (ДД.ММ.ГГГГ):",
+        "lifetime_days": "⏱️ Введите новый срок службы (в днях):"
+    }
+    
+    await message.answer(prompts[field_name], reply_markup=get_back_keyboard())
+
+@dp.message(EditFilterStates.waiting_new_value)
+async def process_edit_new_value(message: types.Message, state: FSMContext):
+    """Обработка нового значения для редактирования"""
+    if message.text == "🔙 Назад":
+        await state.set_state(EditFilterStates.waiting_field_selection)
+        data = await state.get_data()
+        filter_data = data['editing_filter_data']
+        
+        await message.answer(
+            f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА #{data['editing_filter_id']}</b>\n\n"
+            f"📝 <b>Выберите поле для редактирования:</b>",
+            reply_markup=get_edit_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    data = await state.get_data()
+    field_name = data['editing_field']
+    filter_id = data['editing_filter_id']
+    user_id = message.from_user.id
+    
+    try:
+        update_data = {}
+        
+        if field_name == "filter_type":
+            is_valid, error_msg = validate_filter_type(message.text)
+            if not is_valid:
+                await message.answer(f"❌ {error_msg}\n\nВведите корректный тип фильтра:")
+                return
+            update_data['filter_type'] = message.text
+            
+        elif field_name == "location":
+            is_valid, error_msg = validate_location(message.text)
+            if not is_valid:
+                await message.answer(f"❌ {error_msg}\n\nВведите корректное местоположение:")
+                return
+            update_data['location'] = message.text
+            
+        elif field_name == "last_change":
+            try:
+                change_date = validate_date(message.text)
+                update_data['last_change'] = change_date.strftime('%Y-%m-%d')
+                
+                # Пересчитываем дату истечения
+                filter_data = await get_filter_by_id(filter_id, user_id)
+                if filter_data:
+                    expiry_date = change_date + timedelta(days=filter_data['lifetime_days'])
+                    update_data['expiry_date'] = expiry_date.strftime('%Y-%m-%d')
+                    
+            except ValueError as e:
+                await message.answer(f"❌ {str(e)}\n\nВведите корректную дату:")
+                return
+                
+        elif field_name == "lifetime_days":
+            is_valid, error_msg, lifetime_days = validate_lifetime(message.text)
+            if not is_valid:
+                await message.answer(f"❌ {error_msg}\n\nВведите корректный срок службы:")
+                return
+            
+            update_data['lifetime_days'] = lifetime_days
+            
+            # Пересчитываем дату истечения
+            filter_data = await get_filter_by_id(filter_id, user_id)
+            if filter_data:
+                last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d')
+                expiry_date = last_change + timedelta(days=lifetime_days)
+                update_data['expiry_date'] = expiry_date.strftime('%Y-%m-%d')
+        
+        # Обновляем фильтр в БД
+        success = await update_filter_in_db(filter_id, user_id, **update_data)
+        
+        if success:
+            await message.answer(
+                f"✅ <b>ФИЛЬТР УСПЕШНО ОБНОВЛЕН!</b>\n\n"
+                f"💫 <i>Изменения сохранены в системе</i>",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+            
+            # Показываем обновленные данные
+            updated_filter = await get_filter_by_id(filter_id, user_id)
+            if updated_filter:
+                expiry_date = datetime.strptime(str(updated_filter['expiry_date']), '%Y-%m-%d').date()
+                days_until = (expiry_date - datetime.now().date()).days
+                icon, status = get_status_icon_and_text(days_until)
+                
+                await message.answer(
+                    f"📋 <b>ОБНОВЛЕННЫЕ ДАННЫЕ:</b>\n\n"
+                    f"{icon} <b>Фильтр #{filter_id}</b>\n"
+                    f"💧 Тип: {updated_filter['filter_type']}\n"
+                    f"📍 Место: {updated_filter['location']}\n"
+                    f"📅 Замена: {format_date_nice(datetime.strptime(str(updated_filter['last_change']), '%Y-%m-%d'))}\n"
+                    f"⏰ Годен до: {format_date_nice(expiry_date)}\n"
+                    f"📊 Статус: {status} ({days_until} дней)",
+                    parse_mode='HTML'
+                )
+        else:
+            await message.answer(
+                "❌ <b>ОШИБКА ПРИ ОБНОВЛЕНИИ ФИЛЬТРА</b>\n\n"
+                "Пожалуйста, попробуйте еще раз.",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        
+        await state.clear()
+        
+    except Exception as e:
+        logging.error(f"Ошибка при редактировании фильтра: {e}")
+        await message.answer(
+            "❌ <b>ПРОИЗОШЛА ОШИБКА</b>\n\n"
+            "Пожалуйста, попробуйте еще раз.",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.clear()
+
+# ========== ОБРАБОТЧИКИ УДАЛЕНИЯ ФИЛЬТРОВ ==========
+@dp.message(DeleteFilterStates.waiting_filter_selection)
+async def process_delete_filter_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора фильтра для удаления"""
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
+        return
+    
+    match = re.search(r'#(\d+)', message.text)
+    if not match:
+        await message.answer("❌ Неверный формат. Выберите фильтр из списка:")
+        return
+    
+    filter_id = int(match.group(1))
+    filter_data = await get_filter_by_id(filter_id, message.from_user.id)
+    
+    if not filter_data:
+        await message.answer("❌ Фильтр не найден. Выберите другой:")
+        return
+    
+    await state.update_data(deleting_filter_id=filter_id, deleting_filter_data=filter_data)
+    await state.set_state(DeleteFilterStates.waiting_confirmation)
+    
+    expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
+    
+    await message.answer(
+        f"🗑️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
+        f"❌ Вы действительно хотите удалить фильтр?\n\n"
+        f"💧 Тип: {filter_data['filter_type']}\n"
+        f"📍 Место: {filter_data['location']}\n"
+        f"📅 Годен до: {format_date_nice(expiry_date)}\n\n"
+        f"<i>Это действие нельзя отменить!</i>",
+        reply_markup=get_confirmation_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(DeleteFilterStates.waiting_confirmation)
+async def process_delete_confirmation(message: types.Message, state: FSMContext):
+    """Обработка подтверждения удаления"""
+    data = await state.get_data()
+    filter_id = data['deleting_filter_id']
+    user_id = message.from_user.id
+    
+    if message.text == "✅ Да, всё верно":
+        success = await delete_filter_from_db(filter_id, user_id)
+        
+        if success:
+            await message.answer(
+                "🗑️ <b>ФИЛЬТР УСПЕШНО УДАЛЕН!</b>\n\n"
+                "💫 <i>Фильтр больше не отслеживается в системе</i>",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer(
+                "❌ <b>ОШИБКА ПРИ УДАЛЕНИИ ФИЛЬТРА</b>\n\n"
+                "Пожалуйста, попробуйте еще раз.",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        
+        await state.clear()
+        
+    elif message.text == "❌ Нет, изменить":
+        await state.clear()
+        await message.answer(
+            "❌ <b>Удаление отменено</b>",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            "Пожалуйста, подтвердите удаление:",
+            reply_markup=get_confirmation_keyboard()
+        )
+
 # ========== ИМПОРТ/ЭКСПОРТ ==========
 @dp.message(F.text == "📤 Импорт/Экспорт")
 async def cmd_import_export(message: types.Message):
@@ -1745,7 +2083,7 @@ async def cmd_sync_to_sheets(message: types.Message):
         return
     
     # Выполняем синхронизацию
-    success, result_message = await google_sync.sync_to_sheets(message.from_user.id, filters)
+    success, result_message = await safe_sync_to_sheets(message.from_user.id, filters)
     
     if success:
         await message.answer(
@@ -1901,8 +2239,11 @@ async def main():
         await check_and_update_schema()
         
         # Запуск фоновых задач
-        asyncio.create_task(send_reminders())
+        asyncio.create_task(send_personalized_reminders())
         asyncio.create_task(health_monitoring_task())
+        
+        # Настройка обработчика ошибок
+        dp.errors.register(error_handler)
         
         # Запуск бота
         logging.info("Бот запускается...")
