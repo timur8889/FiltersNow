@@ -7,13 +7,12 @@ import shutil
 import traceback
 import re
 import sys
-import aiosqlite
 import json
 import pandas as pd
 import io
 import time
 from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Callable, Any, Awaitable, Union
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -26,9 +25,21 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram import BaseMiddleware
 from dotenv import load_dotenv
+import pytz
 
 # Загрузка переменных окружения
 load_dotenv()
+
+# Настройка московского времени
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+
+def get_moscow_time():
+    """Получение текущего времени в московском часовом поясе"""
+    return datetime.now(MOSCOW_TZ)
+
+def get_moscow_date():
+    """Получение текущей даты в московском часовом поясе"""
+    return get_moscow_time().date()
 
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
@@ -79,7 +90,7 @@ class CacheManager:
         self._user_stats_cache = {}
         self._cache_ttl = config.CACHE_TTL
     
-    async def get_user_filters(self, user_id: int):
+    def get_user_filters(self, user_id: int):
         """Получение фильтров с кэшированием"""
         cache_key = f"filters_{user_id}"
         
@@ -89,11 +100,11 @@ class CacheManager:
                 return data
         
         # Загрузка из БД
-        filters = await get_user_filters_db(user_id)
+        filters = get_user_filters_db(user_id)
         self._user_filters_cache[cache_key] = (filters, time.time())
         return filters
     
-    async def get_user_stats(self, user_id: int):
+    def get_user_stats(self, user_id: int):
         """Получение статистики с кэшированием"""
         cache_key = f"stats_{user_id}"
         
@@ -103,14 +114,14 @@ class CacheManager:
                 return data
         
         # Загрузка из БД
-        filters = await self.get_user_filters(user_id)
+        filters = self.get_user_filters(user_id)
         stats = self._calculate_user_stats(filters)
         self._user_stats_cache[cache_key] = (stats, time.time())
         return stats
     
     def _calculate_user_stats(self, filters: List[Dict]) -> Dict:
         """Расчет статистики пользователя"""
-        today = datetime.now().date()
+        today = get_moscow_date()
         stats = {
             'total': len(filters),
             'expired': 0,
@@ -282,12 +293,6 @@ def get_back_keyboard():
     builder.button(text="🔙 Назад")
     return builder.as_markup(resize_keyboard=True)
 
-def get_cancel_keyboard():
-    """Клавиатура отмены"""
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="❌ Отмена")
-    return builder.as_markup(resize_keyboard=True)
-
 def get_edit_keyboard():
     """Клавиатура для редактирования"""
     builder = ReplyKeyboardBuilder()
@@ -351,17 +356,17 @@ def format_filter_status_with_progress(filter_data: Dict) -> str:
     expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
     last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
     days_total = filter_data['lifetime_days']
-    days_passed = (datetime.now().date() - last_change).days
+    days_passed = (get_moscow_date() - last_change).days
     percentage = min(100, max(0, (days_passed / days_total) * 100))
     
     progress_bar = create_progress_bar(percentage)
-    days_until = (expiry_date - datetime.now().date()).days
+    days_until = (expiry_date - get_moscow_date()).days
     
     return f"{progress_bar} ({days_passed}/{days_total} дней, осталось: {days_until} дней)"
 
 def create_expiry_infographic(filters):
     """Создание инфографики по срокам"""
-    today = datetime.now().date()
+    today = get_moscow_date()
     expired = 0
     expiring_soon = 0
     normal = 0
@@ -400,7 +405,7 @@ def backup_database() -> bool:
     """Создание резервной копии базы данных"""
     try:
         if os.path.exists(config.DB_PATH):
-            backup_name = f'filters_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+            backup_name = f'filters_backup_{get_moscow_time().strftime("%Y%m%d_%H%M%S")}.db'
             backup_path = os.path.join(config.BACKUP_PATH, backup_name)
             shutil.copy2(config.DB_PATH, backup_path)
             logging.info(f"Создана резервная копия: {backup_path}")
@@ -431,10 +436,10 @@ def validate_user_id(user_id: int) -> bool:
     """Валидация ID пользователя"""
     return isinstance(user_id, int) and user_id > 0
 
-async def check_user_permission(user_id: int, filter_id: int) -> bool:
+def check_user_permission(user_id: int, filter_id: int) -> bool:
     """Проверка прав пользователя на фильтр"""
     try:
-        filter_data = await get_filter_by_id(filter_id, user_id)
+        filter_data = get_filter_by_id(filter_id, user_id)
         return filter_data is not None
     except Exception:
         return False
@@ -483,16 +488,16 @@ def validate_lifetime(lifetime: str) -> tuple[bool, str, int]:
         return False, "Срок службы должен быть числом (дни)", 0
 
 # ========== УЛУЧШЕНИЕ: РЕТРИ МЕХАНИЗМЫ ==========
-async def execute_with_retry(func: Callable, max_retries: int = 3, delay: float = 1.0, *args, **kwargs):
+def execute_with_retry(func: Callable, max_retries: int = 3, delay: float = 1.0, *args, **kwargs):
     """Выполнение функции с повторными попытками"""
     for attempt in range(max_retries):
         try:
-            return await func(*args, **kwargs)
+            return func(*args, **kwargs)
         except Exception as e:
             if attempt == max_retries - 1:
                 raise e
             logging.warning(f"Попытка {attempt + 1} не удалась: {e}. Повтор через {delay} сек...")
-            await asyncio.sleep(delay)
+            time.sleep(delay)
 
 # ========== GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
 class GoogleSheetsSync:
@@ -529,7 +534,7 @@ class GoogleSheetsSync:
         """Проверка настройки синхронизации"""
         return bool(self.sheet_id and config.GOOGLE_SHEETS_CREDENTIALS)
     
-    async def initialize_credentials(self):
+    def initialize_credentials(self):
         """Инициализация учетных данных Google"""
         try:
             if not config.GOOGLE_SHEETS_CREDENTIALS:
@@ -556,14 +561,14 @@ class GoogleSheetsSync:
             logging.error(f"Ошибка инициализации Google Sheets: {e}")
             return False
     
-    async def sync_to_sheets(self, user_id: int, user_filters: List[Dict]) -> tuple[bool, str]:
+    def sync_to_sheets(self, user_id: int, user_filters: List[Dict]) -> tuple[bool, str]:
         """Синхронизация данных с Google Sheets"""
         try:
             if not self.is_configured():
                 return False, "Синхронизация не настроена"
             
             if not self.credentials:
-                if not await self.initialize_credentials():
+                if not self.initialize_credentials():
                     return False, "Ошибка инициализации Google API"
             
             import gspread
@@ -591,7 +596,7 @@ class GoogleSheetsSync:
                 worksheet.delete_rows(2, len(worksheet.get_all_values()))
             
             # Подготавливаем данные
-            today = datetime.now().date()
+            today = get_moscow_date()
             rows = []
             
             for f in user_filters:
@@ -633,14 +638,14 @@ class GoogleSheetsSync:
             logging.error(f"Ошибка синхронизации с Google Sheets: {e}")
             return False, f"Ошибка синхронизации: {str(e)}"
     
-    async def sync_from_sheets(self, user_id: int) -> tuple[bool, str, int]:
+    def sync_from_sheets(self, user_id: int) -> tuple[bool, str, int]:
         """Синхронизация данных из Google Sheets"""
         try:
             if not self.is_configured():
                 return False, "Синхронизация не настроена", 0
             
             if not self.credentials:
-                if not await self.initialize_credentials():
+                if not self.initialize_credentials():
                     return False, "Ошибка инициализации Google API", 0
             
             import gspread
@@ -711,7 +716,7 @@ class GoogleSheetsSync:
                     expiry_date = change_date + timedelta(days=lifetime_days)
                     
                     # Добавление в БД
-                    success = await add_filter_to_db(
+                    success = add_filter_to_db(
                         user_id=user_id,
                         filter_type=filter_type,
                         location=location,
@@ -747,7 +752,7 @@ google_sync = GoogleSheetsSync()
 # ========== УЛУЧШЕННЫЙ МОНИТОРИНГ ЗДОРОВЬЯ ==========
 class EnhancedHealthMonitor:
     def __init__(self):
-        self.start_time = datetime.now()
+        self.start_time = get_moscow_time()
         self.message_count = 0
         self.error_count = 0
         self.user_actions = {}
@@ -789,9 +794,9 @@ class EnhancedHealthMonitor:
         total = self.cache_hits + self.cache_misses
         return (self.cache_hits / total * 100) if total > 0 else 0
     
-    async def get_health_status(self):
+    def get_health_status(self):
         """Получение статуса здоровья бота"""
-        uptime = datetime.now() - self.start_time
+        uptime = get_moscow_time() - self.start_time
         active_users = len([uid for uid, count in self.user_actions.items() if count > 0])
         
         health_score = (self.message_count - self.error_count) / max(1, self.message_count) * 100
@@ -805,21 +810,21 @@ class EnhancedHealthMonitor:
             'cache_hit_rate': self.get_cache_hit_rate()
         }
     
-    async def get_detailed_status(self):
+    def get_detailed_status(self):
         """Получение детального статуса"""
-        basic_status = await self.get_health_status()
+        basic_status = self.get_health_status()
         basic_status.update({
             'db_operations': self.db_operations,
             'sync_operations': self.sync_operations,
             'active_sessions': len(self.user_sessions),
-            'database_size': await self.get_database_size(),
+            'database_size': self.get_database_size(),
             'memory_usage': self.get_memory_usage(),
             'cache_hits': self.cache_hits,
             'cache_misses': self.cache_misses
         })
         return basic_status
     
-    async def get_database_size(self):
+    def get_database_size(self):
         """Получение размера базы данных"""
         try:
             if os.path.exists(config.DB_PATH):
@@ -848,7 +853,7 @@ class RateLimiter:
     
     def is_allowed(self, user_id: int) -> bool:
         """Проверка разрешения на обработку запроса"""
-        now = datetime.now()
+        now = get_moscow_time()
         if user_id not in self.user_requests:
             self.user_requests[user_id] = []
         
@@ -899,28 +904,28 @@ dp = Dispatcher(storage=storage)
 # Регистрация middleware
 dp.update.outer_middleware(EnhancedMiddleware())
 
-# ========== УЛУЧШЕНИЕ: АСИНХРОННАЯ БАЗА ДАННЫХ ==========
-@asynccontextmanager
-async def get_db_connection():
-    """Асинхронный контекстный менеджер для работы с БД"""
-    conn = await aiosqlite.connect(config.DB_PATH)
-    conn.row_factory = aiosqlite.Row
+# ========== СИНХРОННАЯ БАЗА ДАННЫХ ==========
+@contextmanager
+def get_db_connection():
+    """Синхронный контекстный менеджер для работы с БД"""
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
     try:
         yield conn
-        await conn.commit()
+        conn.commit()
     except Exception as e:
-        await conn.rollback()
+        conn.rollback()
         raise e
     finally:
-        await conn.close()
+        conn.close()
 
-async def get_user_filters_db(user_id: int) -> List[Dict]:
-    """Асинхронное получение фильтров пользователя из БД"""
+def get_user_filters_db(user_id: int) -> List[Dict]:
+    """Синхронное получение фильтров пользователя из БД"""
     try:
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
-            await cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
-            rows = await cur.fetchall()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM filters WHERE user_id = ? ORDER BY expiry_date", (user_id,))
+            rows = cur.fetchall()
             health_monitor.record_db_operation()
             health_monitor.record_cache_miss()  # Пропуск кэша при прямом обращении к БД
             return [dict(row) for row in rows]
@@ -929,25 +934,25 @@ async def get_user_filters_db(user_id: int) -> List[Dict]:
         health_monitor.record_error()
         return []
 
-async def get_user_filters(user_id: int) -> List[Dict]:
+def get_user_filters(user_id: int) -> List[Dict]:
     """Получение фильтров пользователя с использованием кэша"""
-    return await cache_manager.get_user_filters(user_id)
+    return cache_manager.get_user_filters(user_id)
 
-async def get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
-    """Асинхронное получение фильтра по ID"""
+def get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
+    """Синхронное получение фильтра по ID"""
     try:
         # Сначала проверяем кэш
-        filters = await get_user_filters(user_id)
+        filters = get_user_filters(user_id)
         for f in filters:
             if f['id'] == filter_id:
                 health_monitor.record_cache_hit()
                 return f
         
         # Если не найдено в кэше, ищем в БД
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
-            await cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
-            result = await cur.fetchone()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+            result = cur.fetchone()
             health_monitor.record_db_operation()
             health_monitor.record_cache_miss()
             return dict(result) if result else None
@@ -956,17 +961,17 @@ async def get_filter_by_id(filter_id: int, user_id: int) -> Optional[Dict]:
         health_monitor.record_error()
         return None
 
-async def get_all_users_stats() -> Dict:
-    """Асинхронное получение статистики"""
+def get_all_users_stats() -> Dict:
+    """Синхронное получение статистики"""
     try:
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
-            await cur.execute('''SELECT COUNT(DISTINCT user_id) as total_users, 
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute('''SELECT COUNT(DISTINCT user_id) as total_users, 
                                   COUNT(*) as total_filters,
                                   SUM(CASE WHEN expiry_date <= date('now') THEN 1 ELSE 0 END) as expired_filters,
                                   SUM(CASE WHEN expiry_date BETWEEN date('now') AND date('now', '+7 days') THEN 1 ELSE 0 END) as expiring_soon
                            FROM filters''')
-            result = await cur.fetchone()
+            result = cur.fetchone()
             health_monitor.record_db_operation()
             return dict(result) if result else {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
     except Exception as e:
@@ -974,15 +979,15 @@ async def get_all_users_stats() -> Dict:
         health_monitor.record_error()
         return {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
 
-async def add_filter_to_db(user_id: int, filter_type: str, location: str, last_change: str, expiry_date: str, lifetime_days: int) -> bool:
+def add_filter_to_db(user_id: int, filter_type: str, location: str, last_change: str, expiry_date: str, lifetime_days: int) -> bool:
     """Добавление фильтра в БД"""
     try:
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
-            await cur.execute('''INSERT INTO filters 
-                              (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
-                              VALUES (?, ?, ?, ?, ?, ?)''',
-                              (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute('''INSERT INTO filters 
+                          (user_id, filter_type, location, last_change, expiry_date, lifetime_days) 
+                          VALUES (?, ?, ?, ?, ?, ?)''',
+                          (user_id, filter_type, location, last_change, expiry_date, lifetime_days))
             
             health_monitor.record_db_operation()
             
@@ -991,8 +996,8 @@ async def add_filter_to_db(user_id: int, filter_type: str, location: str, last_c
             
             # Автосинхронизация при добавлении
             if google_sync.auto_sync and google_sync.is_configured():
-                filters = await get_user_filters(user_id)
-                asyncio.create_task(google_sync.sync_to_sheets(user_id, filters))
+                filters = get_user_filters(user_id)
+                asyncio.create_task(execute_async_sync(google_sync.sync_to_sheets, user_id, filters))
             
             return True
     except Exception as e:
@@ -1000,19 +1005,19 @@ async def add_filter_to_db(user_id: int, filter_type: str, location: str, last_c
         health_monitor.record_error()
         return False
 
-async def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
+def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
     """Обновление фильтра в БД"""
     try:
         if not kwargs:
             return False
         
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
             set_clause = ", ".join([f"{key} = ?" for key in kwargs.keys()])
             values = list(kwargs.values())
             values.extend([filter_id, user_id])
             
-            await cur.execute(f"UPDATE filters SET {set_clause} WHERE id = ? AND user_id = ?", values)
+            cur.execute(f"UPDATE filters SET {set_clause} WHERE id = ? AND user_id = ?", values)
             
             health_monitor.record_db_operation()
             
@@ -1021,8 +1026,8 @@ async def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
             
             # Автосинхронизация при обновлении
             if google_sync.auto_sync and google_sync.is_configured():
-                filters = await get_user_filters(user_id)
-                asyncio.create_task(google_sync.sync_to_sheets(user_id, filters))
+                filters = get_user_filters(user_id)
+                asyncio.create_task(execute_async_sync(google_sync.sync_to_sheets, user_id, filters))
             
             return cur.rowcount > 0
     except Exception as e:
@@ -1030,12 +1035,12 @@ async def update_filter_in_db(filter_id: int, user_id: int, **kwargs) -> bool:
         health_monitor.record_error()
         return False
 
-async def delete_filter_from_db(filter_id: int, user_id: int) -> bool:
+def delete_filter_from_db(filter_id: int, user_id: int) -> bool:
     """Удаление фильтра из БД"""
     try:
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
-            await cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM filters WHERE id = ? AND user_id = ?", (filter_id, user_id))
             
             health_monitor.record_db_operation()
             
@@ -1044,14 +1049,20 @@ async def delete_filter_from_db(filter_id: int, user_id: int) -> bool:
             
             # Автосинхронизация при удалении
             if google_sync.auto_sync and google_sync.is_configured():
-                filters = await get_user_filters(user_id)
-                asyncio.create_task(google_sync.sync_to_sheets(user_id, filters))
+                filters = get_user_filters(user_id)
+                asyncio.create_task(execute_async_sync(google_sync.sync_to_sheets, user_id, filters))
             
             return cur.rowcount > 0
     except Exception as e:
         logging.error(f"Ошибка при удалении фильтра {filter_id}: {e}")
         health_monitor.record_error()
         return False
+
+# ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ АСИНХРОННОГО ВЫПОЛНЕНИЯ СИНХРОННЫХ ФУНКЦИЙ ==========
+async def execute_async_sync(func, *args, **kwargs):
+    """Асинхронное выполнение синхронной функции"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 # ========== УЛУЧШЕНИЕ: УЛУЧШЕННАЯ ВАЛИДАЦИЯ ДАТ ==========
 def try_auto_correct_date(date_str: str) -> Optional[datetime.date]:
@@ -1092,7 +1103,7 @@ def validate_date(date_str: str) -> datetime.date:
             if fmt in ['%d.%m', '%d%m']:
                 # Добавляем текущий год
                 date_obj = datetime.strptime(date_str, fmt).date()
-                date_obj = date_obj.replace(year=datetime.now().year)
+                date_obj = date_obj.replace(year=get_moscow_date().year)
             elif fmt in ['%d%m%y', '%d%m%Y']:
                 if len(date_str) in [6, 8]:
                     date_obj = datetime.strptime(date_str, fmt).date()
@@ -1101,7 +1112,7 @@ def validate_date(date_str: str) -> datetime.date:
             else:
                 date_obj = datetime.strptime(date_str, fmt).date()
             
-            today = datetime.now().date()
+            today = get_moscow_date()
             max_past = today - timedelta(days=5*365)
             max_future = today + timedelta(days=1)
             
@@ -1122,26 +1133,26 @@ def validate_date(date_str: str) -> datetime.date:
     raise ValueError("Неверный формат даты. Используйте ДД.ММ.ГГ или ДД.ММ")
 
 # ========== УЛУЧШЕНИЕ: МИГРАЦИИ БАЗЫ ДАННЫХ ==========
-async def check_and_update_schema():
+def check_and_update_schema():
     """Проверка и обновление схемы базы данных"""
     try:
-        async with get_db_connection() as conn:
+        with get_db_connection() as conn:
             # Проверяем существование колонок
-            cur = await conn.cursor()
-            await cur.execute("PRAGMA table_info(filters)")
-            columns = [row[1] for row in await cur.fetchall()]
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(filters)")
+            columns = [row[1] for row in cur.fetchall()]
             
             # Добавляем недостающие колонки
             if 'created_at' not in columns:
-                await cur.execute("ALTER TABLE filters ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                cur.execute("ALTER TABLE filters ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 logging.info("Добавлена колонка created_at")
             
             if 'updated_at' not in columns:
-                await cur.execute("ALTER TABLE filters ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                cur.execute("ALTER TABLE filters ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 logging.info("Добавлена колонка updated_at")
             
             # Создаем недостающие индексы
-            await cur.execute("CREATE INDEX IF NOT EXISTS idx_user_expiry ON filters(user_id, expiry_date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_user_expiry ON filters(user_id, expiry_date)")
             
     except Exception as e:
         logging.error(f"Ошибка при обновлении схемы БД: {e}")
@@ -1149,7 +1160,7 @@ async def check_and_update_schema():
 # ========== ЭКСПОРТ В EXCEL ==========
 async def export_to_excel(user_id: int) -> io.BytesIO:
     """Экспорт фильтров в Excel"""
-    filters = await get_user_filters(user_id)
+    filters = await execute_async_sync(get_user_filters, user_id)
     
     if not filters:
         raise ValueError("Нет данных для экспорта")
@@ -1164,7 +1175,7 @@ async def export_to_excel(user_id: int) -> io.BytesIO:
             df = df.drop(columns=[col])
     
     # Добавляем вычисляемые поля
-    today = datetime.now().date()
+    today = get_moscow_date()
     df['last_change'] = pd.to_datetime(df['last_change']).dt.strftime('%d.%m.%Y')
     df['expiry_date'] = pd.to_datetime(df['expiry_date']).dt.strftime('%d.%m.%Y')
     
@@ -1182,7 +1193,7 @@ async def export_to_excel(user_id: int) -> io.BytesIO:
         expiry_date = datetime.strptime(row['expiry_date'], '%d.%m.%Y').date()
         last_change = datetime.strptime(row['last_change'], '%d.%m.%Y').date()
         days_total = row['lifetime_days']
-        days_passed = (datetime.now().date() - last_change).days
+        days_passed = (get_moscow_date() - last_change).days
         percentage = min(100, max(0, (days_passed / days_total) * 100))
         return create_progress_bar(percentage)
     
@@ -1250,15 +1261,15 @@ class GoogleSheetsStates(StatesGroup):
     waiting_sheet_id = State()
     waiting_sync_confirmation = State()
 
-# ========== УЛУЧШЕНИЕ: АСИНХРОННАЯ ИНИЦИАЛИЗАЦИЯ БАЗЫ ==========
-async def init_db():
-    """Асинхронная инициализация базы данных"""
+# ========== СИНХРОННАЯ ИНИЦИАЛИЗАЦИЯ БАЗЫ ==========
+def init_db():
+    """Синхронная инициализация базы данных"""
     try:
-        async with get_db_connection() as conn:
-            cur = await conn.cursor()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
             
             # Создаем таблицу если не существует
-            await cur.execute('''
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS filters (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
@@ -1273,9 +1284,9 @@ async def init_db():
             ''')
             
             # Создаем индексы
-            await cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
-            await cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
-            await cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_expiry ON filters(user_id, expiry_date)''')
+            cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_id ON filters(user_id)''')
+            cur.execute('''CREATE INDEX IF NOT EXISTS idx_expiry_date ON filters(expiry_date)''')
+            cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_expiry ON filters(user_id, expiry_date)''')
             
             logging.info("База данных успешно инициализирована")
                 
@@ -1283,7 +1294,7 @@ async def init_db():
         logging.error(f"Критическая ошибка инициализации БД: {e}")
         # Создаем резервную копию при критической ошибке
         if os.path.exists(config.DB_PATH):
-            backup_name = f'filters_backup_critical_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+            backup_name = f'filters_backup_critical_{get_moscow_time().strftime("%Y%m%d_%H%M%S")}.db'
             try:
                 shutil.copy2(config.DB_PATH, backup_name)
                 logging.info(f"Создана критическая резервная копие: {backup_name}")
@@ -1331,28 +1342,28 @@ async def send_personalized_reminders():
     while True:
         try:
             # Получаем текущий час для персонализации
-            current_hour = datetime.now().hour
+            current_hour = get_moscow_time().hour
             greeting = "Доброе утро" if 5 <= current_hour < 12 else "Добрый день" if 12 <= current_hour < 18 else "Добрый вечер"
             
-            async with get_db_connection() as conn:
-                cur = await conn.cursor()
-                await cur.execute('''
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('''
                     SELECT DISTINCT user_id FROM filters 
                     WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')
                     OR expiry_date <= date('now')
                 ''')
-                users_to_notify = await cur.fetchall()
+                users_to_notify = cur.fetchall()
                 
                 for user_row in users_to_notify:
-                    user_id = user_row['user_id']
-                    filters = await get_user_filters(user_id)
+                    user_id = user_row[0]
+                    filters = await execute_async_sync(get_user_filters, user_id)
                     
                     expiring_filters = []
                     expired_filters = []
                     
                     for f in filters:
                         expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-                        days_until = (expiry_date - datetime.now().date()).days
+                        days_until = (expiry_date - get_moscow_date()).days
                         
                         if days_until <= 0:
                             expired_filters.append((f, days_until))
@@ -1403,7 +1414,7 @@ async def health_monitoring_task():
     """Фоновая задача мониторинга здоровья"""
     while True:
         try:
-            health_status = await health_monitor.get_detailed_status()
+            health_status = await execute_async_sync(health_monitor.get_detailed_status)
             
             # Логируем каждые 30 минут
             if health_status['message_count'] % 30 == 0:
@@ -1422,7 +1433,7 @@ async def health_monitoring_task():
                 )
             
             # Очистка кэша каждые 6 часов
-            if datetime.now().hour % 6 == 0 and datetime.now().minute < 5:
+            if get_moscow_time().hour % 6 == 0 and get_moscow_time().minute < 5:
                 cache_manager.clear_all_cache()
                 logging.info("Выполнена очистка кэша")
             
@@ -1443,7 +1454,7 @@ async def show_filters_for_selection(message: types.Message, filters: List[Dict]
     
     for f in filters:
         expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-        days_until = (expiry_date - datetime.now().date()).days
+        days_until = (expiry_date - get_moscow_date()).days
         icon, status = get_status_icon_and_text(days_until)
         
         text += (
@@ -1462,7 +1473,7 @@ async def safe_sync_to_sheets(user_id: int, filters: List[Dict]) -> tuple[bool, 
     """Безопасная синхронизация с обработкой ошибок"""
     try:
         health_monitor.record_sync_operation()
-        return await google_sync.sync_to_sheets(user_id, filters)
+        return await execute_async_sync(google_sync.sync_to_sheets, user_id, filters)
     except ImportError:
         return False, "Библиотеки Google не установлены. Установите: pip install gspread google-auth"
     except Exception as e:
@@ -1478,8 +1489,8 @@ async def process_replaced_filter(callback_query: types.CallbackQuery):
         user_id = callback_query.from_user.id
         
         # Обновляем дату замены на сегодня
-        today = datetime.now().date()
-        success = await update_filter_in_db(
+        today = get_moscow_date()
+        success = await execute_async_sync(update_filter_in_db,
             filter_id, 
             user_id, 
             last_change=today.strftime('%Y-%m-%d'),
@@ -1507,7 +1518,7 @@ async def process_postpone_filter(callback_query: types.CallbackQuery):
         filter_id = int(callback_query.data.split('_')[1])
         user_id = callback_query.from_user.id
         
-        filter_data = await get_filter_by_id(filter_id, user_id)
+        filter_data = await execute_async_sync(get_filter_by_id, filter_id, user_id)
         if not filter_data:
             await callback_query.answer("❌ Фильтр не найден", show_alert=True)
             return
@@ -1516,7 +1527,7 @@ async def process_postpone_filter(callback_query: types.CallbackQuery):
         current_expiry = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
         new_expiry = current_expiry + timedelta(days=7)
         
-        success = await update_filter_in_db(
+        success = await execute_async_sync(update_filter_in_db,
             filter_id, 
             user_id, 
             expiry_date=new_expiry.strftime('%Y-%m-%d')
@@ -1542,14 +1553,14 @@ async def process_details_filter(callback_query: types.CallbackQuery):
         filter_id = int(callback_query.data.split('_')[1])
         user_id = callback_query.from_user.id
         
-        filter_data = await get_filter_by_id(filter_id, user_id)
+        filter_data = await execute_async_sync(get_filter_by_id, filter_id, user_id)
         if not filter_data:
             await callback_query.answer("❌ Фильтр не найден", show_alert=True)
             return
         
         expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
         last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
-        days_until = (expiry_date - datetime.now().date()).days
+        days_until = (expiry_date - get_moscow_date()).days
         icon, status = get_status_icon_and_text(days_until)
         
         details_text = (
@@ -1649,8 +1660,8 @@ async def cmd_admin(message: types.Message):
         await message.answer("❌ Доступ запрещен")
         return
     
-    health_status = await health_monitor.get_detailed_status()
-    stats = await get_all_users_stats()
+    health_status = await execute_async_sync(health_monitor.get_detailed_status)
+    stats = await execute_async_sync(get_all_users_stats)
     
     admin_text = (
         "👑 <b>АДМИН ПАНЕЛЬ</b>\n\n"
@@ -1683,7 +1694,7 @@ async def cmd_backup(message: types.Message):
     
     await message.answer("🔄 Создание резервной копии...")
     
-    if backup_database():
+    if await execute_async_sync(backup_database):
         await message.answer("✅ Резервная копия создана успешно")
     else:
         await message.answer("❌ Ошибка при создании резервной копии")
@@ -1702,7 +1713,7 @@ async def cmd_my_filters(message: types.Message):
     """Показать фильтры пользователя"""
     health_monitor.record_message(message.from_user.id)
     
-    filters = await get_user_filters(message.from_user.id)
+    filters = await execute_async_sync(get_user_filters, message.from_user.id)
     
     if not filters:
         await message.answer(
@@ -1713,7 +1724,7 @@ async def cmd_my_filters(message: types.Message):
         )
         return
     
-    today = datetime.now().date()
+    today = get_moscow_date()
     response = ["📋 <b>ВАШИ ФИЛЬТРЫ:</b>\n"]
     
     for i, f in enumerate(filters, 1):
@@ -1750,7 +1761,7 @@ async def cmd_add_filter(message: types.Message, state: FSMContext):
     health_monitor.record_message(message.from_user.id)
     
     # Проверяем лимит фильтров
-    filters = await get_user_filters(message.from_user.id)
+    filters = await execute_async_sync(get_user_filters, message.from_user.id)
     if len(filters) >= MAX_FILTERS_PER_USER:
         await message.answer(
             f"❌ <b>Достигнут лимит фильтров</b>\n\n"
@@ -1960,7 +1971,7 @@ async def process_confirmation(message: types.Message, state: FSMContext):
             data = await state.get_data()
             
             # Сохраняем фильтр в БД
-            success = await add_filter_to_db(
+            success = await execute_async_sync(add_filter_to_db,
                 user_id=message.from_user.id,
                 filter_type=data['filter_type'],
                 location=data['location'],
@@ -2010,7 +2021,7 @@ async def cmd_management(message: types.Message):
     """Меню управления фильтрами"""
     health_monitor.record_message(message.from_user.id)
     
-    filters = await get_user_filters(message.from_user.id)
+    filters = await execute_async_sync(get_user_filters, message.from_user.id)
     
     if not filters:
         await message.answer(
@@ -2033,7 +2044,7 @@ async def cmd_management(message: types.Message):
     )
     
     # Показываем краткий список фильтров
-    today = datetime.now().date()
+    today = get_moscow_date()
     filters_text = []
     
     for f in filters[:10]:  # Показываем первые 10
@@ -2053,7 +2064,7 @@ async def cmd_management(message: types.Message):
 @dp.message(F.text == "✏️ Редактировать фильтр")
 async def cmd_edit_filter(message: types.Message, state: FSMContext):
     """Начало редактирования фильтра"""
-    filters = await get_user_filters(message.from_user.id)
+    filters = await execute_async_sync(get_user_filters, message.from_user.id)
     
     if not filters:
         await message.answer("❌ Нет фильтров для редактирования")
@@ -2081,7 +2092,7 @@ async def process_edit_filter_selection(message: types.Message, state: FSMContex
         user_id = message.from_user.id
         
         # Проверяем существование фильтра и права доступа
-        filter_data = await get_filter_by_id(filter_id, user_id)
+        filter_data = await execute_async_sync(get_filter_by_id, filter_id, user_id)
         if not filter_data:
             await message.answer("❌ Фильтр не найден. Выберите другой:")
             return
@@ -2109,7 +2120,7 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
     """Обработка выбора поля для редактирования"""
     try:
         if message.text == "🔙 Назад":
-            filters = await get_user_filters(message.from_user.id)
+            filters = await execute_async_sync(get_user_filters, message.from_user.id)
             await state.set_state(EditFilterStates.waiting_filter_selection)
             await show_filters_for_selection(message, filters, "редактирования")
             return
@@ -2228,7 +2239,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             }
         
         # Обновляем фильтр в БД
-        success = await update_filter_in_db(filter_id, user_id, **update_data)
+        success = await execute_async_sync(update_filter_in_db, filter_id, user_id, **update_data)
         
         if success:
             await message.answer(
@@ -2239,8 +2250,8 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             
             # Автосинхронизация
             if google_sync.auto_sync and google_sync.is_configured():
-                filters = await get_user_filters(user_id)
-                asyncio.create_task(google_sync.sync_to_sheets(user_id, filters))
+                filters = await execute_async_sync(get_user_filters, user_id)
+                asyncio.create_task(execute_async_sync(google_sync.sync_to_sheets, user_id, filters))
         else:
             await message.answer(
                 "❌ <b>ОШИБКА ПРИ ОБНОВЛЕНИИ</b>\n\n"
@@ -2258,7 +2269,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
 @dp.message(F.text == "🗑️ Удалить фильтр")
 async def cmd_delete_filter(message: types.Message, state: FSMContext):
     """Начало удаления фильтра"""
-    filters = await get_user_filters(message.from_user.id)
+    filters = await execute_async_sync(get_user_filters, message.from_user.id)
     
     if not filters:
         await message.answer("❌ Нет фильтров для удаления")
@@ -2286,7 +2297,7 @@ async def process_delete_filter_selection(message: types.Message, state: FSMCont
         user_id = message.from_user.id
         
         # Проверяем существование фильтра
-        filter_data = await get_filter_by_id(filter_id, user_id)
+        filter_data = await execute_async_sync(get_filter_by_id, filter_id, user_id)
         if not filter_data:
             await message.answer("❌ Фильтр не найден. Выберите другой:")
             return
@@ -2295,7 +2306,7 @@ async def process_delete_filter_selection(message: types.Message, state: FSMCont
         await state.set_state(DeleteFilterStates.waiting_confirmation)
         
         expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
-        days_until = (expiry_date - datetime.now().date()).days
+        days_until = (expiry_date - get_moscow_date()).days
         icon, status = get_status_icon_and_text(days_until)
         
         await message.answer(
@@ -2321,7 +2332,7 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
         response = message.text
         
         if response == "🔙 Назад":
-            filters = await get_user_filters(message.from_user.id)
+            filters = await execute_async_sync(get_user_filters, message.from_user.id)
             await state.set_state(DeleteFilterStates.waiting_filter_selection)
             await show_filters_for_selection(message, filters, "удаления")
             return
@@ -2333,7 +2344,7 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
             filter_data = data['deleting_filter_data']
             
             # Удаляем фильтр из БД
-            success = await delete_filter_from_db(filter_id, user_id)
+            success = await execute_async_sync(delete_filter_from_db, filter_id, user_id)
             
             if success:
                 await message.answer(
@@ -2347,8 +2358,8 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
                 
                 # Автосинхронизация
                 if google_sync.auto_sync and google_sync.is_configured():
-                    filters = await get_user_filters(user_id)
-                    asyncio.create_task(google_sync.sync_to_sheets(user_id, filters))
+                    filters = await execute_async_sync(get_user_filters, user_id)
+                    asyncio.create_task(execute_async_sync(google_sync.sync_to_sheets, user_id, filters))
             else:
                 await message.answer(
                     "❌ <b>ОШИБКА ПРИ УДАЛЕНИИ</b>\n\n"
@@ -2383,7 +2394,7 @@ async def cmd_statistics(message: types.Message):
     health_monitor.record_message(message.from_user.id)
     
     # Статистика пользователя
-    user_stats = await cache_manager.get_user_stats(message.from_user.id)
+    user_stats = await execute_async_sync(cache_manager.get_user_stats, message.from_user.id)
     
     if user_stats['total'] == 0:
         await message.answer(
@@ -2397,7 +2408,7 @@ async def cmd_statistics(message: types.Message):
     
     # Общая статистика (только для администратора)
     if is_admin(message.from_user.id):
-        global_stats = await get_all_users_stats()
+        global_stats = await execute_async_sync(get_all_users_stats)
         stats_text = (
             f"📊 <b>ОБЩАЯ СТАТИСТИКА СИСТЕМЫ</b>\n\n"
             f"👥 <b>Пользователей:</b> {global_stats['total_users']}\n"
@@ -2451,7 +2462,7 @@ async def cmd_export_excel(message: types.Message):
         await message.answer_document(
             types.BufferedInputFile(
                 excel_file.getvalue(),
-                filename=f"фильтры_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                filename=f"фильтры_{get_moscow_time().strftime('%Y%m%d_%H%M')}.xlsx"
             ),
             caption="📊 <b>Ваши фильтры экспортированы в Excel</b>",
             parse_mode='HTML'
@@ -2475,7 +2486,7 @@ async def cmd_import_excel(message: types.Message, state: FSMContext):
         "• Дата замены (ДД.ММ.ГГГГ)\n"
         "• Срок службы (дни)\n\n"
         "💡 <i>Или скачайте шаблон через меню</i>",
-        reply_markup=get_cancel_keyboard(),
+        reply_markup=get_back_keyboard(),
         parse_mode='HTML'
     )
 
@@ -2554,7 +2565,7 @@ async def process_excel_import(message: types.Message, state: FSMContext):
                     expiry_date = change_date + timedelta(days=lifetime_days)
                     
                     # Добавление в БД
-                    success = await add_filter_to_db(
+                    success = await execute_async_sync(add_filter_to_db,
                         user_id=message.from_user.id,
                         filter_type=filter_type,
                         location=location,
@@ -2683,7 +2694,7 @@ async def cmd_sync_to_sheets(message: types.Message):
     
     await message.answer("🔄 Синхронизация с Google Sheets...")
     
-    filters = await get_user_filters(message.from_user.id)
+    filters = await execute_async_sync(get_user_filters, message.from_user.id)
     
     if not filters:
         await message.answer("❌ Нет данных для синхронизации")
@@ -2729,7 +2740,7 @@ async def cmd_sync_status(message: types.Message):
         # Проверяем доступность таблицы
         try:
             if google_sync.credentials is None:
-                await google_sync.initialize_credentials()
+                await execute_async_sync(google_sync.initialize_credentials)
             
             import gspread
             gc = gspread.authorize(google_sync.credentials)
@@ -2769,7 +2780,7 @@ async def cmd_set_sheet_id(message: types.Message, state: FSMContext):
         "ID можно найти в URL таблицы:\n"
         "https://docs.google.com/spreadsheets/d/<b>[ЭТО_ID]</b>/edit\n\n"
         "💡 <i>Пример: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms</i>",
-        reply_markup=get_cancel_keyboard(),
+        reply_markup=get_back_keyboard(),
         parse_mode='HTML'
     )
 
@@ -2778,7 +2789,7 @@ async def process_sheet_id(message: types.Message, state: FSMContext):
     """Обработка ID таблицы"""
     sheet_id = message.text.strip()
     
-    if sheet_id == "❌ Отмена":
+    if sheet_id == "🔙 Назад":
         await state.clear()
         await cmd_sync_settings(message)
         return
@@ -2884,7 +2895,7 @@ async def handle_import_export_states_errors(message: types.Message, state: FSMC
     """Обработка неправильных сообщений в состояниях импорта/экспорта"""
     await message.answer(
         "❌ <b>Неправильный ввод</b>\n\n"
-        "Пожалуйста, отправьте Excel файл или используйте кнопку '❌ Отмена'",
+        "Пожалуйста, отправьте Excel файл или используйте кнопку '🔙 Назад'",
         parse_mode='HTML'
     )
 
@@ -2893,7 +2904,7 @@ async def handle_google_sheets_states_errors(message: types.Message, state: FSMC
     """Обработка неправильных сообщений в состояниях Google Sheets"""
     await message.answer(
         "❌ <b>Неправильный ввод</b>\n\n"
-        "Пожалуйста, введите корректный ID таблицы или используйте кнопку '❌ Отмена'",
+        "Пожалуйста, введите корректный ID таблицы или используйте кнопку '🔙 Назад'",
         parse_mode='HTML'
     )
 
@@ -2908,8 +2919,8 @@ async def main():
         setup_logging()
         
         # Инициализация базы данных
-        await init_db()
-        await check_and_update_schema()
+        await execute_async_sync(init_db)
+        await execute_async_sync(check_and_update_schema)
         
         # Запуск фоновых задач
         asyncio.create_task(send_personalized_reminders())
