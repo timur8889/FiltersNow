@@ -1,10 +1,12 @@
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.utils import executor
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
@@ -28,21 +30,22 @@ SERVICE_ACCOUNT_FILE = 'service-account.json'
 SPREADSHEET_ID = 'your-spreadsheet-id-here'
 
 # Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 # Глобальная переменная для хранения данных
 users_data = {}
 sync_status = "🟢 Активна"
 
-class UserStates:
-    WAITING_FOR_NAME = "waiting_for_name"
-    WAITING_FOR_EMAIL = "waiting_for_email"
-    WAITING_FOR_PHONE = "waiting_for_phone"
-    EDITING_NAME = "editing_name"
-    EDITING_EMAIL = "editing_email"
-    EDITING_PHONE = "editing_phone"
+# Определение состояний FSM
+class UserStates(StatesGroup):
+    WAITING_FOR_NAME = State()
+    WAITING_FOR_EMAIL = State()
+    WAITING_FOR_PHONE = State()
+    EDITING_NAME = State()
+    EDITING_EMAIL = State()
+    EDITING_PHONE = State()
 
 # Настройка Google Sheets
 def setup_google_sheets():
@@ -125,14 +128,14 @@ def get_main_menu():
     keyboard = InlineKeyboardMarkup(row_width=2)
     
     buttons = [
-        InlineKeyboardButton("👤 Регистрация", callback_data="register"),
-        InlineKeyboardButton("📊 Мои данные", callback_data="my_data"),
-        InlineKeyboardButton("✏️ Редактировать", callback_data="edit_data"),
-        InlineKeyboardButton("📋 Все пользователи", callback_data="all_users"),
-        InlineKeyboardButton("🔄 Синхронизация", callback_data="force_sync"),
-        InlineKeyboardButton("📈 Статистика", callback_data="stats"),
-        InlineKeyboardButton("❓ Помощь", callback_data="help"),
-        InlineKeyboardButton("⭐ О боте", callback_data="about")
+        InlineKeyboardButton(text="👤 Регистрация", callback_data="register"),
+        InlineKeyboardButton(text="📊 Мои данные", callback_data="my_data"),
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_data"),
+        InlineKeyboardButton(text="📋 Все пользователи", callback_data="all_users"),
+        InlineKeyboardButton(text="🔄 Синхронизация", callback_data="force_sync"),
+        InlineKeyboardButton(text="📈 Статистика", callback_data="stats"),
+        InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
+        InlineKeyboardButton(text="⭐ О боте", callback_data="about")
     ]
     
     keyboard.add(buttons[0], buttons[1])
@@ -147,11 +150,11 @@ def get_edit_menu():
     keyboard = InlineKeyboardMarkup(row_width=1)
     
     buttons = [
-        InlineKeyboardButton("✏️ Изменить имя", callback_data="edit_name"),
-        InlineKeyboardButton("📧 Изменить email", callback_data="edit_email"),
-        InlineKeyboardButton("📞 Изменить телефон", callback_data="edit_phone"),
-        InlineKeyboardButton("🗑️ Удалить аккаунт", callback_data="delete_account"),
-        InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        InlineKeyboardButton(text="✏️ Изменить имя", callback_data="edit_name"),
+        InlineKeyboardButton(text="📧 Изменить email", callback_data="edit_email"),
+        InlineKeyboardButton(text="📞 Изменить телефон", callback_data="edit_phone"),
+        InlineKeyboardButton(text="🗑️ Удалить аккаунт", callback_data="delete_account"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
     ]
     
     for button in buttons:
@@ -164,8 +167,8 @@ def get_delete_confirm_menu():
     keyboard = InlineKeyboardMarkup(row_width=2)
     
     buttons = [
-        InlineKeyboardButton("✅ Да, удалить", callback_data="confirm_delete"),
-        InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_delete")
+        InlineKeyboardButton(text="✅ Да, удалить", callback_data="confirm_delete"),
+        InlineKeyboardButton(text="❌ Нет, отмена", callback_data="cancel_delete")
     ]
     
     keyboard.add(*buttons)
@@ -174,11 +177,11 @@ def get_delete_confirm_menu():
 # Меню отмены
 def get_cancel_menu():
     keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    keyboard.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"))
     return keyboard
 
 # Команда старт
-@dp.message_handler(commands=['start'])
+@dp.message(lambda message: message.text and message.text.startswith('/start'))
 async def cmd_start(message: types.Message):
     user = message.from_user
     welcome_text = f"""
@@ -197,15 +200,14 @@ async def cmd_start(message: types.Message):
     """
     
     await message.answer(welcome_text, 
-                        reply_markup=get_main_menu(),
-                        parse_mode=types.ParseMode.MARKDOWN)
+                        reply_markup=get_main_menu())
 
 # Обработчик главного меню
-@dp.callback_query_handler(lambda c: c.data in [
+@dp.callback_query(F.data.in_([
     "register", "my_data", "edit_data", "all_users", 
     "force_sync", "help", "about", "stats", "cancel", "back_to_main",
     "delete_account", "confirm_delete", "cancel_delete"
-])
+]))
 async def process_main_menu(callback_query: types.CallbackQuery, state: FSMContext):
     user_id = str(callback_query.from_user.id)
     
@@ -218,17 +220,15 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
                 f"📧 *Email:* {user_data.get('email', 'Не указан')}\n"
                 f"📞 *Телефон:* {user_data.get('phone', 'Не указан')}\n\n"
                 f"✏️ Используйте кнопку 'Редактировать' для изменения данных",
-                reply_markup=get_main_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_main_menu()
             )
         else:
             await callback_query.message.edit_text(
                 "👤 *Давайте зарегистрируем вас!* 📝\n\n"
                 "📛 Пожалуйста, введите ваше имя:",
-                reply_markup=get_cancel_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_cancel_menu()
             )
-            await UserStates.WAITING_FOR_NAME.set()
+            await state.set_state(UserStates.WAITING_FOR_NAME)
     
     elif callback_query.data == "my_data":
         if user_id in users_data:
@@ -247,14 +247,12 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
 💾 *Синхронизация:* {sync_status}
             """
             await callback_query.message.edit_text(data_text, 
-                                                 reply_markup=get_main_menu(),
-                                                 parse_mode=types.ParseMode.MARKDOWN)
+                                                 reply_markup=get_main_menu())
         else:
             await callback_query.message.edit_text(
                 "❌ *Вы еще не зарегистрированы!*\n\n"
                 "👤 Нажмите 'Регистрация' чтобы создать аккаунт 📝",
-                reply_markup=get_main_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_main_menu()
             )
     
     elif callback_query.data == "edit_data":
@@ -262,21 +260,18 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
             await callback_query.message.edit_text(
                 "✏️ *Редактирование данных*\n\n"
                 "Выберите какие данные вы хотите изменить:",
-                reply_markup=get_edit_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_edit_menu()
             )
         else:
             await callback_query.message.edit_text(
                 "❌ *Вы еще не зарегистрированы!*\n\n"
                 "👤 Сначала зарегистрируйтесь чтобы редактировать данные",
-                reply_markup=get_main_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_main_menu()
             )
     
     elif callback_query.data == "all_users":
         await callback_query.message.edit_text(
-            "⏳ *Загружаю список пользователей...*",
-            parse_mode=types.ParseMode.MARKDOWN
+            "⏳ *Загружаю список пользователей...*"
         )
         
         if users_data:
@@ -292,21 +287,18 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
             users_list = "📭 *Пользователей пока нет*\n\nБудьте первым! 🎉"
         
         await callback_query.message.edit_text(users_list, 
-                                             reply_markup=get_main_menu(),
-                                             parse_mode=types.ParseMode.MARKDOWN)
+                                             reply_markup=get_main_menu())
     
     elif callback_query.data == "force_sync":
         await callback_query.message.edit_text(
-            "🔄 *Принудительная синхронизация...* ⏳",
-            parse_mode=types.ParseMode.MARKDOWN
+            "🔄 *Принудительная синхронизация...* ⏳"
         )
         await sync_with_google_sheets()
         await callback_query.message.edit_text(
             "✅ *Синхронизация завершена!* 🎉\n\n"
             f"📊 Загружено {len(users_data)} пользователей\n"
             f"💾 Статус: {sync_status}",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     
     elif callback_query.data == "help":
@@ -335,8 +327,7 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
 /stats - Статистика бота
         """
         await callback_query.message.edit_text(help_text, 
-                                             reply_markup=get_main_menu(),
-                                             parse_mode=types.ParseMode.MARKDOWN)
+                                             reply_markup=get_main_menu())
     
     elif callback_query.data == "about":
         about_text = """
@@ -367,8 +358,7 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
 💫 *Разработано с ❤️ для удобства пользователей!* 🚀
         """
         await callback_query.message.edit_text(about_text, 
-                                             reply_markup=get_main_menu(),
-                                             parse_mode=types.ParseMode.MARKDOWN)
+                                             reply_markup=get_main_menu())
     
     elif callback_query.data == "stats":
         total_users = len(users_data)
@@ -396,8 +386,7 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
 • 🗑️ Удаленные аккаунты: можно добавить историю
         """
         await callback_query.message.edit_text(stats_text, 
-                                             reply_markup=get_main_menu(),
-                                             parse_mode=types.ParseMode.MARKDOWN)
+                                             reply_markup=get_main_menu())
     
     elif callback_query.data == "delete_account":
         await callback_query.message.edit_text(
@@ -408,8 +397,7 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
             "• 📅 Дата регистрации\n"
             "• 📊 История изменений\n\n"
             "✅ *Вы уверены что хотите удалить аккаунт?*",
-            reply_markup=get_delete_confirm_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_delete_confirm_menu()
         )
     
     elif callback_query.data == "confirm_delete":
@@ -427,23 +415,20 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
                 f"📞 Телефон: {deleted_user.get('phone', 'Не указан')}\n\n"
                 f"{'💾 Данные удалены из Google Sheets' if success else '⚠️ Ошибка удаления из Google Sheets'}\n\n"
                 f"💫 Вы можете зарегистрироваться снова в любое время!",
-                reply_markup=get_main_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_main_menu()
             )
         else:
             await callback_query.message.edit_text(
                 "❌ *Аккаунт не найден!*\n\n"
                 "Возможно он уже был удален или не существовал",
-                reply_markup=get_main_menu(),
-                parse_mode=types.ParseMode.MARKDOWN
+                reply_markup=get_main_menu()
             )
     
     elif callback_query.data == "cancel_delete":
         await callback_query.message.edit_text(
             "✅ *Удаление отменено* ❌\n\n"
             "Ваши данные в безопасности! 🔒",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     
     elif callback_query.data == "cancel":
@@ -452,19 +437,19 @@ async def process_main_menu(callback_query: types.CallbackQuery, state: FSMConte
             "💫 Возврат в главное меню:",
             reply_markup=get_main_menu()
         )
-        await state.finish()
+        await state.clear()
     
     elif callback_query.data == "back_to_main":
         await callback_query.message.edit_text(
             "🔙 Возврат в главное меню:",
             reply_markup=get_main_menu()
         )
-        await state.finish()
+        await state.clear()
     
     await callback_query.answer()
 
 # Обработчики редактирования данных
-@dp.callback_query_handler(lambda c: c.data in ["edit_name", "edit_email", "edit_phone"])
+@dp.callback_query(F.data.in_(["edit_name", "edit_email", "edit_phone"]))
 async def process_edit_selection(callback_query: types.CallbackQuery, state: FSMContext):
     user_id = str(callback_query.from_user.id)
     
@@ -472,97 +457,91 @@ async def process_edit_selection(callback_query: types.CallbackQuery, state: FSM
         await callback_query.message.edit_text(
             "✏️ *Изменение имени*\n\n"
             "📛 Введите ваше новое имя:",
-            reply_markup=get_cancel_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_cancel_menu()
         )
-        await UserStates.EDITING_NAME.set()
+        await state.set_state(UserStates.EDITING_NAME)
     
     elif callback_query.data == "edit_email":
         await callback_query.message.edit_text(
             "📧 *Изменение email*\n\n"
             "📫 Введите ваш новый email:",
-            reply_markup=get_cancel_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_cancel_menu()
         )
-        await UserStates.EDITING_EMAIL.set()
+        await state.set_state(UserStates.EDITING_EMAIL)
     
     elif callback_query.data == "edit_phone":
         await callback_query.message.edit_text(
             "📞 *Изменение телефона*\n\n"
             "📱 Введите ваш новый телефон:",
-            reply_markup=get_cancel_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_cancel_menu()
         )
-        await UserStates.EDITING_PHONE.set()
+        await state.set_state(UserStates.EDITING_PHONE)
     
     await callback_query.answer()
 
 # Обработка имени (регистрация)
-@dp.message_handler(state=UserStates.WAITING_FOR_NAME)
+@dp.message(UserStates.WAITING_FOR_NAME)
 async def process_name(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['name'] = message.text
+    await state.update_data(name=message.text)
     
     await message.answer(
         "📧 *Отлично!* ✅\n\n"
         "Теперь введите ваш email:",
-        reply_markup=get_cancel_menu(),
-        parse_mode=types.ParseMode.MARKDOWN
+        reply_markup=get_cancel_menu()
     )
-    await UserStates.WAITING_FOR_EMAIL.set()
+    await state.set_state(UserStates.WAITING_FOR_EMAIL)
 
 # Обработка email (регистрация)
-@dp.message_handler(state=UserStates.WAITING_FOR_EMAIL)
+@dp.message(UserStates.WAITING_FOR_EMAIL)
 async def process_email(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['email'] = message.text
+    await state.update_data(email=message.text)
     
     await message.answer(
         "📞 *Прекрасно!* ✅\n\n"
         "Теперь введите ваш телефон:",
-        reply_markup=get_cancel_menu(),
-        parse_mode=types.ParseMode.MARKDOWN
+        reply_markup=get_cancel_menu()
     )
-    await UserStates.WAITING_FOR_PHONE.set()
+    await state.set_state(UserStates.WAITING_FOR_PHONE)
 
 # Обработка телефона и сохранение (регистрация)
-@dp.message_handler(state=UserStates.WAITING_FOR_PHONE)
+@dp.message(UserStates.WAITING_FOR_PHONE)
 async def process_phone(message: types.Message, state: FSMContext):
     user_id = str(message.from_user.id)
     
-    async with state.proxy() as data:
-        data['phone'] = message.text
-        data['user_id'] = user_id
-        data['registration_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        data['telegram_username'] = message.from_user.username
-        data['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Сохраняем в локальное хранилище
-        users_data[user_id] = dict(data)
-        
-        # Сохраняем в Google Sheets
-        success = await save_to_google_sheets(user_id, dict(data))
+    user_data = await state.get_data()
+    user_data.update({
+        'phone': message.text,
+        'user_id': user_id,
+        'registration_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'telegram_username': message.from_user.username,
+        'last_update': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+    
+    # Сохраняем в локальное хранилище
+    users_data[user_id] = user_data
+    
+    # Сохраняем в Google Sheets
+    success = await save_to_google_sheets(user_id, user_data)
     
     success_text = f"""
 ✅ *Регистрация завершена!* 🎉
 
 📋 *Ваши данные:*
-👤 *Имя:* {data['name']}
-📧 *Email:* {data['email']}
-📞 *Телефон:* {data['phone']}
+👤 *Имя:* {user_data['name']}
+📧 *Email:* {user_data['email']}
+📞 *Телефон:* {user_data['phone']}
 🆔 *User ID:* {user_id}
-📅 *Дата регистрации:* {data['registration_date']}
+📅 *Дата регистрации:* {user_data['registration_date']}
 
 {'💫 *Данные сохранены и синхронизированы с Google Sheets!* ☁️' if success else '⚠️ *Данные сохранены локально, но возникла ошибка синхронизации*'}
     """
     
     await message.answer(success_text, 
-                        reply_markup=get_main_menu(),
-                        parse_mode=types.ParseMode.MARKDOWN)
-    await state.finish()
+                        reply_markup=get_main_menu())
+    await state.clear()
 
 # Обработка изменений данных
-@dp.message_handler(state=UserStates.EDITING_NAME)
+@dp.message(UserStates.EDITING_NAME)
 async def process_edit_name(message: types.Message, state: FSMContext):
     user_id = str(message.from_user.id)
     new_name = message.text
@@ -577,19 +556,17 @@ async def process_edit_name(message: types.Message, state: FSMContext):
             f"✅ *Имя успешно изменено!* ✏️\n\n"
             f"👤 Новое имя: {new_name}\n\n"
             f"{'☁️ Данные синхронизированы с Google Sheets' if success else '⚠️ Ошибка синхронизации'}",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     else:
         await message.answer(
             "❌ *Ошибка:* пользователь не найден",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     
-    await state.finish()
+    await state.clear()
 
-@dp.message_handler(state=UserStates.EDITING_EMAIL)
+@dp.message(UserStates.EDITING_EMAIL)
 async def process_edit_email(message: types.Message, state: FSMContext):
     user_id = str(message.from_user.id)
     new_email = message.text
@@ -604,19 +581,17 @@ async def process_edit_email(message: types.Message, state: FSMContext):
             f"✅ *Email успешно изменен!* 📧\n\n"
             f"📫 Новый email: {new_email}\n\n"
             f"{'☁️ Данные синхронизированы с Google Sheets' if success else '⚠️ Ошибка синхронизации'}",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     else:
         await message.answer(
             "❌ *Ошибка:* пользователь не найден",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     
-    await state.finish()
+    await state.clear()
 
-@dp.message_handler(state=UserStates.EDITING_PHONE)
+@dp.message(UserStates.EDITING_PHONE)
 async def process_edit_phone(message: types.Message, state: FSMContext):
     user_id = str(message.from_user.id)
     new_phone = message.text
@@ -631,17 +606,15 @@ async def process_edit_phone(message: types.Message, state: FSMContext):
             f"✅ *Телефон успешно изменен!* 📞\n\n"
             f"📱 Новый телефон: {new_phone}\n\n"
             f"{'☁️ Данные синхронизированы с Google Sheets' if success else '⚠️ Ошибка синхронизации'}",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     else:
         await message.answer(
             "❌ *Ошибка:* пользователь не найден",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
     
-    await state.finish()
+    await state.clear()
 
 # Сохранение в Google Sheets
 async def save_to_google_sheets(user_id, user_data):
@@ -714,7 +687,7 @@ async def delete_from_google_sheets(user_id):
         return False
 
 # Команда помощи
-@dp.message_handler(commands=['help'])
+@dp.message(lambda message: message.text and message.text.startswith('/help'))
 async def cmd_help(message: types.Message):
     await message.answer(
         "🆘 *Помощь по боту*\n\n"
@@ -724,12 +697,11 @@ async def cmd_help(message: types.Message):
         "/profile - Ваш профиль\n"
         "/stats - Статистика бота\n\n"
         "💫 Выберите действие в меню:",
-        reply_markup=get_main_menu(),
-        parse_mode=types.ParseMode.MARKDOWN
+        reply_markup=get_main_menu()
     )
 
 # Команда профиля
-@dp.message_handler(commands=['profile'])
+@dp.message(lambda message: message.text and message.text.startswith('/profile'))
 async def cmd_profile(message: types.Message):
     user_id = str(message.from_user.id)
     
@@ -752,18 +724,16 @@ async def cmd_profile(message: types.Message):
 💾 *Синхронизация:* {sync_status}
         """
         await message.answer(profile_text, 
-                           reply_markup=get_main_menu(),
-                           parse_mode=types.ParseMode.MARKDOWN)
+                           reply_markup=get_main_menu())
     else:
         await message.answer(
             "❌ *Профиль не найден!*\n\n"
             "👤 Зарегистрируйтесь чтобы создать профиль",
-            reply_markup=get_main_menu(),
-            parse_mode=types.ParseMode.MARKDOWN
+            reply_markup=get_main_menu()
         )
 
 # Команда статистики
-@dp.message_handler(commands=['stats'])
+@dp.message(lambda message: message.text and message.text.startswith('/stats'))
 async def cmd_stats(message: types.Message):
     total_users = len(users_data)
     
@@ -779,11 +749,10 @@ async def cmd_stats(message: types.Message):
     """
     
     await message.answer(stats_text, 
-                       reply_markup=get_main_menu(),
-                       parse_mode=types.ParseMode.MARKDOWN)
+                       reply_markup=get_main_menu())
 
 # Запуск синхронизации при старте
-async def on_startup(dp):
+async def on_startup():
     logger.info("🔄 Запуск синхронизации с Google Sheets...")
     await sync_with_google_sheets()
     
@@ -793,8 +762,9 @@ async def on_startup(dp):
     logger.info(f"📊 Загружено {len(users_data)} пользователей")
 
 # Запуск бота
+async def main():
+    await on_startup()
+    await dp.start_polling(bot)
+
 if __name__ == '__main__':
-    from aiogram import executor
-    
-    logger.info("🚀 Запуск бота...")
-    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+    asyncio.run(main())
