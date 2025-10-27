@@ -27,7 +27,11 @@ from aiogram import BaseMiddleware
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
-load_dotenv()
+try:
+    load_dotenv()
+except Exception as e:
+    print(f"Ошибка загрузки .env файла: {e}")
+    print("Проверьте формат файла .env - каждая переменная должна быть на отдельной строке")
 
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
@@ -35,6 +39,9 @@ class Config:
     
     def __init__(self):
         self.API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+        if not self.API_TOKEN:
+            raise ValueError("TELEGRAM_BOT_TOKEN не установен в переменных окружения")
+        
         self.ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
         self.GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
         self.GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
@@ -828,7 +835,7 @@ rate_limiter = RateLimiter(max_requests=config.RATE_LIMIT_MAX_REQUESTS, window=c
 
 # ========== УЛУЧШЕНИЕ: MIDDLEWARE ДЛЯ RATE LIMITING И КЭШИРОВАНИЯ ==========
 class EnhancedMiddleware(BaseMiddleware):
-    def __call__(
+    async def __call__(
         self,
         handler: Callable[[types.TelegramObject, Dict[str, Any]], Any],
         event: types.TelegramObject,
@@ -840,14 +847,12 @@ class EnhancedMiddleware(BaseMiddleware):
             
             if not rate_limiter.is_allowed(user_id):
                 if hasattr(event, 'answer'):
-                    # Используем синхронный вызов
-                    import asyncio
-                    asyncio.create_task(event.answer("⏳ <b>Слишком много запросов!</b>\n\nПожалуйста, подождите 30 секунд.", parse_mode='HTML'))
+                    await event.answer("⏳ <b>Слишком много запросов!</b>\n\nПожалуйста, подождите 30 секунд.", parse_mode='HTML')
                 return
             
             health_monitor.record_message(user_id)
         
-        return handler(event, data)
+        return await handler(event, data)
 
 # Инициализация бота с улучшенными настройками
 bot = Bot(
@@ -1298,6 +1303,40 @@ def safe_sync_to_sheets(user_id: int, filters: List[Dict]) -> tuple[bool, str]:
         logging.error(f"Ошибка синхронизации: {e}")
         return False, f"Ошибка синхронизации: {str(e)}"
 
+# ========== ОБРАБОТЧИК ОШИБОК ==========
+async def error_handler(update: types.Update, exception: Exception):
+    """Глобальный обработчик ошибок"""
+    try:
+        # Логируем ошибку
+        logging.error(f"Ошибка при обработке update {update}: {exception}")
+        health_monitor.record_error()
+        
+        # Уведомляем администратора
+        if config.ADMIN_ID:
+            error_traceback = "".join(traceback.format_exception(None, exception, exception.__traceback__))
+            short_error = str(exception)[:1000]
+            
+            await bot.send_message(
+                config.ADMIN_ID,
+                f"🚨 <b>КРИТИЧЕСКАЯ ОШИБКА</b>\n\n"
+                f"💥 <b>Ошибка:</b> {short_error}\n"
+                f"📱 <b>Update:</b> {update}\n\n"
+                f"🔧 <i>Подробности в логах</i>",
+                parse_mode='HTML'
+            )
+        
+        # Пользователю показываем дружелюбное сообщение
+        if update.message:
+            await update.message.answer(
+                "😕 <b>Произошла непредвиденная ошибка</b>\n\n"
+                "Пожалуйста, попробуйте еще раз или обратитесь к администратору.",
+                reply_markup=get_main_keyboard(),
+                parse_mode='HTML'
+            )
+            
+    except Exception as e:
+        logging.critical(f"Ошибка в обработчике ошибок: {e}")
+
 # ========== СИНХРОННЫЕ ФОНОВЫЕ ЗАДАЧИ ==========
 def send_personalized_reminders():
     """Персонализированные напоминания с учетом времени суток"""
@@ -1386,15 +1425,18 @@ def health_monitoring_task():
             # Уведомляем администратора при низком health score
             if health_status['health_score'] < 80 and config.ADMIN_ID:
                 import asyncio
-                asyncio.create_task(bot.send_message(
-                    config.ADMIN_ID,
-                    f"⚠️ <b>НИЗКИЙ HEALTH SCORE</b>\n\n"
-                    f"📊 Текущий score: {health_status['health_score']:.1f}%\n"
-                    f"💥 Ошибок: {health_status['error_count']}\n"
-                    f"📨 Сообщений: {health_status['message_count']}\n"
-                    f"💾 Hit Rate кэша: {health_status['cache_hit_rate']:.1f}%",
-                    parse_mode='HTML'
-                ))
+                try:
+                    asyncio.create_task(bot.send_message(
+                        config.ADMIN_ID,
+                        f"⚠️ <b>НИЗКИЙ HEALTH SCORE</b>\n\n"
+                        f"📊 Текущий score: {health_status['health_score']:.1f}%\n"
+                        f"💥 Ошибок: {health_status['error_count']}\n"
+                        f"📨 Сообщений: {health_status['message_count']}\n"
+                        f"💾 Hit Rate кэша: {health_status['cache_hit_rate']:.1f}%",
+                        parse_mode='HTML'
+                    ))
+                except Exception as e:
+                    logging.warning(f"Не удалось отправить уведомление администратору: {e}")
             
             # Очистка кэша каждые 6 часов
             if datetime.now().hour % 6 == 0 and datetime.now().minute < 5:
@@ -1582,7 +1624,55 @@ async def cmd_start(message: types.Message):
         parse_mode='HTML'
     )
 
-# ... (остальные обработчики остаются такими же, но используют синхронные функции)
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Сброс текущего состояния"""
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("ℹ️ Нечего отменять", reply_markup=get_main_keyboard())
+        return
+    
+    await state.clear()
+    await message.answer(
+        "❌ <b>ОПЕРАЦИЯ ОТМЕНЕНА</b>",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "🔙 Назад")
+async def cmd_back(message: types.Message, state: FSMContext):
+    """Универсальный обработчик кнопки Назад"""
+    current_state = await state.get_state()
+    
+    # Определяем куда вернуться в зависимости от текущего состояния
+    if current_state and "EditFilterStates" in current_state:
+        await state.clear()
+        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
+    
+    elif current_state and "DeleteFilterStates" in current_state:
+        await state.clear()
+        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
+    
+    elif current_state and "GoogleSheetsStates" in current_state:
+        await state.clear()
+        await cmd_google_sheets(message)
+    
+    elif current_state and "ImportExportStates" in current_state:
+        await state.clear()
+        await cmd_import_export(message)
+    
+    elif current_state and "FilterStates" in current_state:
+        await state.clear()
+        await message.answer("🔙 Возврат в главное меню", reply_markup=get_main_keyboard())
+    
+    elif current_state:
+        # Для других состояний - очищаем и возвращаем в главное меню
+        await state.clear()
+        await message.answer("🔙 Возврат в главное меню", reply_markup=get_main_keyboard())
+    
+    else:
+        # Если нет активного состояния - просто показываем главное меню
+        await message.answer("🔙 Главное меню", reply_markup=get_main_keyboard())
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -1621,7 +1711,76 @@ async def cmd_admin(message: types.Message):
     
     await message.answer(admin_text, parse_mode='HTML')
 
-# ... (остальные обработчики аналогично адаптируются)
+@dp.message(Command("backup"))
+async def cmd_backup(message: types.Message):
+    """Создание резервной копии"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    await message.answer("🔄 Создание резервной копии...")
+    
+    if backup_database():
+        await message.answer("✅ Резервная копия создана успешно")
+    else:
+        await message.answer("❌ Ошибка при создании резервной копии")
+
+@dp.message(Command("clear_cache"))
+async def cmd_clear_cache(message: types.Message):
+    """Очистка кэша"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    cache_manager.clear_all_cache()
+    await message.answer("✅ Кэш успешно очищен")
+
+@dp.message(F.text == "📋 Мои фильтры")
+async def cmd_my_filters(message: types.Message):
+    """Показать фильтры пользователя"""
+    health_monitor.record_message(message.from_user.id)
+    
+    filters = get_user_filters(message.from_user.id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров</b>\n\n"
+            "Используйте кнопку '✨ Добавить фильтр' чтобы добавить первый фильтр.",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    today = datetime.now().date()
+    response = ["📋 <b>ВАШИ ФИЛЬТРЫ:</b>\n"]
+    
+    for i, f in enumerate(filters, 1):
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until = (expiry_date - today).days
+        icon, status = get_status_icon_and_text(days_until)
+        
+        response.append(
+            f"{icon} <b>Фильтр #{f['id']}</b>\n"
+            f"💧 Тип: {f['filter_type']}\n"
+            f"📍 Место: {f['location']}\n"
+            f"📅 Замена: {format_date_nice(datetime.strptime(str(f['last_change']), '%Y-%m-%d'))}\n"
+            f"⏰ Годен до: {format_date_nice(expiry_date)}\n"
+            f"📊 Статус: {status} ({days_until} дней)\n"
+            f"📈 {format_filter_status_with_progress(f)}\n"
+        )
+    
+    # Добавляем инфографику
+    response.append("\n" + create_expiry_infographic(filters))
+    
+    # Разбиваем сообщение если слишком длинное
+    full_text = "\n".join(response)
+    if len(full_text) > 4000:
+        parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+        for part in parts:
+            await message.answer(part, parse_mode='HTML')
+            await asyncio.sleep(0.1)
+    else:
+        await message.answer(full_text, parse_mode='HTML')
+
+# ... (добавьте остальные обработчики из предыдущей версии)
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 def start_background_tasks():
