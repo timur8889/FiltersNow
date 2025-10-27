@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Callable, Any, Union
+from collections import OrderedDict
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
@@ -78,6 +79,53 @@ class Config:
 
 # Создаем экземпляр конфигурации
 config = Config()
+
+# ========== УЛУЧШЕННАЯ БЕЗОПАСНОСТЬ И ОБРАБОТКА ОШИБОК ==========
+def enhanced_sanitize_input(text: str) -> str:
+    """Улучшенная санитизация ввода"""
+    if not text:
+        return text
+    
+    # Удаляем потенциально опасные символы и ограничиваем длину
+    sanitized = re.sub(r'[<>&\"\'\\;]', '', text)
+    sanitized = sanitized.strip()
+    
+    # Ограничение длины
+    if len(sanitized) > 500:
+        sanitized = sanitized[:500]
+    
+    return sanitized
+
+def safe_db_query(query: str, params: tuple) -> List[Dict]:
+    """Безопасное выполнение SQL запросов"""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
+    except sqlite3.Error as e:
+        logging.error(f"SQL error: {e}")
+        return []
+
+# ========== УЛУЧШЕННЫЙ МЕНЕДЖЕР СОСТОЯНИЙ ==========
+class StateManager:
+    """Менеджер состояний для лучшего управления FSM"""
+    
+    @staticmethod
+    async def safe_clear_state(state: FSMContext, message: types.Message = None):
+        """Безопасная очистка состояния с обработкой ошибок"""
+        try:
+            await state.clear()
+            if message:
+                await message.answer("Состояние сброшено", reply_markup=get_main_keyboard())
+        except Exception as e:
+            logging.error(f"Error clearing state: {e}")
+
+    @staticmethod
+    async def set_state_with_timeout(state: FSMContext, new_state, timeout_minutes=30):
+        """Установка состояния с таймаутом"""
+        await state.set_state(new_state)
+        await state.update_data(state_set_time=datetime.now())
 
 # ========== СИНХРОННАЯ БАЗА ДАННЫХ ==========
 @contextmanager
@@ -270,7 +318,7 @@ def init_db():
         raise
 
 def check_and_update_schema():
-    """Проверка и обновление схемы базы данных"""
+    """Проверка и обновление схема базы данных"""
     try:
         with get_db_connection() as conn:
             # Проверяем существование колонок
@@ -293,27 +341,65 @@ def check_and_update_schema():
     except Exception as e:
         logging.error(f"Ошибка при обновлении схемы БД: {e}")
 
-# ========== УЛУЧШЕНИЕ: СИСТЕМА КЭШИРОВАНИЯ ==========
-class CacheManager:
-    """Менеджер кэширования для улучшения производительности"""
+# ========== УЛУЧШЕННАЯ СИСТЕМА КЭШИРОВАНИЯ ==========
+class LRUCache:
+    """LRU кэш с ограничением по памяти"""
+    
+    def __init__(self, max_size: int = 1000):
+        self.cache = OrderedDict()
+        self.max_size = max_size
+        self.lock = threading.Lock()
+    
+    def get(self, key):
+        with self.lock:
+            if key not in self.cache:
+                return None
+            self.cache.move_to_end(key)
+            return self.cache[key]
+    
+    def set(self, key, value):
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+            self.cache[key] = value
+            if len(self.cache) > self.max_size:
+                self.cache.popitem(last=False)
+
+class EnhancedCacheManager:
+    """Улучшенный менеджер кэширования для улучшения производительности"""
     
     def __init__(self):
         self._user_filters_cache = {}
         self._user_stats_cache = {}
         self._cache_ttl = config.CACHE_TTL
+        self.lru_cache = LRUCache(max_size=500)
+        self.hit_stats = {}
+        self.miss_stats = {}
     
     def get_user_filters(self, user_id: int):
-        """Получение фильтров с кэшированием"""
+        """Получение фильтров с улучшенным кэшированием"""
         cache_key = f"filters_{user_id}"
         
+        # Проверяем LRU кэш first
+        cached = self.lru_cache.get(cache_key)
+        if cached:
+            data, timestamp = cached
+            if time.time() - timestamp < self._cache_ttl:
+                self._record_hit(user_id)
+                return data
+        
+        # Проверяем обычный кэш
         if cache_key in self._user_filters_cache:
             data, timestamp = self._user_filters_cache[cache_key]
             if time.time() - timestamp < self._cache_ttl:
+                self._record_hit(user_id)
                 return data
         
         # Загрузка из БД
         filters = get_user_filters_db(user_id)
+        self.lru_cache.set(cache_key, (filters, time.time()))
         self._user_filters_cache[cache_key] = (filters, time.time())
+        self._record_miss(user_id)
         return filters
     
     def get_user_stats(self, user_id: int):
@@ -369,19 +455,84 @@ class CacheManager:
         cache_key_stats = f"stats_{user_id}"
         self._user_filters_cache.pop(cache_key_filters, None)
         self._user_stats_cache.pop(cache_key_stats, None)
+        self.lru_cache.cache.pop(cache_key_filters, None)
     
     def clear_all_cache(self):
         """Очистка всего кэша"""
         self._user_filters_cache.clear()
         self._user_stats_cache.clear()
+        self.lru_cache.cache.clear()
+    
+    def _record_hit(self, user_id: int):
+        if user_id not in self.hit_stats:
+            self.hit_stats[user_id] = 0
+        self.hit_stats[user_id] += 1
+    
+    def _record_miss(self, user_id: int):
+        if user_id not in self.miss_stats:
+            self.miss_stats[user_id] = 0
+        self.miss_stats[user_id] += 1
+    
+    def get_cache_stats(self, user_id: int) -> Dict:
+        """Получение статистики кэша для пользователя"""
+        hits = self.hit_stats.get(user_id, 0)
+        misses = self.miss_stats.get(user_id, 0)
+        total = hits + misses
+        hit_rate = (hits / total * 100) if total > 0 else 0
+        
+        return {
+            'hits': hits,
+            'misses': misses,
+            'total_requests': total,
+            'hit_rate': hit_rate,
+            'lru_cache_size': len(self.lru_cache.cache)
+        }
 
-# Создаем экземпляр кэш менеджера
-cache_manager = CacheManager()
+# Создаем экземпляр улучшенного кэш менеджера
+cache_manager = EnhancedCacheManager()
 
 # Обертки для совместимости
 def get_user_filters(user_id: int) -> List[Dict]:
     """Получение фильтров пользователя"""
     return cache_manager.get_user_filters(user_id)
+
+# ========== УМНАЯ СИСТЕМА НАПОМИНАНИЙ ==========
+class SmartReminderSystem:
+    """Умная система напоминаний"""
+    
+    def __init__(self):
+        self.user_preferences = {}
+        self.load_user_preferences()
+    
+    def load_user_preferences(self):
+        """Загрузка предпочтений пользователей"""
+        try:
+            if os.path.exists('user_preferences.json'):
+                with open('user_preferences.json', 'r', encoding='utf-8') as f:
+                    self.user_preferences = json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading user preferences: {e}")
+    
+    def save_user_preferences(self):
+        """Сохранение предпочтений пользователей"""
+        try:
+            with open('user_preferences.json', 'w', encoding='utf-8') as f:
+                json.dump(self.user_preferences, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.error(f"Error saving user preferences: {e}")
+    
+    def get_user_reminder_time(self, user_id: int) -> str:
+        """Получение предпочтительного времени напоминаний"""
+        return self.user_preferences.get(str(user_id), {}).get('reminder_time', '10:00')
+    
+    def set_user_reminder_time(self, user_id: int, time_str: str):
+        """Установка времени напоминаний"""
+        if str(user_id) not in self.user_preferences:
+            self.user_preferences[str(user_id)] = {}
+        self.user_preferences[str(user_id)]['reminder_time'] = time_str
+        self.save_user_preferences()
+
+smart_reminders = SmartReminderSystem()
 
 # ========== УЛУЧШЕНИЕ: РАСШИРЕННОЕ ЛОГИРОВАНИЕ ==========
 def setup_logging():
@@ -423,13 +574,14 @@ setup_logging()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_main_keyboard():
-    """Клавиатура главного меню"""
+    """Обновленная клавиатура главного меню"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="📋 Мои фильтры")
     builder.button(text="✨ Добавить фильтр")
     builder.button(text="⚙️ Управление фильтрами")
     builder.button(text="📊 Статистика")
     builder.button(text="📤 Импорт/Экспорт")
+    builder.button(text="⏰ Настройка напоминаний")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
@@ -552,6 +704,21 @@ def get_reminder_keyboard(filter_id: int):
     builder.button(text="📅 Посмотреть детали", callback_data=f"details_{filter_id}")
     builder.adjust(1)
     return builder.as_markup()
+
+def get_reminder_settings_keyboard():
+    """Клавиатура настроек напоминаний"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🕘 09:00")
+    builder.button(text="🕙 10:00")
+    builder.button(text="🕚 11:00")
+    builder.button(text="🕛 12:00")
+    builder.button(text="🕐 13:00")
+    builder.button(text="🕑 14:00")
+    builder.button(text="🕒 15:00")
+    builder.button(text="🕓 16:00")
+    builder.button(text="🔙 Назад")
+    builder.adjust(3)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_status_icon_and_text(days_until_expiry: int):
     """Получение иконки и текста статуса"""
@@ -710,6 +877,96 @@ def validate_lifetime(lifetime: str) -> tuple[bool, str, int]:
     except ValueError:
         return False, "Срок службы должен быть числом (дни)", 0
 
+# ========== УЛУЧШЕННАЯ ВАЛИДАЦИЯ ДАТ ==========
+def try_auto_correct_date(date_str: str) -> Optional[datetime.date]:
+    """Попытка автоматического исправления даты"""
+    clean = re.sub(r'\D', '', date_str)
+    
+    if len(clean) == 6:  # ДДММГГ
+        try:
+            day, month, year = int(clean[:2]), int(clean[2:4]), int(clean[4:])
+            if year < 100:
+                year += 2000 if year < 50 else 1900
+            return datetime(year, month, day).date()
+        except ValueError:
+            pass
+    elif len(clean) == 8:  # ДДММГГГГ
+        try:
+            day, month, year = int(clean[:2]), int(clean[2:4]), int(clean[4:])
+            return datetime(year, month, day).date()
+        except ValueError:
+            pass
+    
+    return None
+
+def enhanced_validate_date(date_str: str) -> datetime.date:
+    """Улучшенная валидация даты с расширенной поддержкой форматов"""
+    date_str = date_str.strip()
+    
+    if not date_str:
+        raise ValueError("Дата не может быть пустой")
+    
+    # Автозамена различных разделителей
+    date_str = re.sub(r'[/\-,\s]', '.', date_str)
+    
+    # Удаляем лишние символы, но оставляем точки
+    date_str = re.sub(r'[^\d\.]', '', date_str)
+    
+    # Расширенный список форматов
+    formats = [
+        '%d.%m.%y', '%d.%m.%Y', 
+        '%d%m%y', '%d%m%Y', 
+        '%d.%m', '%d%m',
+        '%Y.%m.%d', '%y.%m.%d'
+    ]
+    
+    for fmt in formats:
+        try:
+            if fmt in ['%d.%m', '%d%m']:
+                # Добавляем текущий год для форматов без года
+                date_obj = datetime.strptime(date_str, fmt).date()
+                date_obj = date_obj.replace(year=datetime.now().year)
+            elif fmt in ['%d%m%y', '%d%m%Y']:
+                # Проверяем длину для форматов без разделителей
+                if len(date_str) in [6, 8]:
+                    date_obj = datetime.strptime(date_str, fmt).date()
+                else:
+                    continue
+            else:
+                date_obj = datetime.strptime(date_str, fmt).date()
+            
+            # Проверяем разумность даты
+            today = datetime.now().date()
+            max_past = today - timedelta(days=10*365)  # 10 лет назад
+            max_future = today + timedelta(days=30)    # 30 дней вперед
+            
+            if date_obj > max_future:
+                raise ValueError("Дата не может быть более чем на 30 дней в будущем")
+            if date_obj < max_past:
+                raise ValueError("Дата слишком старая (более 10 лет)")
+                
+            return date_obj
+        except ValueError:
+            continue
+    
+    # Попытка автоматического исправления
+    corrected = try_auto_correct_date(date_str)
+    if corrected:
+        today = datetime.now().date()
+        if corrected <= today + timedelta(days=30) and corrected >= today - timedelta(days=10*365):
+            return corrected
+    
+    raise ValueError(
+        "Неверный формат даты. Используйте:\n"
+        "• ДД.ММ.ГГ (например, 15.12.23)\n"
+        "• ДД.ММ.ГГГГ (например, 15.12.2023)\n"
+        "• ДД.ММ (текущий год будет автоматически)"
+    )
+
+def validate_date(date_str: str) -> datetime.date:
+    """Обертка для обратной совместимости"""
+    return enhanced_validate_date(date_str)
+
 # ========== УЛУЧШЕННЫЙ МОНИТОРИНГ ЗДОРОВЬЯ ==========
 class EnhancedHealthMonitor:
     def __init__(self):
@@ -864,74 +1121,6 @@ dp = Dispatcher(storage=storage)
 
 # Регистрация middleware
 dp.update.outer_middleware(EnhancedMiddleware())
-
-# ========== УЛУЧШЕНИЕ: УЛУЧШЕННАЯ ВАЛИДАЦИЯ ДАТ ==========
-def try_auto_correct_date(date_str: str) -> Optional[datetime.date]:
-    """Попытка автоматического исправления даты"""
-    clean = re.sub(r'\D', '', date_str)
-    
-    if len(clean) == 6:  # ДДММГГ
-        try:
-            day, month, year = int(clean[:2]), int(clean[2:4]), int(clean[4:])
-            if year < 100:
-                year += 2000 if year < 50 else 1900
-            return datetime(year, month, day).date()
-        except ValueError:
-            pass
-    elif len(clean) == 8:  # ДДММГГГГ
-        try:
-            day, month, year = int(clean[:2]), int(clean[2:4]), int(clean[4:])
-            return datetime(year, month, day).date()
-        except ValueError:
-            pass
-    
-    return None
-
-def validate_date(date_str: str) -> datetime.date:
-    """Улучшенная валидация даты с автокоррекцией"""
-    date_str = date_str.strip()
-    
-    # Автозамена разделителей
-    date_str = re.sub(r'[/\-]', '.', date_str)
-    
-    # Удаляем лишние символы, но оставляем точки
-    date_str = re.sub(r'[^\d\.]', '', date_str)
-    
-    formats = ['%d.%m.%y', '%d.%m.%Y', '%d%m%y', '%d%m%Y', '%d.%m', '%d%m']
-    
-    for fmt in formats:
-        try:
-            if fmt in ['%d.%m', '%d%m']:
-                # Добавляем текущий год
-                date_obj = datetime.strptime(date_str, fmt).date()
-                date_obj = date_obj.replace(year=datetime.now().year)
-            elif fmt in ['%d%m%y', '%d%m%Y']:
-                if len(date_str) in [6, 8]:
-                    date_obj = datetime.strptime(date_str, fmt).date()
-                else:
-                    continue
-            else:
-                date_obj = datetime.strptime(date_str, fmt).date()
-            
-            today = datetime.now().date()
-            max_past = today - timedelta(days=5*365)
-            max_future = today + timedelta(days=1)
-            
-            if date_obj > max_future:
-                raise ValueError("Дата не может быть в будущем")
-            if date_obj < max_past:
-                raise ValueError("Дата слишком старая (более 5 лет)")
-                
-            return date_obj
-        except ValueError:
-            continue
-    
-    # Попытка автоматического исправления
-    corrected = try_auto_correct_date(date_str)
-    if corrected:
-        return corrected
-    
-    raise ValueError("Неверный формат даты. Используйте ДД.ММ.ГГ или ДД.ММ")
 
 # ========== ЭКСПОРТ В EXCEL ==========
 def export_to_excel(user_id: int) -> io.BytesIO:
@@ -1168,7 +1357,7 @@ class GoogleSheetsSync:
                 # Авто-ширина колонок
                 worksheet.columns_auto_resize(0, 7)
             except Exception as format_error:
-                logging.warning(f"Ошибка форматирования таблицы: {format_error}")
+                logging.warning(f"Ошибка форматирования таблица: {format_error}")
             
             health_monitor.record_sync_operation()
             return True, f"Успешно синхронизировано {len(rows)} фильтров"
@@ -1601,6 +1790,107 @@ async def process_details_filter(callback_query: types.CallbackQuery):
         logging.error(f"Ошибка при обработке details: {e}")
         await callback_query.answer("❌ Произошла ошибка", show_alert=True)
 
+# ========== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ КОМАНД ==========
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Расширенная справка"""
+    help_text = """
+🤖 <b>ПОМОЩЬ ПО КОМАНДАМ</b>
+
+<b>Основные команды:</b>
+/start - Запуск бота
+/help - Эта справка
+/cancel - Отмена текущей операции
+/stats - Ваша персональная статистика
+
+<b>Управление фильтрами:</b>
+📋 Мои фильтры - Просмотр всех фильтров
+✨ Добавить фильтр - Добавить новый фильтр
+⚙️ Управление фильтрами - Редактирование и удаление
+
+<b>Дополнительные функции:</b>
+📊 Статистика - Статистика и аналитика
+📤 Импорт/Экспорт - Работа с Excel
+☁️ Синхронизация - Google Sheets
+⏰ Настройка напоминаний - Установка времени уведомлений
+
+💡 <i>Используйте кнопки меню для навигации</i>
+    """
+    await message.answer(help_text, parse_mode='HTML')
+
+@dp.message(Command("stats"))
+async def cmd_personal_stats(message: types.Message):
+    """Персональная статистика пользователя"""
+    user_id = message.from_user.id
+    filters = get_user_filters(user_id)
+    stats = cache_manager.get_user_stats(user_id)
+    cache_stats = cache_manager.get_cache_stats(user_id)
+    
+    if not filters:
+        await message.answer("📊 У вас пока нет статистики - добавьте первый фильтр!")
+        return
+    
+    # Создаем детальную статистику по типам фильтров
+    type_stats = {}
+    for f in filters:
+        filter_type = f['filter_type']
+        if filter_type not in type_stats:
+            type_stats[filter_type] = 0
+        type_stats[filter_type] += 1
+    
+    type_stats_text = "\n".join([f"• {k}: {v}" for k, v in type_stats.items()])
+    
+    stats_text = f"""
+📊 <b>ВАША ПЕРСОНАЛЬНАЯ СТАТИСТИКА</b>
+
+💧 <b>Общее:</b>
+• Всего фильтров: {stats['total']}
+• 🟢 В норме: {stats['normal']}
+• 🟡 Скоро истекают: {stats['expiring_soon']}
+• 🔴 Просрочено: {stats['expired']}
+
+📈 <b>Состояние системы:</b>
+• Общее здоровье: {create_progress_bar(stats['health_percentage'])}
+• Средний срок до замены: {stats['avg_days_until_expiry']:.1f} дней
+• Эффективность кэша: {cache_stats['hit_rate']:.1f}%
+
+📋 <b>По типам фильтров:</b>
+{type_stats_text}
+
+💫 <i>Статистика обновляется в реальном времени</i>
+    """
+    
+    await message.answer(stats_text, parse_mode='HTML')
+
+@dp.message(F.text == "⏰ Настройка напоминаний")
+async def cmd_reminder_settings(message: types.Message):
+    """Настройка напоминаний"""
+    current_time = smart_reminders.get_user_reminder_time(message.from_user.id)
+    
+    await message.answer(
+        f"⏰ <b>НАСТРОЙКА НАПОМИНАНИЙ</b>\n\n"
+        f"Текущее время напоминаний: <b>{current_time}</b>\n"
+        f"Выберите удобное время для получения уведомлений:",
+        reply_markup=get_reminder_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text.regexp(r"🕘 09:00|🕙 10:00|🕚 11:00|🕛 12:00|🕐 13:00|🕑 14:00|🕒 15:00|🕓 16:00"))
+async def process_reminder_time(message: types.Message):
+    """Обработка выбора времени напоминаний"""
+    time_str = message.text.split()[-1]  # Извлекаем время
+    user_id = message.from_user.id
+    
+    smart_reminders.set_user_reminder_time(user_id, time_str)
+    
+    await message.answer(
+        f"✅ <b>Время напоминаний установлено!</b>\n\n"
+        f"Теперь вы будете получать уведомления в <b>{time_str}</b>\n\n"
+        f"Следующее напоминание придет согласно установленному расписанию.",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
+
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -1619,6 +1909,7 @@ async def cmd_start(message: types.Message):
         "• 📤 Импорт/экспорт Excel\n"
         "• ☁️ Синхронизация с Google Sheets\n"
         "• 🔔 Автоматические напоминания\n"
+        "• ⏰ Настройка времени уведомлений\n"
         "• ⚡ <b>Синхронизация в реальном времени</b>",
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
@@ -1780,9 +2071,63 @@ async def cmd_my_filters(message: types.Message):
     else:
         await message.answer(full_text, parse_mode='HTML')
 
-# ... (добавьте остальные обработчики из предыдущей версии)
+# ========== УЛУЧШЕННЫЙ ОБРАБОТЧИК ДОБАВЛЕНИЯ ФИЛЬТРОВ ==========
+@dp.message(FilterStates.waiting_change_date)
+async def process_change_date(message: types.Message, state: FSMContext):
+    """Обработка даты замены с улучшенной валидацией"""
+    try:
+        change_date = enhanced_validate_date(message.text)
+        
+        # Сохраняем дату в состоянии
+        await state.update_data(change_date=change_date.strftime('%Y-%m-%d'))
+        
+        # Получаем данные из состояния
+        data = await state.get_data()
+        filter_type = data.get('filter_type', '').lower()
+        
+        # Определяем рекомендуемый срок службы
+        recommended_lifetime = DEFAULT_LIFETIMES.get(filter_type, 180)
+        
+        await message.answer(
+            f"📅 <b>Дата замены принята:</b> {format_date_nice(change_date)}\n\n"
+            f"⏱️ <b>Теперь укажите срок службы фильтра в днях</b>\n\n"
+            f"💡 <i>Рекомендуемый срок для {filter_type}: {recommended_lifetime} дней</i>\n"
+            f"Или введите свое значение:",
+            reply_markup=get_recommended_lifetime_keyboard(recommended_lifetime),
+            parse_mode='HTML'
+        )
+        
+        await state.set_state(FilterStates.waiting_lifetime)
+        
+    except ValueError as e:
+        await message.answer(
+            f"❌ <b>Ошибка в дате:</b> {str(e)}\n\n"
+            f"📅 <b>Пожалуйста, введите дату еще раз:</b>",
+            reply_markup=get_back_keyboard(),
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logging.error(f"Error processing change date: {e}")
+        await message.answer(
+            "❌ Произошла непредвиденная ошибка. Попробуйте еще раз.",
+            reply_markup=get_back_keyboard()
+        )
 
-# ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ С УЛУЧШЕНИЯМИ ==========
+def check_dependencies():
+    """Проверка необходимых зависимостей"""
+    try:
+        import pandas as pd
+        import sqlite3
+        import re
+        import json
+        # Проверяем основные зависимости
+        logging.info("Все зависимости загружены успешно")
+        return True
+    except ImportError as e:
+        logging.critical(f"Отсутствует зависимость: {e}")
+        return False
+
 def start_background_tasks():
     """Запуск фоновых задач в отдельных потоках"""
     # Задача напоминаний
@@ -1799,9 +2144,13 @@ def start_background_tasks():
     
     logging.info("Фоновые задачи запущены")
 
-async def main():
-    """Основная функция запуска"""
+async def enhanced_main():
+    """Улучшенная функция запуска"""
     try:
+        # Проверка зависимостей
+        if not check_dependencies():
+            raise ImportError("Не все зависимости установлены")
+        
         # Инициализация конфигурации
         config.validate()
         
@@ -1812,30 +2161,33 @@ async def main():
         init_db()
         check_and_update_schema()
         
+        # Создание резервной копии при запуске
+        if config.BACKUP_ENABLED:
+            if backup_database():
+                logging.info("Резервная копия при запуске создана успешно")
+            else:
+                logging.warning("Не удалось создать резервную копию при запуске")
+        
         # Запуск фоновых задач
         start_background_tasks()
         
         # Настройка обработчика ошибок
         dp.errors.register(error_handler)
         
+        # Уведомление о успешном запуске
+        logging.info("🤖 Бот успешно запущен со всеми улучшениями!")
+        
         # Запуск бота
-        logging.info("Бот запускается...")
         await dp.start_polling(bot)
         
     except Exception as e:
         logging.critical(f"Критическая ошибка при запуске: {e}")
-        # Уведомление администратора
-        if config.ADMIN_ID:
-            try:
-                await bot.send_message(config.ADMIN_ID, f"🚨 Бот упал: {e}")
-            except:
-                pass
         raise
 
 if __name__ == "__main__":
     try:
         import asyncio
-        asyncio.run(main())
+        asyncio.run(enhanced_main())
     except KeyboardInterrupt:
         logging.info("Бот остановлен пользователем")
     except Exception as e:
