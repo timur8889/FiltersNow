@@ -1790,6 +1790,275 @@ async def process_details_filter(callback_query: types.CallbackQuery):
         logging.error(f"Ошибка при обработке details: {e}")
         await callback_query.answer("❌ Произошла ошибка", show_alert=True)
 
+# ========== ОБРАБОТЧИКИ СИНХРОНИЗАЦИИ GOOGLE SHEETS ==========
+
+@dp.message(F.text == "🔄 Синхронизировать с Google Sheets")
+async def cmd_sync_now(message: types.Message):
+    """Ручная синхронизация с Google Sheets"""
+    health_monitor.record_message(message.from_user.id)
+    
+    if not google_sync.is_configured():
+        await message.answer(
+            "❌ <b>Синхронизация не настроена</b>\n\n"
+            "Сначала настройте синхронизацию:\n"
+            "1. Укажите ID таблицы Google Sheets\n"
+            "2. Убедитесь, что GOOGLE_SHEETS_CREDENTIALS установлены в .env\n\n"
+            "Используйте кнопку '⚙️ Настройки синхронизации'",
+            reply_markup=get_sync_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    await message.answer("🔄 Начинаю синхронизацию...")
+    
+    filters = get_user_filters(message.from_user.id)
+    if not filters:
+        await message.answer(
+            "❌ Нет данных для синхронизации",
+            reply_markup=get_sync_keyboard()
+        )
+        return
+    
+    success, result_message = safe_sync_to_sheets(message.from_user.id, filters)
+    
+    if success:
+        await message.answer(
+            f"✅ <b>СИНХРОНИЗАЦИЯ УСПЕШНА!</b>\n\n"
+            f"{result_message}",
+            reply_markup=get_sync_keyboard(),
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            f"❌ <b>ОШИБКА СИНХРОНИЗАЦИИ</b>\n\n"
+            f"{result_message}",
+            reply_markup=get_sync_keyboard(),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "⚙️ Настройки синхронизации")
+async def cmd_sync_settings(message: types.Message):
+    """Настройки синхронизации"""
+    health_monitor.record_message(message.from_user.id)
+    
+    auto_sync_status = "🟢 ВКЛ" if google_sync.auto_sync else "🔴 ВЫКЛ"
+    config_status = "🟢 Настроена" if google_sync.is_configured() else "🔴 Не настроена"
+    
+    await message.answer(
+        f"⚙️ <b>НАСТРОЙКИ СИНХРОНИЗАЦИИ</b>\n\n"
+        f"📊 Статус: {config_status}\n"
+        f"🔄 Автосинхронизация: {auto_sync_status}\n"
+        f"📎 ID таблицы: {google_sync.sheet_id or 'Не указан'}\n\n"
+        f"<b>Доступные действия:</b>",
+        reply_markup=get_sync_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📊 Статус синхронизации")
+async def cmd_sync_status(message: types.Message):
+    """Статус синхронизации"""
+    health_monitor.record_message(message.from_user.id)
+    
+    # Проверяем настройки
+    has_credentials = bool(config.GOOGLE_SHEETS_CREDENTIALS)
+    has_sheet_id = bool(google_sync.sheet_id)
+    is_configured = google_sync.is_configured()
+    
+    # Получаем статистику синхронизации
+    sync_stats = {
+        'total_syncs': health_monitor.sync_operations,
+        'last_sync': "Не выполнялась"
+    }
+    
+    status_emoji = "🟢" if is_configured else "🔴"
+    config_status = "Настроена" if is_configured else "Не настроена"
+    
+    status_text = f"""
+{status_emoji} <b>СТАТУС СИНХРОНИЗАЦИИ</b>
+
+<b>Конфигурация:</b>
+• Учетные данные: {'🟢 Установлены' if has_credentials else '🔴 Отсутствуют'}
+• ID таблицы: {'🟢 Указан' if has_sheet_id else '🔴 Не указан'}
+• Общий статус: {config_status}
+
+<b>Статистика:</b>
+• Всего синхронизаций: {sync_stats['total_syncs']}
+• Последняя синхронизация: {sync_stats['last_sync']}
+• Автосинхронизация: {'🟢 ВКЛ' if google_sync.auto_sync else '🔴 ВЫКЛ'}
+
+<b>Действия:</b>
+"""
+    
+    if not has_credentials:
+        status_text += "\n⚠️ <i>GOOGLE_SHEETS_CREDENTIALS не установлены в .env файле</i>"
+    
+    if not has_sheet_id:
+        status_text += "\n⚠️ <i>ID таблицы не указан</i>"
+    
+    await message.answer(status_text, parse_mode='HTML', reply_markup=get_sync_keyboard())
+
+@dp.message(F.text == "📝 Указать ID таблицы")
+async def cmd_set_sheet_id(message: types.Message, state: FSMContext):
+    """Установка ID таблицы Google Sheets"""
+    if not config.GOOGLE_SHEETS_CREDENTIALS:
+        await message.answer(
+            "❌ <b>Сначала настройте учетные данные</b>\n\n"
+            "Добавьте в .env файл:\n"
+            "<code>GOOGLE_SHEETS_CREDENTIALS=ваш_json_credentials</code>\n\n"
+            "Получить credentials можно в Google Cloud Console.",
+            parse_mode='HTML',
+            reply_markup=get_sync_settings_keyboard()
+        )
+        return
+    
+    await message.answer(
+        "📝 <b>УКАЖИТЕ ID ТАБЛИЦЫ GOOGLE SHEETS</b>\n\n"
+        "ID можно найти в URL таблицы:\n"
+        "https://docs.google.com/spreadsheets/d/<b>ЭТО_ID_ТАБЛИЦЫ</b>/edit\n\n"
+        "Пример: <code>1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms</code>\n\n"
+        "Отправьте ID таблицы:",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(GoogleSheetsStates.waiting_sheet_id)
+
+@dp.message(GoogleSheetsStates.waiting_sheet_id)
+async def process_sheet_id(message: types.Message, state: FSMContext):
+    """Обработка ID таблицы"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await cmd_sync_settings(message)
+        return
+    
+    sheet_id = message.text.strip()
+    
+    # Простая валидация ID таблицы
+    if len(sheet_id) < 10 or " " in sheet_id:
+        await message.answer(
+            "❌ <b>Неверный формат ID таблицы</b>\n\n"
+            "ID таблицы должен быть длинной строкой без пробелов.\n"
+            "Пример: <code>1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms</code>\n\n"
+            "Попробуйте еще раз:",
+            reply_markup=get_cancel_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    # Сохраняем ID таблицы
+    google_sync.sheet_id = sheet_id
+    google_sync.save_settings()
+    
+    # Пробуем протестировать подключение
+    await message.answer("🔗 Проверяю подключение к таблице...")
+    
+    try:
+        # Инициализируем credentials
+        if google_sync.initialize_credentials():
+            # Пробуем создать тестовый лист
+            import gspread
+            gc = gspread.authorize(google_sync.credentials)
+            sheet = gc.open_by_key(sheet_id)
+            
+            # Создаем тестовый лист для проверки
+            test_sheet_name = f"Test_Connection_{message.from_user.id}"
+            try:
+                worksheet = sheet.worksheet(test_sheet_name)
+                worksheet.clear()
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = sheet.add_worksheet(title=test_sheet_name, rows=10, cols=5)
+            
+            # Записыем тестовые данные
+            worksheet.update('A1', [['Тест подключения', 'Успешно!']])
+            worksheet.delete()
+            
+            await message.answer(
+                f"✅ <b>ПОДКЛЮЧЕНИЕ УСПЕШНО!</b>\n\n"
+                f"ID таблицы сохранен: <code>{sheet_id}</code>\n"
+                f"Теперь вы можете использовать синхронизацию.",
+                reply_markup=get_sync_settings_keyboard(),
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer(
+                "❌ <b>Ошибка инициализации Google API</b>\n\n"
+                "Проверьте правильность GOOGLE_SHEETS_CREDENTIALS в .env файле.",
+                reply_markup=get_sync_settings_keyboard(),
+                parse_mode='HTML'
+            )
+            
+    except Exception as e:
+        error_msg = str(e)
+        if "Unable to discover service" in error_msg:
+            error_msg = "Неверные учетные данные Google Sheets"
+        elif "not found" in error_msg.lower():
+            error_msg = "Таблица с указанным ID не найдена или нет доступа"
+        
+        await message.answer(
+            f"❌ <b>ОШИБКА ПОДКЛЮЧЕНИЯ</b>\n\n"
+            f"{error_msg}\n\n"
+            f"Проверьте:\n"
+            f"1. Правильность ID таблицы\n"
+            f"2. Доступ к таблице\n"
+            f"3. Учетные данные в .env",
+            reply_markup=get_sync_settings_keyboard(),
+            parse_mode='HTML'
+        )
+    
+    await state.clear()
+
+@dp.message(F.text == "🔄 Автосинхронизация ВКЛ")
+async def cmd_auto_sync_on(message: types.Message):
+    """Включение автосинхронизации"""
+    if not google_sync.is_configured():
+        await message.answer(
+            "❌ <b>Сначала настройте синхронизацию</b>\n\n"
+            "Укажите ID таблицы и убедитесь в работоспособности подключения.",
+            reply_markup=get_sync_settings_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    google_sync.auto_sync = True
+    google_sync.save_settings()
+    
+    await message.answer(
+        "🔄 <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА</b>\n\n"
+        "Теперь ваши данные будут автоматически синхронизироваться с Google Sheets "
+        "при каждом изменении.\n\n"
+        "Интервал синхронизации: 60 секунд",
+        reply_markup=get_sync_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "⏸️ Автосинхронизация ВЫКЛ")
+async def cmd_auto_sync_off(message: types.Message):
+    """Выключение автосинхронизации"""
+    google_sync.auto_sync = False
+    google_sync.save_settings()
+    
+    await message.answer(
+        "⏸️ <b>АВТОСИНХРОНИЗАЦИЯ ВЫКЛЮЧЕНА</b>\n\n"
+        "Автоматическая синхронизация отключена.\n"
+        "Вы можете синхронизировать данные вручную.",
+        reply_markup=get_sync_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "🗑️ Отключить синхронизацию")
+async def cmd_disable_sync(message: types.Message):
+    """Полное отключение синхронизации"""
+    google_sync.sheet_id = None
+    google_sync.auto_sync = False
+    google_sync.save_settings()
+    
+    await message.answer(
+        "🗑️ <b>СИНХРОНИЗАЦИЯ ОТКЛЮЧЕНА</b>\n\n"
+        "Все настройки синхронизации сброшены.\n"
+        "Вы можете настроить заново в любое время.",
+        reply_markup=get_sync_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
 # ========== ДОБАВЛЕНИЕ ОБРАБОТЧИКОВ ДЛЯ КНОПОК ==========
 
 @dp.message(F.text == "✨ Добавить фильтр")
@@ -2710,7 +2979,7 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
-        "💧 <i>Умный помощник для своевременной замены фильтров</i>\n\n"
+        "💧 <i>Умный помощин для своевременной замены фильтров</i>\n\n"
         "📦 <b>Основные возможности:</b>\n"
         "• 📋 Просмотр всех ваших фильтров\n"
         "• ✨ Добавление новых фильтров\n"
