@@ -2566,6 +2566,225 @@ async def cmd_back(message: types.Message, state: FSMContext):
         # Если нет активного состояния - просто показываем главное меню
         await message.answer("🔙 Главное меню", reply_markup=get_main_keyboard())
 
+# ========== ОБРАБОТЧИКИ ДЛЯ НОВЫХ КНОПОК ==========
+
+@dp.message(F.text == "⚙️ Управление фильтрами")
+async def cmd_management(message: types.Message):
+    """Меню управления фильтрами"""
+    health_monitor.record_message(message.from_user.id)
+    
+    filters = get_user_filters(message.from_user.id)
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет фильтров для управления</b>\n\n"
+            "Сначала добавьте фильтры через меню '✨ Добавить фильтр'",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    await message.answer(
+        "⚙️ <b>УПРАВЛЕНИЕ ФИЛЬТРАМИ</b>\n\n"
+        f"📊 У вас {len(filters)} фильтр(ов)\n\n"
+        "Выберите действие:",
+        reply_markup=get_management_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📊 Статистика")
+async def cmd_statistics(message: types.Message):
+    """Общая статистика"""
+    health_monitor.record_message(message.from_user.id)
+    
+    user_id = message.from_user.id
+    filters = get_user_filters(user_id)
+    
+    if not filters:
+        await message.answer(
+            "📭 <b>У вас пока нет статистики</b>\n\n"
+            "Добавьте первый фильтр, чтобы увидеть статистику.",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    stats = cache_manager.get_user_stats(user_id)
+    
+    # Детальная статистика по статусам
+    today = datetime.now().date()
+    status_counts = {
+        "🔴 Просрочено": 0,
+        "🟡 Скоро истекают": 0,
+        "🟠 Внимание": 0,
+        "🟢 Норма": 0
+    }
+    
+    for f in filters:
+        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+        days_until = (expiry_date - today).days
+        
+        if days_until <= 0:
+            status_counts["🔴 Просрочено"] += 1
+        elif days_until <= 7:
+            status_counts["🟡 Скоро истекают"] += 1
+        elif days_until <= 30:
+            status_counts["🟠 Внимание"] += 1
+        else:
+            status_counts["🟢 Норма"] += 1
+    
+    status_text = "\n".join([f"{status}: {count}" for status, count in status_counts.items()])
+    
+    stats_text = f"""
+📊 <b>ОБЩАЯ СТАТИСТИКА</b>
+
+💧 <b>Основные показатели:</b>
+• Всего фильтров: {stats['total']}
+• 🟢 В норме: {stats['normal']}
+• 🟡 Скоро истекают: {stats['expiring_soon']}
+• 🔴 Просрочено: {stats['expired']}
+
+📈 <b>Детали по статусам:</b>
+{status_text}
+
+⏱️ <b>Сроки службы:</b>
+• Средний срок до замены: {stats['avg_days_until_expiry']:.1f} дней
+• Общее здоровье системы: {create_progress_bar(stats['health_percentage'])}
+
+💫 <i>Статистика обновляется в реальном времени</i>
+    """
+    
+    await message.answer(stats_text, parse_mode='HTML')
+
+@dp.message(F.text == "📤 Импорт/Экспорт")
+async def cmd_import_export(message: types.Message):
+    """Меню импорта/экспорта"""
+    health_monitor.record_message(message.from_user.id)
+    
+    await message.answer(
+        "📤 <b>ИМПОРТ/ЭКСПОРТ ДАННЫХ</b>\n\n"
+        "Выберите действие для работы с данными:",
+        reply_markup=get_import_export_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📤 Экспорт в Excel")
+async def cmd_export_excel(message: types.Message):
+    """Экспорт данных в Excel"""
+    health_monitor.record_message(message.from_user.id)
+    
+    user_id = message.from_user.id
+    filters = get_user_filters(user_id)
+    
+    if not filters:
+        await message.answer(
+            "❌ <b>Нет данных для экспорта</b>\n\n"
+            "Сначала добавьте фильтры через меню '✨ Добавить фильтр'",
+            reply_markup=get_import_export_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        await message.answer("🔄 Создаю Excel файл...")
+        
+        excel_file = export_to_excel(user_id)
+        
+        # Отправляем файл пользователю
+        await message.answer_document(
+            types.BufferedInputFile(
+                excel_file.getvalue(),
+                filename=f"фильтры_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            ),
+            caption="✅ <b>Ваши фильтры экспортированы в Excel</b>\n\n"
+                   f"📊 Всего фильтров: {len(filters)}\n"
+                   f"📅 Дата экспорта: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при экспорте в Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при создании Excel файла</b>\n\n"
+            "Пожалуйста, попробуйте позже.",
+            reply_markup=get_import_export_keyboard(),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "📋 Шаблон Excel")
+async def cmd_excel_template(message: types.Message):
+    """Отправка шаблона Excel для импорта"""
+    health_monitor.record_message(message.from_user.id)
+    
+    # Создаем простой шаблон Excel
+    try:
+        template_data = {
+            'Тип фильтра': ['Магистральный SL10', 'Гейзер', 'Аквафор'],
+            'Местоположение': ['Кухня', 'Ванная', 'Офис'],
+            'Дата замены': ['15.12.2023', '20.12.2023', '25.12.2023'],
+            'Срок службы (дни)': [180, 365, 365]
+        }
+        
+        df = pd.DataFrame(template_data)
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Шаблон', index=False)
+            
+            # Получаем workbook и worksheet для форматирования
+            workbook = writer.book
+            worksheet = writer.sheets['Шаблон']
+            
+            # Настраиваем ширину колонок
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        output.seek(0)
+        
+        await message.answer_document(
+            types.BufferedInputFile(
+                output.getvalue(),
+                filename="шаблон_импорта_фильтров.xlsx"
+            ),
+            caption="📋 <b>ШАБЛОН ДЛЯ ИМПОРТА ФИЛЬТРОВ</b>\n\n"
+                   "Заполните этот шаблон своими данными и импортируйте через меню '📥 Импорт из Excel'\n\n"
+                   "<b>Столбцы шаблона:</b>\n"
+                   "• Тип фильтра - тип вашего фильтра\n"
+                   "• Местоположение - где установлен фильтр\n"
+                   "• Дата замены - дата последней замены (ДД.ММ.ГГГГ)\n"
+                   "• Срок службы (дни) - срок службы в днях",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при создании шаблона: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при создании шаблона</b>\n\n"
+            "Пожалуйста, попробуйте позже.",
+            reply_markup=get_import_export_keyboard(),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "☁️ Синхронизация с Google Sheets")
+async def cmd_google_sheets(message: types.Message):
+    """Меню синхронизации с Google Sheets"""
+    health_monitor.record_message(message.from_user.id)
+    
+    await message.answer(
+        "☁️ <b>СИНХРОНИЗАЦИЯ С GOOGLE SHEETS</b>\n\n"
+        "Настройте автоматическую синхронизацию ваших данных с Google Sheets:",
+        reply_markup=get_sync_keyboard(),
+        parse_mode='HTML'
+    )
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     """Админ панель"""
