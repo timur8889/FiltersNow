@@ -199,7 +199,7 @@ def get_all_users_stats() -> Dict:
         return {'total_users': 0, 'total_filters': 0, 'expired_filters': 0, 'expiring_soon': 0}
 
 def add_filter_to_db(user_id: int, filter_type: str, location: str, last_change: str, expiry_date: str, lifetime_days: int) -> bool:
-    """Добавление фильтра в БД"""
+    """Добавление фильтра в БД с принудительной инвалидацией кэша"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -210,13 +210,17 @@ def add_filter_to_db(user_id: int, filter_type: str, location: str, last_change:
             
             health_monitor.record_db_operation()
             
-            # Инвалидируем кэш пользователя
+            # ПРИНУДИТЕЛЬНАЯ инвалидация кэша пользователя
             cache_manager.invalidate_user_cache(user_id)
+            
+            # Очищаем LRU кэш полностью
+            cache_manager.lru_cache.cache.clear()
             
             # Мгновенная синхронизация при добавлении
             if google_sync.auto_sync and google_sync.is_configured():
-                filters = get_user_filters(user_id)
-                google_sync.sync_to_sheets(user_id, filters)
+                # Получаем СВЕЖИЕ данные из БД, минуя кэш
+                fresh_filters = get_user_filters_db(user_id)
+                google_sync.sync_to_sheets(user_id, fresh_filters)
             
             return True
     except Exception as e:
@@ -495,6 +499,22 @@ cache_manager = EnhancedCacheManager()
 def get_user_filters(user_id: int) -> List[Dict]:
     """Получение фильтров пользователя"""
     return cache_manager.get_user_filters(user_id)
+
+def get_fresh_user_filters(user_id: int) -> List[Dict]:
+    """Получение свежих данных из БД, минуя кэш"""
+    cache_manager.invalidate_user_cache(user_id)
+    return get_user_filters_db(user_id)
+
+def force_refresh_user_cache(user_id: int):
+    """Принудительное обновление кэша пользователя"""
+    cache_manager.invalidate_user_cache(user_id)
+    # Очищаем соответствующие ключи в LRU кэше
+    cache_keys = [f"filters_{user_id}", f"stats_{user_id}"]
+    for key in cache_keys:
+        cache_manager.lru_cache.cache.pop(key, None)
+    
+    # Получаем свежие данные
+    return get_user_filters_db(user_id)
 
 # ========== УМНАЯ СИСТЕМА НАПОМИНАНИЙ ==========
 class SmartReminderSystem:
@@ -1289,7 +1309,7 @@ class GoogleSheetsSync:
             return False
     
     def sync_to_sheets(self, user_id: int, user_filters: List[Dict]) -> tuple[bool, str]:
-        """Синхронизация данных с Google Sheets"""
+        """Синхронизация данных с Google Sheets с полной очисткой"""
         try:
             if not self.is_configured():
                 return False, "Синхронизация не настроена"
@@ -1310,17 +1330,17 @@ class GoogleSheetsSync:
             worksheet_name = f"User_{user_id}"
             try:
                 worksheet = sheet.worksheet(worksheet_name)
+                
+                # ПОЛНОСТЬЮ очищаем весь лист
+                worksheet.clear()
+                
             except gspread.exceptions.WorksheetNotFound:
                 worksheet = sheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
-                
-                # Заголовки
-                headers = ['ID', 'Тип фильтра', 'Местоположение', 'Дата замены', 
-                          'Срок службы (дни)', 'Годен до', 'Статус', 'Осталось дней']
-                worksheet.append_row(headers)
             
-            # Очищаем старые данные (кроме заголовка)
-            if len(worksheet.get_all_values()) > 1:
-                worksheet.delete_rows(2, len(worksheet.get_all_values()))
+            # Заголовки
+            headers = ['ID', 'Тип фильтра', 'Местоположение', 'Дата замены', 
+                      'Срок службы (дни)', 'Годен до', 'Статус', 'Осталось дней']
+            worksheet.append_row(headers)
             
             # Подготавливаем данные
             today = datetime.now().date()
@@ -1355,9 +1375,22 @@ class GoogleSheetsSync:
                 worksheet.format('A1:H1', {'textFormat': {'bold': True}})
                 
                 # Авто-ширина колонок
-                worksheet.columns_auto_resize(0, 7)
+                sheet.batch_update({
+                    "requests": [
+                        {
+                            "autoResizeDimensions": {
+                                "dimensions": {
+                                    "sheetId": worksheet.id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 0,
+                                    "endIndex": 8
+                                }
+                            }
+                        }
+                    ]
+                })
             except Exception as format_error:
-                logging.warning(f"Ошибка форматирования таблица: {format_error}")
+                logging.warning(f"Ошибка форматирования таблицы: {format_error}")
             
             health_monitor.record_sync_operation()
             return True, f"Успешно синхронизировано {len(rows)} фильтров"
@@ -2277,7 +2310,7 @@ async def process_lifetime(message: types.Message, state: FSMContext):
 
 @dp.message(FilterStates.waiting_confirmation)
 async def process_confirmation(message: types.Message, state: FSMContext):
-    """Обработка подтверждения"""
+    """Обработка подтверждения с принудительным обновлением кэша"""
     if message.text == "✅ Да, всё верно":
         # Получаем данные из состояния
         data = await state.get_data()
@@ -2312,12 +2345,19 @@ async def process_confirmation(message: types.Message, state: FSMContext):
         )
         
         if success:
+            # ПРИНУДИТЕЛЬНО обновляем данные для показа
+            cache_manager.invalidate_user_cache(user_id)
+            
+            # Получаем СВЕЖИЕ данные для отображения
+            fresh_filters = get_user_filters_db(user_id)
             expiry_date_obj = datetime.strptime(expiry_date, '%Y-%m-%d').date()
+            
             await message.answer(
                 f"✅ <b>ФИЛЬТР УСПЕШНО ДОБАВЛЕН!</b>\n\n"
                 f"💧 {filter_type}\n"
                 f"📍 {location}\n"
-                f"📅 Следующая замена: {format_date_nice(expiry_date_obj)}",
+                f"📅 Следующая замена: {format_date_nice(expiry_date_obj)}\n\n"
+                f"📊 Теперь у вас {len(fresh_filters)} фильтр(ов)",
                 reply_markup=get_main_keyboard(),
                 parse_mode='HTML'
             )
@@ -2333,7 +2373,6 @@ async def process_confirmation(message: types.Message, state: FSMContext):
         await state.clear()
         
     elif message.text == "❌ Нет, изменить":
-        # Полностью очищаем состояние и начинаем заново
         await state.clear()
         await state.set_state(FilterStates.waiting_filter_type)
         await message.answer(
