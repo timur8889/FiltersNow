@@ -63,8 +63,8 @@ class Config:
         # Настройки кэширования
         self.CACHE_TTL = 300  # 5 минут
         
-        # Настройки реального времени
-        self.REAL_TIME_SYNC_INTERVAL = 60  # 60 секунд
+        # Настройки реального времени - УВЕЛИЧЕНА ЧАСТОТА СИНХРОНИЗАЦИИ
+        self.REAL_TIME_SYNC_INTERVAL = 5  # 5 секунд вместо 60
         
     def validate(self) -> bool:
         """Проверка корректности конфигурации"""
@@ -1246,12 +1246,14 @@ class GoogleSheetsStates(StatesGroup):
     waiting_sheet_id = State()
     waiting_sync_confirmation = State()
 
-# ========== СИНХРОННАЯ GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
+# ========== УЛУЧШЕННАЯ СИНХРОННАЯ GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
 class GoogleSheetsSync:
     def __init__(self):
         self.credentials = None
         self.sheet_id = None
         self.auto_sync = False
+        self.last_sync_time = {}
+        self.sync_interval = config.REAL_TIME_SYNC_INTERVAL  # 5 секунд
         self.load_settings()
     
     def load_settings(self):
@@ -1392,6 +1394,9 @@ class GoogleSheetsSync:
             except Exception as format_error:
                 logging.warning(f"Ошибка форматирования таблицы: {format_error}")
             
+            # Обновляем время последней синхронизации
+            self.last_sync_time[user_id] = datetime.now()
+            
             health_monitor.record_sync_operation()
             return True, f"Успешно синхронизировано {len(rows)} фильтров"
             
@@ -1400,115 +1405,17 @@ class GoogleSheetsSync:
             health_monitor.record_error()
             return False, f"Ошибка синхронизации: {str(e)}"
     
-    def sync_from_sheets(self, user_id: int) -> tuple[bool, str, int]:
-        """Синхронизация данных из Google Sheets"""
-        try:
-            if not self.is_configured():
-                return False, "Синхронизация не настроена", 0
-            
-            if not self.credentials:
-                if not self.initialize_credentials():
-                    return False, "Ошибка инициализации Google API", 0
-            
-            import gspread
-            
-            # Создаем клиент
-            gc = gspread.authorize(self.credentials)
-            
-            # Открываем таблицу
-            sheet = gc.open_by_key(self.sheet_id)
-            
-            # Получаем лист пользователя
-            worksheet_name = f"User_{user_id}"
-            try:
-                worksheet = sheet.worksheet(worksheet_name)
-            except gspread.exceptions.WorksheetNotFound:
-                return False, "Таблица для пользователя не найдена", 0
-            
-            # Читаем данные (пропускаем заголовок)
-            data = worksheet.get_all_records()
-            
-            if not data:
-                return False, "Нет данных для импорта", 0
-            
-            # Обрабатываем данные
-            imported_count = 0
-            errors = []
-            
-            for index, row in enumerate(data, start=2):
-                try:
-                    # Пропускаем строки без основных данных
-                    if not row.get('Тип фильтра') or not row.get('Местоположение'):
-                        continue
-                    
-                    # Валидация типа фильтра
-                    filter_type = str(row['Тип фильтра']).strip()
-                    is_valid_type, error_msg = validate_filter_type(filter_type)
-                    if not is_valid_type:
-                        errors.append(f"Строка {index}: {error_msg}")
-                        continue
-                    
-                    # Валидация местоположения
-                    location = str(row['Местоположение']).strip()
-                    is_valid_loc, error_msg = validate_location(location)
-                    if not is_valid_loc:
-                        errors.append(f"Строка {index}: {error_msg}")
-                        continue
-                    
-                    # Валидация даты
-                    date_str = str(row.get('Дата замены', ''))
-                    if not date_str:
-                        errors.append(f"Строка {index}: Отсутствует дата замены")
-                        continue
-                    
-                    try:
-                        change_date = validate_date(date_str)
-                    except ValueError as e:
-                        errors.append(f"Строка {index}: {str(e)}")
-                        continue
-                    
-                    # Валидация срока службы
-                    lifetime = row.get('Срок службы (дни)', 0)
-                    is_valid_lt, error_msg, lifetime_days = validate_lifetime(str(lifetime))
-                    if not is_valid_lt:
-                        errors.append(f"Строка {index}: {error_msg}")
-                        continue
-                    
-                    # Расчет даты истечения
-                    expiry_date = change_date + timedelta(days=lifetime_days)
-                    
-                    # Добавление в БД
-                    success = add_filter_to_db(
-                        user_id=user_id,
-                        filter_type=filter_type,
-                        location=location,
-                        last_change=change_date.strftime('%Y-%m-%d'),
-                        expiry_date=expiry_date.strftime('%Y-%m-%d'),
-                        lifetime_days=lifetime_days
-                    )
-                    
-                    if success:
-                        imported_count += 1
-                    else:
-                        errors.append(f"Строка {index}: Ошибка базы данных")
-                        
-                except Exception as e:
-                    errors.append(f"Строка {index}: Неизвестная ошибка: {str(e)}")
-                    logging.error(f"Ошибка импорта строки {index}: {e}")
-            
-            message = f"Импортировано {imported_count} фильтров"
-            if errors:
-                message += f"\nОшибки: {len(errors)}"
-                if len(errors) <= 5:  # Показываем только первые 5 ошибок
-                    message += "\n" + "\n".join(errors[:5])
-            
-            health_monitor.record_sync_operation()
-            return True, message, imported_count
-            
-        except Exception as e:
-            logging.error(f"Ошибка синхронизации из Google Sheets: {e}")
-            health_monitor.record_error()
-            return False, f"Ошибка синхронизации: {str(e)}", 0
+    def should_sync_user(self, user_id: int) -> bool:
+        """Проверка необходимости синхронизации для пользователя"""
+        if not self.auto_sync or not self.is_configured():
+            return False
+        
+        last_sync = self.last_sync_time.get(user_id)
+        if not last_sync:
+            return True
+        
+        time_since_last_sync = (datetime.now() - last_sync).total_seconds()
+        return time_since_last_sync >= self.sync_interval
 
 # Создаем экземпляр синхронизации
 google_sync = GoogleSheetsSync()
@@ -1672,7 +1579,9 @@ def health_monitoring_task():
             time.sleep(60 * 5)
 
 def real_time_sync_task():
-    """Задача реального времени синхронизации"""
+    """Улучшенная задача реального времени синхронизации"""
+    logging.info("🚀 Запуск фоновой задачи автосинхронизации (интервал: 5 секунд)")
+    
     while True:
         try:
             if google_sync.auto_sync and google_sync.is_configured():
@@ -1682,21 +1591,37 @@ def real_time_sync_task():
                     cur.execute("SELECT DISTINCT user_id FROM filters")
                     users = cur.fetchall()
                     
+                    synced_users = 0
+                    total_users = len(users)
+                    
                     for user_row in users:
                         user_id = user_row[0]
-                        filters = get_user_filters(user_id)
-                        if filters:
-                            success, message = google_sync.sync_to_sheets(user_id, filters)
-                            if success:
-                                logging.debug(f"Автосинхронизация для пользователя {user_id}: {message}")
-                            else:
-                                logging.warning(f"Ошибка автосинхронизации для пользователя {user_id}: {message}")
+                        
+                        # Проверяем необходимость синхронизации для этого пользователя
+                        if google_sync.should_sync_user(user_id):
+                            filters = get_user_filters(user_id)
+                            if filters:
+                                success, message = google_sync.sync_to_sheets(user_id, filters)
+                                if success:
+                                    logging.debug(f"✅ Автосинхронизация для пользователя {user_id}: {message}")
+                                    synced_users += 1
+                                else:
+                                    logging.warning(f"❌ Ошибка автосинхронизации для пользователя {user_id}: {message}")
+                    
+                    # Логируем статистику каждые 10 циклов
+                    if hasattr(real_time_sync_task, 'cycle_count'):
+                        real_time_sync_task.cycle_count += 1
+                    else:
+                        real_time_sync_task.cycle_count = 1
+                    
+                    if real_time_sync_task.cycle_count % 10 == 0:
+                        logging.info(f"📊 Статистика автосинхронизации: {synced_users}/{total_users} пользователей")
             
-            time.sleep(config.REAL_TIME_SYNC_INTERVAL)  # Интервал синхронизации
+            time.sleep(config.REAL_TIME_SYNC_INTERVAL)  # Интервал синхронизации 5 секунд
             
         except Exception as e:
-            logging.error(f"Ошибка в задаче реального времени: {e}")
-            time.sleep(60)
+            logging.error(f"❌ Ошибка в задаче реального времени: {e}")
+            time.sleep(10)  # При ошибке ждем 10 секунд перед повторной попыткой
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ ==========
 async def show_filters_for_selection(message: types.Message, filters: List[Dict], action: str):
@@ -2432,7 +2357,8 @@ async def cmd_sync_now(message: types.Message):
     
     await message.answer("🔄 Начинаю синхронизацию...")
     
-    filters = get_user_filters(message.from_user.id)
+    user_id = message.from_user.id
+    filters = get_user_filters(user_id)
     if not filters:
         await message.answer(
             "❌ Нет данных для синхронизации",
@@ -2440,12 +2366,13 @@ async def cmd_sync_now(message: types.Message):
         )
         return
     
-    success, result_message = safe_sync_to_sheets(message.from_user.id, filters)
+    success, result_message = safe_sync_to_sheets(user_id, filters)
     
     if success:
         await message.answer(
             f"✅ <b>СИНХРОНИЗАЦИЯ УСПЕШНА!</b>\n\n"
-            f"{result_message}",
+            f"{result_message}\n\n"
+            f"💫 <i>Данные обновлены в Google Sheets</i>",
             reply_markup=get_sync_keyboard(),
             parse_mode='HTML'
         )
@@ -2486,10 +2413,9 @@ async def cmd_sync_status(message: types.Message):
     is_configured = google_sync.is_configured()
     
     # Получаем статистику синхронизации
-    sync_stats = {
-        'total_syncs': health_monitor.sync_operations,
-        'last_sync': "Не выполнялась"
-    }
+    auto_sync_status = "🟢 ВКЛ" if google_sync.auto_sync else "🔴 ВЫКЛ"
+    last_sync = google_sync.last_sync_time.get(message.from_user.id)
+    last_sync_text = format_date_nice(last_sync) + " " + last_sync.strftime("%H:%M:%S") if last_sync else "Никогда"
     
     status_emoji = "🟢" if is_configured else "🔴"
     config_status = "Настроена" if is_configured else "Не настроена"
@@ -2502,10 +2428,11 @@ async def cmd_sync_status(message: types.Message):
 • ID таблицы: {'🟢 Указан' if has_sheet_id else '🔴 Не указан'}
 • Общий статус: {config_status}
 
-<b>Статистика:</b>
-• Всего синхронизаций: {sync_stats['total_syncs']}
-• Последняя синхронизация: {sync_stats['last_sync']}
-• Автосинхронизация: {'🟢 ВКЛ' if google_sync.auto_sync else '🔴 ВЫКЛ'}
+<b>Статус синхронизации:</b>
+• Автосинхронизация: {auto_sync_status}
+• Интервал синхронизации: 5 секунд
+• Последняя синхронизация: {last_sync_text}
+• Всего синхронизаций: {health_monitor.sync_operations}
 
 <b>Действия:</b>
 """
@@ -2515,6 +2442,9 @@ async def cmd_sync_status(message: types.Message):
     
     if not has_sheet_id:
         status_text += "\n⚠️ <i>ID таблицы не указан</i>"
+    
+    if google_sync.auto_sync:
+        status_text += f"\n\n🔄 <b>Автосинхронизация активна</b>\nДанные обновляются каждые 5 секунд"
     
     await message.answer(status_text, parse_mode='HTML', reply_markup=get_sync_keyboard())
 
@@ -2642,14 +2572,30 @@ async def cmd_auto_sync_on(message: types.Message):
     google_sync.auto_sync = True
     google_sync.save_settings()
     
+    # Немедленная синхронизация при включении
+    user_id = message.from_user.id
+    filters = get_user_filters(user_id)
+    if filters:
+        success, result_message = google_sync.sync_to_sheets(user_id, filters)
+        if success:
+            sync_status = f"\n\n✅ Немедленная синхронизация: {result_message}"
+        else:
+            sync_status = f"\n\n⚠️ Немедленная синхронизация не удалась: {result_message}"
+    else:
+        sync_status = "\n\nℹ️ Нет данных для немедленной синхронизации"
+    
     await message.answer(
-        "🔄 <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА</b>\n\n"
-        "Теперь ваши данные будут автоматически синхронизироваться с Google Sheets "
-        "при каждом изменении.\n\n"
-        "Интервал синхронизации: 60 секунд",
+        f"🔄 <b>АВТОСИНХРОНИЗАЦИЯ ВКЛЮЧЕНА!</b>\n\n"
+        f"📊 Теперь ваши данные будут автоматически синхронизироваться с Google Sheets.\n"
+        f"⏱️ <b>Интервал синхронизации:</b> 5 секунд\n"
+        f"📈 <b>Статус:</b> Активный мониторинг изменений"
+        f"{sync_status}",
         reply_markup=get_sync_settings_keyboard(),
         parse_mode='HTML'
     )
+    
+    # Логируем включение автосинхронизации
+    logging.info(f"✅ Пользователь {user_id} включил автосинхронизацию")
 
 @dp.message(F.text == "⏸️ Автосинхронизация ВЫКЛ")
 async def cmd_auto_sync_off(message: types.Message):
@@ -2660,10 +2606,13 @@ async def cmd_auto_sync_off(message: types.Message):
     await message.answer(
         "⏸️ <b>АВТОСИНХРОНИЗАЦИЯ ВЫКЛЮЧЕНА</b>\n\n"
         "Автоматическая синхронизация отключена.\n"
-        "Вы можете синхронизировать данные вручную.",
+        "Вы можете синхронизировать данные вручную через меню синхронизации.",
         reply_markup=get_sync_settings_keyboard(),
         parse_mode='HTML'
     )
+    
+    # Логируем выключение автосинхронизации
+    logging.info(f"⏸️ Пользователь {message.from_user.id} выключил автосинхронизацию")
 
 @dp.message(F.text == "🗑️ Отключить синхронизацию")
 async def cmd_disable_sync(message: types.Message):
@@ -3084,6 +3033,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
     # Всегда очищаем состояние при старте
     await state.clear()
     
+    # Проверяем статус автосинхронизации
+    sync_status = ""
+    if google_sync.auto_sync and google_sync.is_configured():
+        sync_status = "\n\n🔄 <b>Автосинхронизация активна</b>\nДанные обновляются каждые 5 секунд"
+    
     await message.answer(
         "🏭 <b>Завод «Контакт»</b>\n"
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
@@ -3094,11 +3048,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• ⏳ Контроль сроков замены\n"
         "• ⚙️ Полное управление базой\n"
         "• 📊 Детальная статистика\n"
-        "• 📤 Импорт/экспорт Excel\n"
+        "• 📤 Импорт/Экспорт Excel\n"
         "• ☁️ Синхронизация с Google Sheets\n"
         "• 🔔 Автоматические напоминания\n"
         "• ⏰ Настройка времени уведомлений\n"
-        "• ⚡ <b>Синхронизация в реальном времени</b>\n\n"
+        "• ⚡ <b>Синхронизация в реальном времени (5 сек)</b>"
+        f"{sync_status}\n\n"
         "🏭 <i>Официальная система учета фильтров завода «Контакт»</i>",
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
@@ -3472,6 +3427,10 @@ async def cmd_my_filters(message: types.Message):
     response.append("\n" + create_expiry_infographic(filters))
     
     # Разбиваем сообщение если слишком длинное
+    full_text = "\n".join(response # Добавляем инфографику
+    response.append("\n" + create_expiry_infographic(filters))
+    
+    # Разбиваем сообщение если слишком длинное
     full_text = "\n".join(response)
     if len(full_text) > 4000:
         parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
@@ -3479,13 +3438,27 @@ async def cmd_my_filters(message: types.Message):
             await message.answer(part, parse_mode='HTML')
             await asyncio.sleep(0.1)
     else:
-        await message.answer(full_text, parse_mode='HTML')
+        await message)
+    if len(full_text) > 4000:
+        parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+        for part in parts:
+            await message.answer(part, parse_mode='HTML')
+            await asyncio.sleep(0.1)
+    else:
+.answer(full_text, parse_mode='HTML')
 
-# ========== ЗАПУСК ПРИЛОЖЕНИЯ С УЛУЧШЕНИЯМИ ==========
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ С УЛУЧШЕННОЙ СИНХРОНИЗАЦИЕЙ ==========
+def check_dependencies():
+    """Проверка необходимых зависимостей"""
+    try:
+        import pandas as        await message.answer(full_text, parse_mode='HTML')
+
+# ========== ЗАПУСК ПРИЛОЖЕНИЯ С УЛУЧШЕННОЙ СИНХРОНИЗАЦИЕЙ ==========
 def check_dependencies():
     """Проверка необходимых зависимостей"""
     try:
         import pandas as pd
+        pd
         import sqlite3
         import re
         import json
@@ -3497,6 +3470,23 @@ def check_dependencies():
         return False
 
 def start_background_tasks():
+    """ import sqlite3
+        import re
+        import json
+        # Проверяем основные зависимости
+        logging.info("Все зависимости загружены успешно")
+        return True
+    except ImportError as e:
+        logging.critical(f"Отсутствует зависимость: {e}")
+        return False
+
+def start_background_tЗапуск фоновых задач в отдельных потоках"""
+    # Задача напоминаний
+    reminder_thread = threading.Thread(target=send_personalized_reminders, daemon=True)
+    reminder_thread.start()
+    
+    # Задача мониторинга здоровья
+    health_thread = threading.Thread(target=health_monitoring_task, daemon=Trueasks():
     """Запуск фоновых задач в отдельных потоках"""
     # Задача напоминаний
     reminder_thread = threading.Thread(target=send_personalized_reminders, daemon=True)
@@ -3504,13 +3494,29 @@ def start_background_tasks():
     
     # Задача мониторинга здоровья
     health_thread = threading.Thread(target=health_monitoring_task, daemon=True)
+   )
     health_thread.start()
     
-    # Задача реального времени синхронизации
+    # ЗАПУСК УЛУЧШЕННОЙ ЗАДАЧИ СИНХРОНИЗАЦИИ
     sync_thread = threading.Thread(target=real_time_sync_task, daemon=True)
     sync_thread.start()
     
-    logging.info("Фоновые задачи запущены")
+    logging.info("🚀 Фоновые задачи запущены (авто health_thread.start()
+    
+    # ЗАПУСК УЛУЧШЕННОЙ ЗАДАЧИ СИНХРОНИЗАЦИИ
+    sync_thread = threading.Thread(target=real_time_sync_task, daemon=True)
+    sync_thread.start()
+    
+    logging.info("🚀 Фоновые задачисинхронизация: 5 секунд)")
+
+async def enhanced_main():
+    """Улучшенная функция запуска"""
+    try:
+        # Проверка зависимостей
+        if not check_dependencies():
+            raise ImportError("Не все зависимости установлены")
+        
+        # Инициализация конфи запущены (автосинхронизация: 5 секунд)")
 
 async def enhanced_main():
     """Улучшенная функция запуска"""
@@ -3520,7 +3526,17 @@ async def enhanced_main():
             raise ImportError("Не все зависимости установлены")
         
         # Инициализация конфигурации
+гурации
         config.validate()
+        
+        # Настройка логирования
+        setup_logging()
+        
+        # Инициализация базы данных
+        init_db()
+        check_and_update_schema()
+        
+        # Создание резервной копии        config.validate()
         
         # Настройка логирования
         setup_logging()
@@ -3532,7 +3548,14 @@ async def enhanced_main():
         # Создание резервной копии при запуске
         if config.BACKUP_ENABLED:
             if backup_database():
+                logging.info("Резервная копия при запуске при запуске
+        if config.BACKUP_ENABLED:
+            if backup_database():
                 logging.info("Резервная копия при запуске создана успешно")
+            else:
+                logging.warning("Не удалось создать резервную копию при запуске")
+        
+ создана успешно")
             else:
                 logging.warning("Не удалось создать резервную копию при запуске")
         
@@ -3540,13 +3563,31 @@ async def enhanced_main():
         start_background_tasks()
         
         # Настройка обработчика ошибок
+        dp        # Запуск фоновых задач
+        start_background_tasks()
+        
+        # Настройка обработчика ошиб.errors.register(error_handler)
+        
+        # Уведомление о успешном запуске
+        logging.info("🤖 Бот успешно запущен с улучшенной автосинхронизацией (5 секунд)!")
+        
+        # Запуск бота
+        await dp.startок
         dp.errors.register(error_handler)
         
         # Уведомление о успешном запуске
-        logging.info("🤖 Бот успешно запущен со всеми улучшениями!")
+        logging.info("🤖 Бот успешно запущен с улучшенной автосинхронизацией (5 секунд)!")
         
         # Запуск бота
-        await dp.start_polling(bot)
+_polling(bot)
+        
+    except Exception as e:
+        logging.critical(f"Критическая ошибка при запуске: {e}")
+        raise
+
+if __name__ == "__main__":
+    try:
+        import as        await dp.start_polling(bot)
         
     except Exception as e:
         logging.critical(f"Критическая ошибка при запуске: {e}")
@@ -3558,6 +3599,13 @@ if __name__ == "__main__":
         asyncio.run(enhanced_main())
     except KeyboardInterrupt:
         logging.info("Бот остановлен пользователем")
+    except Exception as eyncio
+        asyncio.run(enhanced_main())
+    except KeyboardInterrupt:
+        logging.info("Бот остановлен пользователем")
     except Exception as e:
+        logging:
         logging.critical(f"Фатальная ошибка: {e}")
+        sys.exit(1)
+.critical(f"Фатальная ошибка: {e}")
         sys.exit(1)
