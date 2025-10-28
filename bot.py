@@ -65,7 +65,7 @@ class Config:
         self.CACHE_TTL = 300  # 5 минут
         
         # Настройки реального времени - УВЕЛИЧЕНА ЧАСТОТА СИНХРОНИЗАЦИИ
-        self.REAL_TIME_SYNC_INTERVAL = 5  # 5 секунд вместо 60
+        self.REAL_TIME_SYNC_INTERVAL = 60  # 5 секунд вместо 60
         
     def validate(self) -> bool:
         """Проверка корректности конфигурации"""
