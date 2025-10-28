@@ -11,6 +11,7 @@ import json
 import pandas as pd
 import io
 import time
+import asyncio
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Callable, Any, Union
@@ -375,7 +376,11 @@ class EnhancedCacheManager:
     def __init__(self):
         self._user_filters_cache = {}
         self._user_stats_cache = {}
-        self._cache_ttl = config.CACHE_TTL
+        self._cache_ttl = {
+            'filters': 300,  # 5 минут
+            'stats': 60,     # 1 минута
+            'general': 600   # 10 минут
+        }
         self.lru_cache = LRUCache(max_size=500)
         self.hit_stats = {}
         self.miss_stats = {}
@@ -388,14 +393,14 @@ class EnhancedCacheManager:
         cached = self.lru_cache.get(cache_key)
         if cached:
             data, timestamp = cached
-            if time.time() - timestamp < self._cache_ttl:
+            if time.time() - timestamp < self._cache_ttl['filters']:
                 self._record_hit(user_id)
                 return data
         
         # Проверяем обычный кэш
         if cache_key in self._user_filters_cache:
             data, timestamp = self._user_filters_cache[cache_key]
-            if time.time() - timestamp < self._cache_ttl:
+            if time.time() - timestamp < self._cache_ttl['filters']:
                 self._record_hit(user_id)
                 return data
         
@@ -412,7 +417,7 @@ class EnhancedCacheManager:
         
         if cache_key in self._user_stats_cache:
             data, timestamp = self._user_stats_cache[cache_key]
-            if time.time() - timestamp < self._cache_ttl:
+            if time.time() - timestamp < self._cache_ttl['stats']:
                 return data
         
         # Загрузка из БД
@@ -1392,7 +1397,7 @@ class GoogleSheetsSync:
                     ]
                 })
             except Exception as format_error:
-                logging.warning(f"Ошибка форматирования таблицы: {format_error}")
+                logging.warning(f"Ошибка форматирования таблица: {format_error}")
             
             # Обновляем время последней синхронизации
             self.last_sync_time[user_id] = datetime.now()
@@ -1521,7 +1526,6 @@ def send_personalized_reminders():
                             if expired_filters:
                                 first_expired_id = expired_filters[0][0]['id']
                                 # Используем асинхронный вызов для отправки сообщения
-                                import asyncio
                                 asyncio.create_task(bot.send_message(
                                     user_id, 
                                     message, 
@@ -1529,7 +1533,6 @@ def send_personalized_reminders():
                                     reply_markup=get_reminder_keyboard(first_expired_id)
                                 ))
                             else:
-                                import asyncio
                                 asyncio.create_task(bot.send_message(user_id, message, parse_mode='HTML'))
                                 
                         except Exception as e:
@@ -1553,7 +1556,6 @@ def health_monitoring_task():
             
             # Уведомляем администратора при низком health score
             if health_status['health_score'] < 80 and config.ADMIN_ID:
-                import asyncio
                 try:
                     asyncio.create_task(bot.send_message(
                         config.ADMIN_ID,
@@ -3427,38 +3429,19 @@ async def cmd_my_filters(message: types.Message):
     response.append("\n" + create_expiry_infographic(filters))
     
     # Разбиваем сообщение если слишком длинное
-    full_text = "\n".join(response # Добавляем инфографику
-    response.append("\n" + create_expiry_infographic(filters))
-    
-    # Разбиваем сообщение если слишком длинное
     full_text = "\n".join(response)
     if len(full_text) > 4000:
         parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
         for part in parts:
             await message.answer(part, parse_mode='HTML')
-            await asyncio.sleep(0.1)
     else:
-        await message)
-    if len(full_text) > 4000:
-        parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
-        for part in parts:
-            await message.answer(part, parse_mode='HTML')
-            await asyncio.sleep(0.1)
-    else:
-.answer(full_text, parse_mode='HTML')
-
-# ========== ЗАПУСК ПРИЛОЖЕНИЯ С УЛУЧШЕННОЙ СИНХРОНИЗАЦИЕЙ ==========
-def check_dependencies():
-    """Проверка необходимых зависимостей"""
-    try:
-        import pandas as        await message.answer(full_text, parse_mode='HTML')
+        await message.answer(full_text, parse_mode='HTML')
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ С УЛУЧШЕННОЙ СИНХРОНИЗАЦИЕЙ ==========
 def check_dependencies():
     """Проверка необходимых зависимостей"""
     try:
         import pandas as pd
-        pd
         import sqlite3
         import re
         import json
@@ -3470,23 +3453,6 @@ def check_dependencies():
         return False
 
 def start_background_tasks():
-    """ import sqlite3
-        import re
-        import json
-        # Проверяем основные зависимости
-        logging.info("Все зависимости загружены успешно")
-        return True
-    except ImportError as e:
-        logging.critical(f"Отсутствует зависимость: {e}")
-        return False
-
-def start_background_tЗапуск фоновых задач в отдельных потоках"""
-    # Задача напоминаний
-    reminder_thread = threading.Thread(target=send_personalized_reminders, daemon=True)
-    reminder_thread.start()
-    
-    # Задача мониторинга здоровья
-    health_thread = threading.Thread(target=health_monitoring_task, daemon=Trueasks():
     """Запуск фоновых задач в отдельных потоках"""
     # Задача напоминаний
     reminder_thread = threading.Thread(target=send_personalized_reminders, daemon=True)
@@ -3494,7 +3460,6 @@ def start_background_tЗапуск фоновых задач в отдельны
     
     # Задача мониторинга здоровья
     health_thread = threading.Thread(target=health_monitoring_task, daemon=True)
-   )
     health_thread.start()
     
     # ЗАПУСК УЛУЧШЕННОЙ ЗАДАЧИ СИНХРОНИЗАЦИИ
@@ -3502,21 +3467,6 @@ def start_background_tЗапуск фоновых задач в отдельны
     sync_thread.start()
     
     logging.info("🚀 Фоновые задачи запущены (автосинхронизация: 5 секунд)")
-    
-    # ЗАПУСК УЛУЧШЕННОЙ ЗАДАЧИ СИНХРОНИЗАЦИИ
-    sync_thread = threading.Thread(target=real_time_sync_task, daemon=True)
-    sync_thread.start()
-    
-    logging.info("🚀 Фоновые задачисинхронизация: 5 секунд)")
-
-async def enhanced_main():
-    """Улучшенная функция запуска"""
-    try:
-        # Проверка зависимостей
-        if not check_dependencies():
-            raise ImportError("Не все зависимости установлены")
-        
-        # Инициализация конфи запущены (автосинхронизация: 5 секунд)")
 
 async def enhanced_main():
     """Улучшенная функция запуска"""
@@ -3526,17 +3476,7 @@ async def enhanced_main():
             raise ImportError("Не все зависимости установлены")
         
         # Инициализация конфигурации
-гурации
         config.validate()
-        
-        # Настройка логирования
-        setup_logging()
-        
-        # Инициализация базы данных
-        init_db()
-        check_and_update_schema()
-        
-        # Создание резервной копии        config.validate()
         
         # Настройка логирования
         setup_logging()
@@ -3548,14 +3488,7 @@ async def enhanced_main():
         # Создание резервной копии при запуске
         if config.BACKUP_ENABLED:
             if backup_database():
-                logging.info("Резервная копия при запуске при запуске
-        if config.BACKUP_ENABLED:
-            if backup_database():
                 logging.info("Резервная копия при запуске создана успешно")
-            else:
-                logging.warning("Не удалось создать резервную копию при запуске")
-        
- создана успешно")
             else:
                 logging.warning("Не удалось создать резервную копию при запуске")
         
@@ -3563,23 +3496,13 @@ async def enhanced_main():
         start_background_tasks()
         
         # Настройка обработчика ошибок
-        dp        # Запуск фоновых задач
-        start_background_tasks()
-        
-        # Настройка обработчика ошиб.errors.register(error_handler)
-        
-        # Уведомление о успешном запуске
-        logging.info("🤖 Бот успешно запущен с улучшенной автосинхронизацией (5 секунд)!")
-        
-        # Запуск бота
-        await dp.startок
         dp.errors.register(error_handler)
         
         # Уведомление о успешном запуске
         logging.info("🤖 Бот успешно запущен с улучшенной автосинхронизацией (5 секунд)!")
         
         # Запуск бота
-_polling(bot)
+        await dp.start_polling(bot)
         
     except Exception as e:
         logging.critical(f"Критическая ошибка при запуске: {e}")
@@ -3587,25 +3510,9 @@ _polling(bot)
 
 if __name__ == "__main__":
     try:
-        import as        await dp.start_polling(bot)
-        
-    except Exception as e:
-        logging.critical(f"Критическая ошибка при запуске: {e}")
-        raise
-
-if __name__ == "__main__":
-    try:
-        import asyncio
-        asyncio.run(enhanced_main())
-    except KeyboardInterrupt:
-        logging.info("Бот остановлен пользователем")
-    except Exception as eyncio
         asyncio.run(enhanced_main())
     except KeyboardInterrupt:
         logging.info("Бот остановлен пользователем")
     except Exception as e:
-        logging:
         logging.critical(f"Фатальная ошибка: {e}")
-        sys.exit(1)
-.critical(f"Фатальная ошибка: {e}")
         sys.exit(1)
