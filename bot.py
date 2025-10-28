@@ -1823,6 +1823,594 @@ async def process_details_filter(callback_query: types.CallbackQuery):
         logging.error(f"Ошибка при обработке details: {e}")
         await callback_query.answer("❌ Произошла ошибка", show_alert=True)
 
+# ========== ОБРАБОТЧИКИ УПРАВЛЕНИЯ ФИЛЬТРАМИ ==========
+
+@dp.message(F.text == "✏️ Редактировать фильтр")
+async def cmd_edit_filter(message: types.Message, state: FSMContext):
+    """Начало редактирования фильтра"""
+    health_monitor.record_message(message.from_user.id)
+    
+    filters = get_user_filters(message.from_user.id)
+    if not filters:
+        await message.answer(
+            "❌ <b>Нет фильтров для редактирования</b>\n\n"
+            "Сначала добавьте фильтры через меню '✨ Добавить фильтр'",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    await show_filters_for_selection(message, filters, "редактирования")
+    await state.set_state(EditFilterStates.waiting_filter_selection)
+
+@dp.message(EditFilterStates.waiting_filter_selection)
+async def process_edit_filter_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора фильтра для редактирования"""
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
+        return
+    
+    # Парсим ID фильтра из текста (формат: "#123 - Тип фильтра (Местоположение)")
+    match = re.search(r'#(\d+)', message.text)
+    if not match:
+        await message.answer(
+            "❌ <b>Неверный формат выбора</b>\n\n"
+            "Пожалуйста, выберите фильтр из списка:",
+            reply_markup=get_filters_selection_keyboard(get_user_filters(message.from_user.id), "редактирования")
+        )
+        return
+    
+    filter_id = int(match.group(1))
+    user_id = message.from_user.id
+    
+    # Проверяем существование фильтра и права доступа
+    filter_data = get_filter_by_id(filter_id, user_id)
+    if not filter_data:
+        await message.answer(
+            "❌ <b>Фильтр не найден</b>\n\n"
+            "Пожалуйста, выберите фильтр из списка:",
+            reply_markup=get_filters_selection_keyboard(get_user_filters(user_id), "редактирования")
+        )
+        return
+    
+    # Сохраняем ID фильтра в состоянии
+    await state.update_data(selected_filter_id=filter_id, filter_data=filter_data)
+    
+    await message.answer(
+        f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА #{filter_id}</b>\n\n"
+        f"💧 <b>Текущие данные:</b>\n"
+        f"• Тип: {filter_data['filter_type']}\n"
+        f"• Местоположение: {filter_data['location']}\n"
+        f"• Дата замены: {format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d'))}\n"
+        f"• Срок службы: {filter_data['lifetime_days']} дней\n\n"
+        f"<b>Выберите поле для редактирования:</b>",
+        reply_markup=get_edit_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(EditFilterStates.waiting_field_selection)
+
+@dp.message(EditFilterStates.waiting_field_selection)
+async def process_edit_field_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора поля для редактирования"""
+    if message.text == "🔙 Назад":
+        filters = get_user_filters(message.from_user.id)
+        await show_filters_for_selection(message, filters, "редактирования")
+        await state.set_state(EditFilterStates.waiting_filter_selection)
+        return
+    
+    field_mapping = {
+        "💧 Тип фильтра": "filter_type",
+        "📍 Местоположение": "location", 
+        "📅 Дата замены": "last_change",
+        "⏱️ Срок службы": "lifetime_days"
+    }
+    
+    if message.text not in field_mapping:
+        await message.answer(
+            "❌ <b>Пожалуйста, выберите поле из списка:</b>",
+            reply_markup=get_edit_keyboard()
+        )
+        return
+    
+    field_key = field_mapping[message.text]
+    await state.update_data(editing_field=field_key)
+    
+    # Получаем текущее значение
+    data = await state.get_data()
+    filter_data = data.get('filter_data', {})
+    current_value = filter_data.get(field_key, '')
+    
+    if field_key == "last_change" and current_value:
+        current_value = format_date_nice(datetime.strptime(str(current_value), '%Y-%m-%d'))
+    
+    prompt_texts = {
+        "filter_type": f"💧 <b>Введите новый тип фильтра:</b>\n\nТекущее значение: <i>{current_value}</i>",
+        "location": f"📍 <b>Введите новое местоположение:</b>\n\nТекущее значение: <i>{current_value}</i>",
+        "last_change": f"📅 <b>Введите новую дату замены:</b>\n\nТекущее значение: <i>{current_value}</i>\nФормат: ДД.ММ.ГГГГ или ДД.ММ",
+        "lifetime_days": f"⏱️ <b>Введите новый срок службы (в днях):</b>\n\nТекущее значение: <i>{current_value}</i> дней"
+    }
+    
+    await message.answer(
+        prompt_texts[field_key],
+        reply_markup=get_back_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(EditFilterStates.waiting_new_value)
+
+@dp.message(EditFilterStates.waiting_new_value)
+async def process_edit_new_value(message: types.Message, state: FSMContext):
+    """Обработка нового значения для поля"""
+    if message.text == "🔙 Назад":
+        data = await state.get_data()
+        filter_data = data.get('filter_data', {})
+        filter_id = data.get('selected_filter_id')
+        
+        await message.answer(
+            f"✏️ <b>РЕДАКТИРОВАНИЕ ФИЛЬТРА #{filter_id}</b>\n\n"
+            f"💧 <b>Текущие данные:</b>\n"
+            f"• Тип: {filter_data['filter_type']}\n"
+            f"• Местоположение: {filter_data['location']}\n"
+            f"• Дата замены: {format_date_nice(datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d'))}\n"
+            f"• Срок службы: {filter_data['lifetime_days']} дней\n\n"
+            f"<b>Выберите поле для редактирования:</b>",
+            reply_markup=get_edit_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.set_state(EditFilterStates.waiting_field_selection)
+        return
+    
+    data = await state.get_data()
+    field_key = data.get('editing_field')
+    filter_id = data.get('selected_filter_id')
+    user_id = message.from_user.id
+    filter_data = data.get('filter_data', {})
+    
+    try:
+        if field_key == "filter_type":
+            is_valid, error_msg = validate_filter_type(message.text)
+            if not is_valid:
+                await message.answer(f"❌ {error_msg}\n\nВведите новое значение:")
+                return
+            new_value = sanitize_input(message.text)
+            
+        elif field_key == "location":
+            is_valid, error_msg = validate_location(message.text)
+            if not is_valid:
+                await message.answer(f"❌ {error_msg}\n\nВведите новое значение:")
+                return
+            new_value = sanitize_input(message.text)
+            
+        elif field_key == "last_change":
+            new_date = enhanced_validate_date(message.text)
+            new_value = new_date.strftime('%Y-%m-%d')
+            
+            # Пересчитываем expiry_date при изменении last_change
+            lifetime_days = filter_data['lifetime_days']
+            new_expiry = new_date + timedelta(days=lifetime_days)
+            
+            # Обновляем оба поля
+            success = update_filter_in_db(
+                filter_id, user_id,
+                last_change=new_value,
+                expiry_date=new_expiry.strftime('%Y-%m-%d')
+            )
+            
+            if success:
+                await message.answer(
+                    f"✅ <b>ДАТА ЗАМЕНЫ ОБНОВЛЕНА!</b>\n\n"
+                    f"Новая дата замены: {format_date_nice(new_date)}\n"
+                    f"Новая дата истечения: {format_date_nice(new_expiry)}",
+                    reply_markup=get_management_keyboard(),
+                    parse_mode='HTML'
+                )
+            else:
+                await message.answer(
+                    "❌ <b>Ошибка при обновлении даты</b>",
+                    reply_markup=get_management_keyboard(),
+                    parse_mode='HTML'
+                )
+            
+            await state.clear()
+            return
+            
+        elif field_key == "lifetime_days":
+            is_valid, error_msg, lifetime_days = validate_lifetime(message.text)
+            if not is_valid:
+                await message.answer(f"❌ {error_msg}\n\nВведите новое значение:")
+                return
+            new_value = lifetime_days
+            
+            # Пересчитываем expiry_date при изменении lifetime
+            last_change = datetime.strptime(str(filter_data['last_change']), '%Y-%m-%d').date()
+            new_expiry = last_change + timedelta(days=lifetime_days)
+            
+            # Обновляем оба поля
+            success = update_filter_in_db(
+                filter_id, user_id,
+                lifetime_days=new_value,
+                expiry_date=new_expiry.strftime('%Y-%m-%d')
+            )
+            
+            if success:
+                await message.answer(
+                    f"✅ <b>СРОК СЛУЖБЫ ОБНОВЛЕН!</b>\n\n"
+                    f"Новый срок службы: {lifetime_days} дней\n"
+                    f"Новая дата истечения: {format_date_nice(new_expiry)}",
+                    reply_markup=get_management_keyboard(),
+                    parse_mode='HTML'
+                )
+            else:
+                await message.answer(
+                    "❌ <b>Ошибка при обновлении срока службы</b>",
+                    reply_markup=get_management_keyboard(),
+                    parse_mode='HTML'
+                )
+            
+            await state.clear()
+            return
+        
+        # Обновляем поле в БД
+        success = update_filter_in_db(filter_id, user_id, **{field_key: new_value})
+        
+        if success:
+            field_names = {
+                "filter_type": "тип фильтра",
+                "location": "местоположение",
+                "last_change": "дата замены", 
+                "lifetime_days": "срок службы"
+            }
+            
+            await message.answer(
+                f"✅ <b>{field_names[field_key].upper()} ОБНОВЛЕН!</b>\n\n"
+                f"Новое значение: {new_value}",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer(
+                "❌ <b>Ошибка при обновлении</b>",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        
+        await state.clear()
+        
+    except ValueError as e:
+        await message.answer(f"❌ {str(e)}\n\nПожалуйста, введите корректное значение:")
+    except Exception as e:
+        logging.error(f"Ошибка при редактировании фильтра: {e}")
+        await message.answer(
+            "❌ <b>Произошла ошибка при редактировании</b>",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.clear()
+
+@dp.message(F.text == "🗑️ Удалить фильтр")
+async def cmd_delete_filter(message: types.Message, state: FSMContext):
+    """Начало удаления фильтра"""
+    health_monitor.record_message(message.from_user.id)
+    
+    filters = get_user_filters(message.from_user.id)
+    if not filters:
+        await message.answer(
+            "❌ <b>Нет фильтров для удаления</b>\n\n"
+            "Сначала добавьте фильтры через меню '✨ Добавить фильтр'",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    await show_filters_for_selection(message, filters, "удаления")
+    await state.set_state(DeleteFilterStates.waiting_filter_selection)
+
+@dp.message(DeleteFilterStates.waiting_filter_selection)
+async def process_delete_filter_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора фильтра для удаления"""
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await message.answer("🔙 Возврат в меню управления", reply_markup=get_management_keyboard())
+        return
+    
+    # Парсим ID фильтра из текста
+    match = re.search(r'#(\d+)', message.text)
+    if not match:
+        await message.answer(
+            "❌ <b>Неверный формат выбора</b>\n\n"
+            "Пожалуйста, выберите фильтр из списка:",
+            reply_markup=get_filters_selection_keyboard(get_user_filters(message.from_user.id), "удаления")
+        )
+        return
+    
+    filter_id = int(match.group(1))
+    user_id = message.from_user.id
+    
+    # Проверяем существование фильтра
+    filter_data = get_filter_by_id(filter_id, user_id)
+    if not filter_data:
+        await message.answer(
+            "❌ <b>Фильтр не найден</b>\n\n"
+            "Пожалуйста, выберите фильтр из списка:",
+            reply_markup=get_filters_selection_keyboard(get_user_filters(user_id), "удаления")
+        )
+        return
+    
+    # Сохраняем ID фильтра в состоянии
+    await state.update_data(selected_filter_id=filter_id, filter_data=filter_data)
+    
+    expiry_date = datetime.strptime(str(filter_data['expiry_date']), '%Y-%m-%d').date()
+    days_until = (expiry_date - datetime.now().date()).days
+    icon, status = get_status_icon_and_text(days_until)
+    
+    await message.answer(
+        f"🗑️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
+        f"{icon} <b>Фильтр #{filter_id}</b>\n"
+        f"💧 Тип: {filter_data['filter_type']}\n"
+        f"📍 Место: {filter_data['location']}\n"
+        f"📅 Годен до: {format_date_nice(expiry_date)}\n"
+        f"📊 Статус: {status} ({days_until} дней)\n\n"
+        f"<b>Вы уверены, что хотите удалить этот фильтр?</b>\n"
+        f"<i>Это действие нельзя отменить!</i>",
+        reply_markup=get_confirmation_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(DeleteFilterStates.waiting_confirmation)
+
+@dp.message(DeleteFilterStates.waiting_confirmation)
+async def process_delete_confirmation(message: types.Message, state: FSMContext):
+    """Обработка подтверждения удаления"""
+    if message.text == "✅ Да, всё верно":
+        data = await state.get_data()
+        filter_id = data.get('selected_filter_id')
+        user_id = message.from_user.id
+        filter_data = data.get('filter_data', {})
+        
+        # Удаляем фильтр из БД
+        success = delete_filter_from_db(filter_id, user_id)
+        
+        if success:
+            await message.answer(
+                f"✅ <b>ФИЛЬТР УДАЛЕН!</b>\n\n"
+                f"💧 {filter_data['filter_type']}\n"
+                f"📍 {filter_data['location']}\n\n"
+                f"Фильтр успешно удален из базы данных.",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer(
+                "❌ <b>Ошибка при удалении фильтра</b>",
+                reply_markup=get_management_keyboard(),
+                parse_mode='HTML'
+            )
+        
+        await state.clear()
+        
+    elif message.text == "❌ Нет, изменить":
+        await state.clear()
+        await message.answer(
+            "❌ <b>Удаление отменено</b>",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            "Пожалуйста, подтвердите удаление:",
+            reply_markup=get_confirmation_keyboard()
+        )
+
+@dp.message(F.text == "📊 Онлайн Excel")
+async def cmd_online_excel(message: types.Message):
+    """Экспорт в Excel файл"""
+    health_monitor.record_message(message.from_user.id)
+    
+    user_id = message.from_user.id
+    filters = get_user_filters(user_id)
+    
+    if not filters:
+        await message.answer(
+            "❌ <b>Нет данных для экспорта</b>\n\n"
+            "Сначала добавьте фильтры через меню '✨ Добавить фильтр'",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        await message.answer("🔄 Создаю Excel файл...")
+        
+        excel_file = export_to_excel(user_id)
+        
+        # Отправляем файл пользователю
+        await message.answer_document(
+            types.BufferedInputFile(
+                excel_file.getvalue(),
+                filename=f"фильтры_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            ),
+            caption="✅ <b>Ваши фильтры экспортированы в Excel</b>\n\n"
+                   f"📊 Всего фильтров: {len(filters)}\n"
+                   f"📅 Дата экспорта: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                   f"💡 <i>Файл содержит все данные о ваших фильтрах со статусами</i>",
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при создании Excel файла: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при создании Excel файла</b>\n\n"
+            "Пожалуйста, попробуйте позже.",
+            reply_markup=get_management_keyboard(),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "📥 Импорт из Excel")
+async def cmd_import_excel(message: types.Message, state: FSMContext):
+    """Начало импорта из Excel"""
+    health_monitor.record_message(message.from_user.id)
+    
+    await message.answer(
+        "📥 <b>ИМПОРТ ИЗ EXCEL</b>\n\n"
+        "Пожалуйста, отправьте Excel файл с данными фильтров.\n\n"
+        "💡 <b>Формат файла:</b>\n"
+        "• Столбцы: Тип фильтра, Местоположение, Дата замены, Срок службы (дни)\n"
+        "• Дата в формате: ДД.ММ.ГГГГ\n"
+        "• Первая строка - заголовки\n\n"
+        "📎 <i>Вы можете сначала скачать шаблон через меню '📋 Шаблон Excel'</i>",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(ImportExportStates.waiting_excel_file)
+
+@dp.message(ImportExportStates.waiting_excel_file, F.document)
+async def process_excel_import(message: types.Message, state: FSMContext):
+    """Обработка загруженного Excel файла"""
+    try:
+        if not message.document:
+            await message.answer(
+                "❌ Пожалуйста, отправьте Excel файл",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+        
+        # Проверяем расширение файла
+        file_name = message.document.file_name.lower()
+        if not file_name.endswith(('.xlsx', '.xls')):
+            await message.answer(
+                "❌ <b>Неверный формат файла</b>\n\n"
+                "Пожалуйста, отправьте файл в формате Excel (.xlsx или .xls)",
+                reply_markup=get_import_export_keyboard(),
+                parse_mode='HTML'
+            )
+            await state.clear()
+            return
+        
+        await message.answer("🔄 Обрабатываю Excel файл...")
+        
+        # Скачиваем файл
+        file = await bot.get_file(message.document.file_id)
+        file_path = file.file_path
+        
+        # Скачиваем и читаем файл
+        downloaded_file = await bot.download_file(file_path)
+        
+        # Читаем Excel
+        df = pd.read_excel(downloaded_file.getvalue())
+        
+        # Проверяем необходимые колонки
+        required_columns = ['Тип фильтра', 'Местоположение', 'Дата замены', 'Срок службы (дни)']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            await message.answer(
+                f"❌ <b>В файле отсутствуют необходимые колонки:</b>\n"
+                f"{', '.join(missing_columns)}\n\n"
+                f"💡 Скачайте шаблон через меню '📋 Шаблон Excel'",
+                reply_markup=get_import_export_keyboard(),
+                parse_mode='HTML'
+            )
+            await state.clear()
+            return
+        
+        # Обрабатываем данные
+        imported_count = 0
+        errors = []
+        user_id = message.from_user.id
+        
+        for index, row in df.iterrows():
+            try:
+                # Пропускаем пустые строки
+                if pd.isna(row['Тип фильтра']) or pd.isna(row['Местоположение']):
+                    continue
+                
+                # Валидация типа фильтра
+                filter_type = str(row['Тип фильтра']).strip()
+                is_valid_type, error_msg = validate_filter_type(filter_type)
+                if not is_valid_type:
+                    errors.append(f"Строка {index+2}: {error_msg}")
+                    continue
+                
+                # Валидация местоположения
+                location = str(row['Местоположение']).strip()
+                is_valid_loc, error_msg = validate_location(location)
+                if not is_valid_loc:
+                    errors.append(f"Строка {index+2}: {error_msg}")
+                    continue
+                
+                # Валидация даты
+                date_str = str(row['Дата замены']).strip() if not pd.isna(row['Дата замены']) else ""
+                if not date_str:
+                    errors.append(f"Строка {index+2}: Отсутствует дата замены")
+                    continue
+                
+                try:
+                    change_date = enhanced_validate_date(date_str)
+                except ValueError as e:
+                    errors.append(f"Строка {index+2}: {str(e)}")
+                    continue
+                
+                # Валидация срока службы
+                lifetime = row['Срок службы (дни)']
+                if pd.isna(lifetime):
+                    errors.append(f"Строка {index+2}: Отсутствует срок службы")
+                    continue
+                
+                is_valid_lt, error_msg, lifetime_days = validate_lifetime(str(lifetime))
+                if not is_valid_lt:
+                    errors.append(f"Строка {index+2}: {error_msg}")
+                    continue
+                
+                # Расчет даты истечения
+                expiry_date = change_date + timedelta(days=lifetime_days)
+                
+                # Добавление в БД
+                success = add_filter_to_db(
+                    user_id=user_id,
+                    filter_type=filter_type,
+                    location=location,
+                    last_change=change_date.strftime('%Y-%m-%d'),
+                    expiry_date=expiry_date.strftime('%Y-%m-%d'),
+                    lifetime_days=lifetime_days
+                )
+                
+                if success:
+                    imported_count += 1
+                else:
+                    errors.append(f"Строка {index+2}: Ошибка базы данных")
+                    
+            except Exception as e:
+                errors.append(f"Строка {index+2}: Неизвестная ошибка: {str(e)}")
+                logging.error(f"Ошибка импорта строки {index+2}: {e}")
+        
+        # Формируем результат
+        if imported_count > 0:
+            message_text = f"✅ <b>ИМПОРТ УСПЕШЕН!</b>\n\nИмпортировано фильтров: {imported_count}"
+        else:
+            message_text = "❌ <b>Импорт не выполнен</b>"
+        
+        if errors:
+            message_text += f"\n\nОшибки: {len(errors)}"
+            if len(errors) <= 5:
+                message_text += "\n" + "\n".join(errors[:5])
+            else:
+                message_text += f"\nПоказаны первые 5 из {len(errors)} ошибок:\n" + "\n".join(errors[:5])
+        
+        await message.answer(
+            message_text,
+            reply_markup=get_import_export_keyboard(),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка при импорте Excel: {e}")
+        await message.answer(
+            f"❌ <b>Ошибка при обработке файла:</b>\n{str(e)}",
+            reply_markup=get_import_export_keyboard(),
+            parse_mode='HTML'
+        )
+    
+    await state.clear()
+
 # ========== ОБРАБОТЧИКИ СИНХРОНИЗАЦИИ GOOGLE SHEETS ==========
 
 @dp.message(F.text == "🔄 Синхронизировать с Google Sheets")
@@ -2497,6 +3085,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     
     await message.answer(
+        "🏭 <b>Завод «Контакт»</b>\n"
         "🌟 <b>Фильтр-Трекер</b> 🤖\n\n"
         "💧 <i>Умный помощник для своевременной замены фильтров</i>\n\n"
         "📦 <b>Основные возможности:</b>\n"
@@ -2509,7 +3098,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• ☁️ Синхронизация с Google Sheets\n"
         "• 🔔 Автоматические напоминания\n"
         "• ⏰ Настройка времени уведомлений\n"
-        "• ⚡ <b>Синхронизация в реальном времени</b>",
+        "• ⚡ <b>Синхронизация в реальном времени</b>\n\n"
+        "🏭 <i>Официальная система учета фильтров завода «Контакт»</i>",
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
     )
