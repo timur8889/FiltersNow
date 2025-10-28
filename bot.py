@@ -526,65 +526,36 @@ class SmartReminderSystem:
     """Умная система напоминаний"""
     
     def __init__(self):
-        pass
+        self.user_preferences = {}
+        self.load_user_preferences()
     
-    def send_reminders(self):
-        """Отправка напоминаний (синхронная версия)"""
+    def load_user_preferences(self):
+        """Загрузка предпочтений пользователей"""
         try:
-            # Получаем всех пользователей с фильтрами
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('''
-                    SELECT DISTINCT user_id FROM filters 
-                    WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')
-                    OR expiry_date <= date('now')
-                ''')
-                users_to_notify = cur.fetchall()
-                
-                for user_row in users_to_notify:
-                    user_id = user_row[0]
-                    filters = get_user_filters(user_id)
-                    
-                    expiring_filters = []
-                    expired_filters = []
-                    
-                    for f in filters:
-                        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
-                        days_until = (expiry_date - datetime.now().date()).days
-                        
-                        if days_until <= 0:
-                            expired_filters.append((f, days_until))
-                        elif days_until <= 7:
-                            expiring_filters.append((f, days_until))
-                    
-                    if expired_filters or expiring_filters:
-                        message = "🔔 <b>НАПОМИНАНИЕ О ФИЛЬТРАХ</b>\n\n"
-                        
-                        if expired_filters:
-                            message += "🔴 <b>ПРОСРОЧЕННЫЕ ФИЛЬТРЫ:</b>\n"
-                            for f, days in expired_filters:
-                                message += f"• {f['filter_type']} ({f['location']}) - ПРОСРОЧЕН\n"
-                            message += "\n"
-                        
-                        if expiring_filters:
-                            message += "🟡 <b>СКОРО ИСТЕКАЮТ:</b>\n"
-                            for f, days in expiring_filters:
-                                message += f"• {f['filter_type']} ({f['location']}) - {days} дней\n"
-                        
-                        message += f"\n💫 Всего фильтров: {len(filters)}"
-                        
-                        try:
-                            # Синхронная отправка сообщения
-                            asyncio.create_task(bot.send_message(
-                                user_id, 
-                                message, 
-                                parse_mode='HTML'
-                            ))
-                        except Exception as e:
-                            logging.warning(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
-            
+            if os.path.exists('user_preferences.json'):
+                with open('user_preferences.json', 'r', encoding='utf-8') as f:
+                    self.user_preferences = json.load(f)
         except Exception as e:
-            logging.error(f"Ошибка в задаче напоминаний: {e}")
+            logging.error(f"Error loading user preferences: {e}")
+    
+    def save_user_preferences(self):
+        """Сохранение предпочтений пользователей"""
+        try:
+            with open('user_preferences.json', 'w', encoding='utf-8') as f:
+                json.dump(self.user_preferences, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.error(f"Error saving user preferences: {e}")
+    
+    def get_user_reminder_time(self, user_id: int) -> str:
+        """Получение предпочтительного времени напоминаний"""
+        return self.user_preferences.get(str(user_id), {}).get('reminder_time', '10:00')
+    
+    def set_user_reminder_time(self, user_id: int, time_str: str):
+        """Установка времени напоминаний"""
+        if str(user_id) not in self.user_preferences:
+            self.user_preferences[str(user_id)] = {}
+        self.user_preferences[str(user_id)]['reminder_time'] = time_str
+        self.save_user_preferences()
 
 smart_reminders = SmartReminderSystem()
 
@@ -635,6 +606,7 @@ def get_main_keyboard():
     builder.button(text="⚙️ Управление фильтрами")
     builder.button(text="📊 Статистика")
     builder.button(text="📤 Импорт/Экспорт")
+    builder.button(text="⏰ Настройка напоминаний")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
@@ -757,6 +729,21 @@ def get_reminder_keyboard(filter_id: int):
     builder.button(text="📅 Посмотреть детали", callback_data=f"details_{filter_id}")
     builder.adjust(1)
     return builder.as_markup()
+
+def get_reminder_settings_keyboard():
+    """Клавиатура настроек напоминаний"""
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🕘 09:00")
+    builder.button(text="🕙 10:00")
+    builder.button(text="🕚 11:00")
+    builder.button(text="🕛 12:00")
+    builder.button(text="🕐 13:00")
+    builder.button(text="🕑 14:00")
+    builder.button(text="🕒 15:00")
+    builder.button(text="🕓 16:00")
+    builder.button(text="🔙 Назад")
+    builder.adjust(3)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_status_icon_and_text(days_until_expiry: int):
     """Получение иконки и текста статуса"""
@@ -1264,7 +1251,7 @@ class GoogleSheetsStates(StatesGroup):
     waiting_sheet_id = State()
     waiting_sync_confirmation = State()
 
-# ========== СИНХРОННАЯ GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
+# ========== УЛУЧШЕННАЯ СИНХРОННАЯ GOOGLE SHEETS ИНТЕГРАЦИЯ ==========
 class GoogleSheetsSync:
     def __init__(self):
         self.credentials = None
@@ -1485,12 +1472,74 @@ async def error_handler(update: types.Update, exception: Exception):
         logging.critical(f"Ошибка в обработчике ошибок: {e}")
 
 # ========== СИНХРОННЫЕ ФОНОВЫЕ ЗАДАЧИ ==========
-def send_reminders():
-    """Синхронная отправка напоминаний"""
+def send_personalized_reminders():
+    """Персонализированные напоминания с учетом времени суток"""
     while True:
         try:
-            smart_reminders.send_reminders()
+            # Получаем текущий час для персонализации
+            current_hour = datetime.now().hour
+            greeting = "Доброе утро" if 5 <= current_hour < 12 else "Добрый день" if 12 <= current_hour < 18 else "Добрый вечер"
+            
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('''
+                    SELECT DISTINCT user_id FROM filters 
+                    WHERE expiry_date BETWEEN date('now') AND date('now', '+7 days')
+                    OR expiry_date <= date('now')
+                ''')
+                users_to_notify = cur.fetchall()
+                
+                for user_row in users_to_notify:
+                    user_id = user_row[0]
+                    filters = get_user_filters(user_id)
+                    
+                    expiring_filters = []
+                    expired_filters = []
+                    
+                    for f in filters:
+                        expiry_date = datetime.strptime(str(f['expiry_date']), '%Y-%m-%d').date()
+                        days_until = (expiry_date - datetime.now().date()).days
+                        
+                        if days_until <= 0:
+                            expired_filters.append((f, days_until))
+                        elif days_until <= 7:
+                            expiring_filters.append((f, days_until))
+                    
+                    if expired_filters or expiring_filters:
+                        message = f"{greeting}! 🔔\n\n"
+                        
+                        if expired_filters:
+                            message += "🔴 <b>ПРОСРОЧЕННЫЕ ФИЛЬТРЫ:</b>\n"
+                            for f, days in expired_filters:
+                                message += f"• {f['filter_type']} ({f['location']}) - ПРОСРОЧЕН\n"
+                            message += "\n"
+                        
+                        if expiring_filters:
+                            message += "🟡 <b>СКОРО ИСТЕКАЮТ:</b>\n"
+                            for f, days in expiring_filters:
+                                message += f"• {f['filter_type']} ({f['location']}) - {days} дней\n"
+                        
+                        message += f"\n💫 Всего фильтров: {len(filters)}"
+                        
+                        try:
+                            # Отправляем сообщение с инлайн кнопками для быстрых действий
+                            if expired_filters:
+                                first_expired_id = expired_filters[0][0]['id']
+                                # Используем асинхронный вызов для отправки сообщения
+                                asyncio.create_task(bot.send_message(
+                                    user_id, 
+                                    message, 
+                                    parse_mode='HTML',
+                                    reply_markup=get_reminder_keyboard(first_expired_id)
+                                ))
+                            else:
+                                asyncio.create_task(bot.send_message(user_id, message, parse_mode='HTML'))
+                                
+                        except Exception as e:
+                            logging.warning(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+            
             time.sleep(23 * 60 * 60)  # Проверяем каждые 23 часа
+            
         except Exception as e:
             logging.error(f"Ошибка в задаче напоминаний: {e}")
             time.sleep(60 * 60)
@@ -2898,6 +2947,7 @@ async def cmd_help(message: types.Message):
 📊 Статистика - Статистика и аналитика
 📤 Импорт/Экспорт - Работа с Excel
 ☁️ Синхронизация - Google Sheets
+⏰ Настройка напоминаний - Установка времени уведомлений
 
 💡 <i>Используйте кнопки меню для навигации</i>
     """
@@ -2947,6 +2997,35 @@ async def cmd_personal_stats(message: types.Message):
     
     await message.answer(stats_text, parse_mode='HTML')
 
+@dp.message(F.text == "⏰ Настройка напоминаний")
+async def cmd_reminder_settings(message: types.Message):
+    """Настройка напоминаний"""
+    current_time = smart_reminders.get_user_reminder_time(message.from_user.id)
+    
+    await message.answer(
+        f"⏰ <b>НАСТРОЙКА НАПОМИНАНИЙ</b>\n\n"
+        f"Текущее время напоминаний: <b>{current_time}</b>\n"
+        f"Выберите удобное время для получения уведомлений:",
+        reply_markup=get_reminder_settings_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text.regexp(r"🕘 09:00|🕙 10:00|🕚 11:00|🕛 12:00|🕐 13:00|🕑 14:00|🕒 15:00|🕓 16:00"))
+async def process_reminder_time(message: types.Message):
+    """Обработка выбора времени напоминаний"""
+    time_str = message.text.split()[-1]  # Извлекаем время
+    user_id = message.from_user.id
+    
+    smart_reminders.set_user_reminder_time(user_id, time_str)
+    
+    await message.answer(
+        f"✅ <b>Время напоминаний установлено!</b>\n\n"
+        f"Теперь вы будете получать уведомления в <b>{time_str}</b>\n\n"
+        f"Следующее напоминание придет согласно установленному расписанию.",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
+
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -2974,6 +3053,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "• 📤 Импорт/Экспорт Excel\n"
         "• ☁️ Синхронизация с Google Sheets\n"
         "• 🔔 Автоматические напоминания\n"
+        "• ⏰ Настройка времени уведомлений\n"
         "• ⚡ <b>Синхронизация в реальном времени (5 сек)</b>"
         f"{sync_status}\n\n"
         "🏭 <i>Официальная система учета фильтров завода «Контакт»</i>",
@@ -3375,7 +3455,7 @@ def check_dependencies():
 def start_background_tasks():
     """Запуск фоновых задач в отдельных потоках"""
     # Задача напоминаний
-    reminder_thread = threading.Thread(target=send_reminders, daemon=True)
+    reminder_thread = threading.Thread(target=send_personalized_reminders, daemon=True)
     reminder_thread.start()
     
     # Задача мониторинга здоровья
