@@ -3501,7 +3501,7 @@ def start_background_tЗапуск фоновых задач в отдельны
     sync_thread = threading.Thread(target=real_time_sync_task, daemon=True)
     sync_thread.start()
     
-    logging.info("🚀 Фоновые задачи запущены (авто health_thread.start()
+    logging.info("🚀 Фоновые задачи запущены (автосинхронизация: 5 секунд)")
     
     # ЗАПУСК УЛУЧШЕННОЙ ЗАДАЧИ СИНХРОНИЗАЦИИ
     sync_thread = threading.Thread(target=real_time_sync_task, daemon=True)
