@@ -43,16 +43,21 @@ class Config:
     def __init__(self):
         self.API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
         if not self.API_TOKEN:
-            raise ValueError("TELEGRAM_BOT_TOKEN не установен в переменных окружения")
+            raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
         
         self.ADMIN_ID = int(os.getenv('ADMIN_ID', '5024165375'))
         self.GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
         self.GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
         
-        # Настройки базы данных
-        self.DB_PATH = 'filters.db'
+        # ИЗМЕНЕНО: Сохраняем БД в постоянной директории
+        self.DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'filters.db')
+        
+        # Создаем директорию если не существует
+        os.makedirs(os.path.dirname(self.DB_PATH), exist_ok=True)
+        
         self.BACKUP_ENABLED = True
-        self.BACKUP_PATH = 'backups'
+        self.BACKUP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'backups')
+        os.makedirs(self.BACKUP_PATH, exist_ok=True)
         
         # Настройки rate limiting
         self.RATE_LIMIT_MAX_REQUESTS = 10
@@ -81,6 +86,29 @@ class Config:
 
 # Создаем экземпляр конфигурации
 config = Config()
+
+# ========== ПРОВЕРКА ПРАВ ДОСТУПА ==========
+def check_access(user_id: int) -> bool:
+    """Проверка доступа пользователя"""
+    return user_id == config.ADMIN_ID
+
+class AdminMiddleware(BaseMiddleware):
+    """Middleware для проверки прав администратора"""
+    async def __call__(
+        self,
+        handler: Callable[[types.TelegramObject, Dict[str, Any]], Any],
+        event: types.Message,
+        data: Dict[str, Any]
+    ) -> Any:
+        user_id = event.from_user.id
+        if not check_access(user_id):
+            await event.answer(
+                "❌ <b>ДОСТУП ЗАПРЕЩЕН</b>\n\n"
+                "Этот бот доступен только для администраторов завода «Контакт».",
+                parse_mode='HTML'
+            )
+            return
+        return await handler(event, data)
 
 # ========== УЛУЧШЕННАЯ БЕЗОПАСНОСТЬ И ОБРАБОТКА ОШИБОК ==========
 def enhanced_sanitize_input(text: str) -> str:
@@ -738,14 +766,14 @@ def get_add_filter_keyboard():
     return builder.as_markup(resize_keyboard=True)
 
 def get_filter_type_keyboard():
-    """Клавиатура для выбора типа фильтра"""
+    """Клавиатура для выбора типа фильтра с кнопкой ручного ввода"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="Магистральный SL10")
     builder.button(text="Магистральный SL20")
     builder.button(text="Гейзер")
     builder.button(text="Аквафор")
     builder.button(text="Пурифайер")
-    builder.button(text="Другой тип фильтра")
+    builder.button(text="✏️ Другой тип фильтра")  # Измененная кнопка
     builder.button(text="🔙 Назад")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
@@ -1250,6 +1278,9 @@ bot = Bot(
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Регистрируем middleware для проверки прав администратора
+dp.message.middleware(AdminMiddleware())
+
 # Регистрация middleware
 dp.update.outer_middleware(EnhancedMiddleware())
 
@@ -1320,7 +1351,7 @@ def export_to_excel(user_id: int) -> io.BytesIO:
     output.seek(0)
     return output
 
-# ========== ОСТАЛЬНЫЕ НАСТРОЙКИ ==========
+# ========== ОСТАЛЬНЫЕ НАСТРОКИ ==========
 DEFAULT_LIFETIMES = {
     "магистральный sl10": 180,
     "магистральный sl20": 180,
@@ -2698,7 +2729,7 @@ async def cmd_set_sheet_id(message: types.Message, state: FSMContext):
 
 @dp.message(GoogleSheetsStates.waiting_sheet_id)
 async def process_sheet_id(message: types.Message, state: FSMContext):
-    """Обработка ID таблицы с обновлением статуса на ПОДКЛЮЧЕНО"""
+    """Обработка ID таблицы с улучшенным сообщением"""
     if message.text == "🔙 Назад":
         await state.clear()
         await cmd_sync_settings(message)
@@ -2728,7 +2759,6 @@ async def process_sheet_id(message: types.Message, state: FSMContext):
     try:
         # Инициализируем credentials
         if google_sync.initialize_credentials():
-            # Пробуем создать тестовый лист
             import gspread
             gc = gspread.authorize(google_sync.credentials)
             sheet = gc.open_by_key(sheet_id)
@@ -2745,13 +2775,14 @@ async def process_sheet_id(message: types.Message, state: FSMContext):
             worksheet.update('A1', [['Тест подключения', 'Успешно!']])
             worksheet.delete()
             
-            # ОБНОВЛЯЕМ СТАТУС НА "ПОДКЛЮЧЕНО"
+            # УЛУЧШЕННОЕ СООБЩЕНИЕ ПРИ УСПЕХЕ
             await message.answer(
-                f"✅ <b>ПОДКЛЮЧЕНИЕ УСПЕШНО!</b>\n\n"
-                f"🟢 <b>Статус:</b> ПОДКЛЮЧЕНО\n"
-                f"📎 ID таблицы: <code>{sheet_id}</code>\n"
-                f"👤 Ваш лист: User_{message.from_user.id}\n\n"
-                f"Теперь вы можете использовать синхронизацию.",
+                f"✅ <b>ПОДКЛЮЧЕНИЕ УСПЕШНО НАСТРОЕНО!</b>\n\n"
+                f"🟢 <b>Статус:</b> УСПЕШНО ПОДКЛЮЧЕНО\n"
+                f"📎 <b>ID таблицы:</b> <code>{sheet_id}</code>\n"
+                f"👤 <b>Ваш лист:</b> User_{message.from_user.id}\n"
+                f"🔄 <b>Автосинхронизация:</b> ВКЛЮЧЕНА\n\n"
+                f"💫 <i>Теперь ваши данные будут автоматически синхронизироваться с Google Sheets каждые 5 минут</i>",
                 reply_markup=get_sync_settings_keyboard(),
                 parse_mode='HTML'
             )
@@ -2778,11 +2809,11 @@ async def process_sheet_id(message: types.Message, state: FSMContext):
         await message.answer(
             f"❌ <b>ОШИБКА ПОДКЛЮЧЕНИЯ</b>\n\n"
             f"🔴 <b>Статус:</b> НЕ ПОДКЛЮЧЕНО\n"
-            f"{error_msg}\n\n"
-            f"Проверьте:\n"
+            f"💬 <b>Ошибка:</b> {error_msg}\n\n"
+            f"🔧 <b>Проверьте:</b>\n"
             f"1. Правильность ID таблицы\n"
-            f"2. Доступ к таблице\n"
-            f"3. Учетные данные в .env",
+            f"2. Доступ к таблице (должен быть доступ на редактирование)\n"
+            f"3. Учетные данные в .env файле",
             reply_markup=get_sync_settings_keyboard(),
             parse_mode='HTML'
         )
@@ -2885,6 +2916,16 @@ async def process_filter_type(message: types.Message, state: FSMContext):
     if message.text == "🔙 Назад":
         await state.clear()
         await message.answer("🔙 Возврат в главное меню", reply_markup=get_main_keyboard())
+        return
+    
+    if message.text == "✏️ Другой тип фильтра":
+        await message.answer(
+            "💧 <b>Введите свой тип фильтра:</b>\n\n"
+            "Например: Угольный фильтр, Механический фильтр, УФ-лампа и т.д.",
+            reply_markup=get_back_keyboard(),
+            parse_mode='HTML'
+        )
+        # Остаемся в том же состоянии для получения ручного ввода
         return
     
     filter_type = sanitize_input(message.text)
@@ -3295,7 +3336,7 @@ async def cmd_personal_stats(message: types.Message):
 @dp.message(Command("debug_db"))
 async def cmd_debug_db(message: types.Message):
     """Диагностика базы данных"""
-    if not is_admin(message.from_user.id):
+    if not check_access(message.from_user.id):
         await message.answer("❌ Доступ запрещен")
         return
     
@@ -3346,6 +3387,14 @@ async def cmd_debug_db(message: types.Message):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     """Обработчик команды /start с rate limiting"""
+    if not check_access(message.from_user.id):
+        await message.answer(
+            "❌ <b>ДОСТУП ЗАПРЕЩЕН</b>\n\n"
+            "Этот бот доступен только для администраторов завода «Контакт».",
+            parse_mode='HTML'
+        )
+        return
+    
     health_monitor.record_message(message.from_user.id)
     
     # Всегда очищаем состояние при старте
@@ -3615,7 +3664,7 @@ async def cmd_google_sheets(message: types.Message):
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     """Админ панель"""
-    if not is_admin(message.from_user.id):
+    if not check_access(message.from_user.id):
         await message.answer("❌ Доступ запрещен")
         return
     
@@ -3652,7 +3701,7 @@ async def cmd_admin(message: types.Message):
 @dp.message(Command("backup"))
 async def cmd_backup(message: types.Message):
     """Создание резервной копии"""
-    if not is_admin(message.from_user.id):
+    if not check_access(message.from_user.id):
         return
     
     await message.answer("🔄 Создание резервной копии...")
@@ -3665,7 +3714,7 @@ async def cmd_backup(message: types.Message):
 @dp.message(Command("clear_cache"))
 async def cmd_clear_cache(message: types.Message):
     """Очистка кэша"""
-    if not is_admin(message.from_user.id):
+    if not check_access(message.from_user.id):
         return
     
     cache_manager.clear_all_cache()
