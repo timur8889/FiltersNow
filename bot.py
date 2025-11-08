@@ -70,7 +70,7 @@ def edit_object_fields_keyboard():
     keyboard = [
         [KeyboardButton("✏️ Редактировать адрес")],
         [KeyboardButton("✏️ Редактировать название")],
-        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+        [KeyboardButton("🔙 Назад к подтверждению")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -79,7 +79,7 @@ def edit_salary_fields_keyboard():
     keyboard = [
         [KeyboardButton("✏️ Редактировать объект")],
         [KeyboardButton("✏️ Редактировать сумму")],
-        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+        [KeyboardButton("🔙 Назад к подтверждению")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -89,7 +89,7 @@ def edit_material_fields_keyboard():
         [KeyboardButton("✏️ Редактировать объект")],
         [KeyboardButton("✏️ Редактировать название материала")],
         [KeyboardButton("✏️ Редактировать стоимость")],
-        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+        [KeyboardButton("🔙 Назад к подтверждению")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -227,11 +227,9 @@ def edit_object(update: Update, context: CallbackContext):
     elif text == "✏️ Редактировать название":
         update.message.reply_text("Введите новое название объекта:")
         return ENTERING_NAME
-    elif text == "✅ Подтвердить":
+    elif text == "🔙 Назад к подтверждению":
         # Возвращаемся к подтверждению с текущими данными
         return show_object_confirmation(update, context)
-    elif text == "❌ Отменить":
-        return cancel(update, context)
     else:
         update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
         return EDITING_OBJECT
@@ -407,11 +405,9 @@ def edit_salary(update: Update, context: CallbackContext):
     elif text == "✏️ Редактировать сумму":
         update.message.reply_text("Введите новую сумму зарплаты:")
         return ADDING_SALARY
-    elif text == "✅ Подтвердить":
+    elif text == "🔙 Назад к подтверждению":
         # Возвращаемся к подтверждению
         return show_salary_confirmation(update, context)
-    elif text == "❌ Отменить":
-        return cancel(update, context)
     else:
         update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
         return EDITING_SALARY
@@ -601,11 +597,9 @@ def edit_material(update: Update, context: CallbackContext):
     elif text == "✏️ Редактировать стоимость":
         update.message.reply_text("Введите новую стоимость материала:")
         return ADDING_MATERIALS
-    elif text == "✅ Подтвердить":
+    elif text == "🔙 Назад к подтверждению":
         # Возвращаемся к подтверждению
         return show_material_confirmation(update, context)
-    elif text == "❌ Отменить":
-        return cancel(update, context)
     else:
         update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
         return EDITING_MATERIAL
