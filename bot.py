@@ -1,10 +1,10 @@
 import os
 import logging
+import json
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, 
                          ConversationHandler, CallbackContext)
-from google.oauth2.service_account import Credentials
-import gspread
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения ДО их использования
@@ -25,9 +25,6 @@ if not BOT_TOKEN:
     logger.error("BOT_TOKEN не найден в переменных окружения!")
     exit(1)
 
-# Настройки Google Sheets
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
 # Состояния для ConversationHandler
 (
     SELECTING_ACTION, ADDING_OBJECT, ADDING_SALARY, ADDING_MATERIALS,
@@ -37,15 +34,52 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
     EDITING_OBJECT, EDITING_SALARY, EDITING_MATERIAL
 ) = range(15)
 
-# Инициализация Google Sheets
-def init_google_sheets():
+# Файлы для хранения данных
+OBJECTS_FILE = 'objects.json'
+SALARIES_FILE = 'salaries.json'
+MATERIALS_FILE = 'materials.json'
+
+# Инициализация данных
+def init_data():
+    # Создаем файлы если не существуют
+    for file in [OBJECTS_FILE, SALARIES_FILE, MATERIALS_FILE]:
+        if not os.path.exists(file):
+            with open(file, 'w', encoding='utf-8') as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+
+# Функции для работы с данными
+def load_objects():
     try:
-        creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-        client = gspread.authorize(creds)
-        return client
-    except Exception as e:
-        logger.error(f"Ошибка при инициализации Google Sheets: {e}")
-        return None
+        with open(OBJECTS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_objects(objects):
+    with open(OBJECTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(objects, f, ensure_ascii=False, indent=2)
+
+def load_salaries():
+    try:
+        with open(SALARIES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_salaries(salaries):
+    with open(SALARIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(salaries, f, ensure_ascii=False, indent=2)
+
+def load_materials():
+    try:
+        with open(MATERIALS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_materials(materials):
+    with open(MATERIALS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(materials, f, ensure_ascii=False, indent=2)
 
 # Главная клавиатура
 def main_keyboard():
@@ -131,54 +165,32 @@ def show_object_confirmation(update: Update, context: CallbackContext):
     )
     return CONFIRMING_OBJECT
 
-# Сохранение объекта в Google Sheets
-def save_object_to_sheets(context):
+# Сохранение объекта в JSON
+def save_object_to_json(context):
     try:
-        client = init_google_sheets()
-        if not client:
-            return False, "❌ Ошибка подключения к Google Sheets"
-        
-        # Пытаемся открыть существующую таблицу или создать новую
-        try:
-            spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-            sheet = spreadsheet.worksheet("Объекты")
-        except gspread.SpreadsheetNotFound:
-            # Создаем новую таблицу если не существует
-            spreadsheet = client.create("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-            sheet = spreadsheet.add_worksheet(title="Объекты", rows=100, cols=4)
-            sheet.append_row(["Адрес", "Название", "Зарплата", "Материалы"])
-            
-            # Создаем лист для зарплат
-            salary_sheet = spreadsheet.add_worksheet(title="Зарплаты", rows=100, cols=4)
-            salary_sheet.append_row(["Адрес", "Название", "Сумма", "Дата"])
-            
-            # Создаем лист для материалов
-            materials_sheet = spreadsheet.add_worksheet(title="Материалы", rows=100, cols=5)
-            materials_sheet.append_row(["Адрес", "Название", "Материал", "Стоимость", "Дата"])
-        except gspread.WorksheetNotFound:
-            # Если таблица есть, но нет листа "Объекты"
-            spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-            sheet = spreadsheet.add_worksheet(title="Объекты", rows=100, cols=4)
-            sheet.append_row(["Адрес", "Название", "Зарплата", "Материалы"])
+        objects = load_objects()
         
         # Проверяем, нет ли уже объекта с таким адресом
-        objects_data = sheet.get_all_values()
-        for row in objects_data[1:]:  # Пропускаем заголовок
-            if row and row[0] == context.user_data['address']:
+        for obj in objects:
+            if obj['address'] == context.user_data['address']:
                 return False, "❌ Объект с таким адресом уже существует"
         
         # Добавляем новый объект
-        sheet.append_row([
-            context.user_data['address'],
-            context.user_data['name'],
-            '0',  # начальная сумма зарплат
-            '0'   # начальная сумма материалов
-        ])
+        new_object = {
+            'address': context.user_data['address'],
+            'name': context.user_data['name'],
+            'salary_total': 0.0,
+            'materials_total': 0.0,
+            'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        objects.append(new_object)
+        save_objects(objects)
         
         return True, "✅ Объект успешно добавлен!"
         
     except Exception as e:
-        logger.error(f"Ошибка при добавлении объекта в Google Sheets: {e}")
+        logger.error(f"Ошибка при добавлении объекта: {e}")
         return False, f"❌ Ошибка при добавлении объекта: {str(e)}"
 
 # Обработка подтверждения объекта
@@ -186,7 +198,7 @@ def confirm_object(update: Update, context: CallbackContext):
     text = update.message.text
     
     if text == "✅ Подтвердить":
-        success, message = save_object_to_sheets(context)
+        success, message = save_object_to_json(context)
         
         if success:
             update.message.reply_text(
@@ -238,29 +250,7 @@ def edit_object(update: Update, context: CallbackContext):
 def add_salary_start(update: Update, context: CallbackContext):
     context.user_data.clear()
     try:
-        client = init_google_sheets()
-        if not client:
-            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
-            return SELECTING_ACTION
-            
-        spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-        sheet = spreadsheet.worksheet("Объекты")
-        objects_data = sheet.get_all_values()
-        
-        if len(objects_data) <= 1:  # Только заголовок
-            update.message.reply_text("❌ Нет доступных объектов. Сначала добавьте объект.")
-            return SELECTING_ACTION
-        
-        # Преобразуем в удобный формат
-        objects = []
-        for row in objects_data[1:]:  # Пропускаем заголовок
-            if row and row[0]:  # Если адрес не пустой
-                objects.append({
-                    'Адрес': row[0],
-                    'Название': row[1] if len(row) > 1 else '',
-                    'Зарплата': row[2] if len(row) > 2 else '0',
-                    'Материалы': row[3] if len(row) > 3 else '0'
-                })
+        objects = load_objects()
         
         if not objects:
             update.message.reply_text("❌ Нет доступных объектов. Сначала добавьте объект.")
@@ -268,7 +258,7 @@ def add_salary_start(update: Update, context: CallbackContext):
         
         keyboard = []
         for obj in objects:
-            button_text = f"{obj['Адрес']} - {obj['Название']}"
+            button_text = f"{obj['address']} - {obj['name']}"
             keyboard.append([KeyboardButton(button_text)])
         
         keyboard.append([KeyboardButton("🔙 Назад")])
@@ -320,42 +310,36 @@ def show_salary_confirmation(update: Update, context: CallbackContext):
     )
     return CONFIRMING_SALARY
 
-# Сохранение зарплаты в Google Sheets
-def save_salary_to_sheets(context):
+# Сохранение зарплаты в JSON
+def save_salary_to_json(context):
     try:
         salary_amount = context.user_data['salary_amount']
+        selected_text = context.user_data['selected_object']
         
-        client = init_google_sheets()
-        if not client:
-            return False, "❌ Ошибка подключения к Google Sheets"
-            
-        spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-        sheet = spreadsheet.worksheet("Объекты")
-        objects_data = sheet.get_all_values()
+        objects = load_objects()
+        salaries = load_salaries()
         
         # Находим выбранный объект
-        selected_text = context.user_data['selected_object']
-        for i, row in enumerate(objects_data[1:], start=2):  # Пропускаем заголовок
-            if row and len(row) >= 2:
-                object_text = f"{row[0]} - {row[1]}"
-                if object_text == selected_text:
-                    # Обновляем сумму зарплат
-                    current_salary = float(row[2] or 0) if len(row) > 2 else 0
-                    new_salary = current_salary + salary_amount
-                    sheet.update_cell(i, 3, str(new_salary))
-                    
-                    # Записываем в историю зарплат
-                    try:
-                        history_sheet = spreadsheet.worksheet("Зарплаты")
-                    except gspread.WorksheetNotFound:
-                        history_sheet = spreadsheet.add_worksheet(title="Зарплаты", rows=100, cols=4)
-                        history_sheet.append_row(["Адрес", "Название", "Сумма", "Дата"])
-                    
-                    history_sheet.append_row([
-                        row[0], row[1], salary_amount, context.user_data.get('current_date', 'Неизвестно')
-                    ])
-                    
-                    return True, f"✅ Зарплата успешно добавлена! Общая сумма: {new_salary:,.2f} руб."
+        for obj in objects:
+            object_text = f"{obj['address']} - {obj['name']}"
+            if object_text == selected_text:
+                # Обновляем сумму зарплат в объекте
+                obj['salary_total'] = obj.get('salary_total', 0) + salary_amount
+                
+                # Добавляем запись в историю зарплат
+                new_salary = {
+                    'address': obj['address'],
+                    'name': obj['name'],
+                    'amount': salary_amount,
+                    'date': context.user_data.get('current_date', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                }
+                salaries.append(new_salary)
+                
+                # Сохраняем обновленные данные
+                save_objects(objects)
+                save_salaries(salaries)
+                
+                return True, f"✅ Зарплата успешно добавлена! Общая сумма: {obj['salary_total']:,.2f} руб."
         
         return False, "❌ Объект не найден"
             
@@ -369,9 +353,9 @@ def confirm_salary(update: Update, context: CallbackContext):
     
     if text == "✅ Подтвердить":
         # Сохраняем текущую дату для записи
-        context.user_data['current_date'] = update.message.date.strftime("%Y-%m-%d %H:%M")
+        context.user_data['current_date'] = update.message.date.strftime("%Y-%m-%d %H:%M:%S")
         
-        success, message = save_salary_to_sheets(context)
+        success, message = save_salary_to_json(context)
         
         update.message.reply_text(
             f"{message}\n"
@@ -416,29 +400,7 @@ def edit_salary(update: Update, context: CallbackContext):
 def add_materials_start(update: Update, context: CallbackContext):
     context.user_data.clear()
     try:
-        client = init_google_sheets()
-        if not client:
-            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
-            return SELECTING_ACTION
-            
-        spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-        sheet = spreadsheet.worksheet("Объекты")
-        objects_data = sheet.get_all_values()
-        
-        if len(objects_data) <= 1:  # Только заголовок
-            update.message.reply_text("❌ Нет доступных объектов. Сначала добавьте объект.")
-            return SELECTING_ACTION
-        
-        # Преобразуем в удобный формат
-        objects = []
-        for row in objects_data[1:]:  # Пропускаем заголовок
-            if row and row[0]:  # Если адрес не пустой
-                objects.append({
-                    'Адрес': row[0],
-                    'Название': row[1] if len(row) > 1 else '',
-                    'Зарплата': row[2] if len(row) > 2 else '0',
-                    'Материалы': row[3] if len(row) > 3 else '0'
-                })
+        objects = load_objects()
         
         if not objects:
             update.message.reply_text("❌ Нет доступных объектов. Сначала добавьте объект.")
@@ -446,7 +408,7 @@ def add_materials_start(update: Update, context: CallbackContext):
         
         keyboard = []
         for obj in objects:
-            button_text = f"{obj['Адрес']} - {obj['Название']}"
+            button_text = f"{obj['address']} - {obj['name']}"
             keyboard.append([KeyboardButton(button_text)])
         
         keyboard.append([KeyboardButton("🔙 Назад")])
@@ -505,45 +467,37 @@ def show_material_confirmation(update: Update, context: CallbackContext):
     )
     return CONFIRMING_MATERIAL
 
-# Сохранение материала в Google Sheets
-def save_material_to_sheets(context):
+# Сохранение материала в JSON
+def save_material_to_json(context):
     try:
         material_cost = context.user_data['material_cost']
+        selected_text = context.user_data['selected_object']
         
-        client = init_google_sheets()
-        if not client:
-            return False, "❌ Ошибка подключения к Google Sheets"
-            
-        spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
-        sheet = spreadsheet.worksheet("Объекты")
-        objects_data = sheet.get_all_values()
+        objects = load_objects()
+        materials = load_materials()
         
         # Находим выбранный объект
-        selected_text = context.user_data['selected_object']
-        for i, row in enumerate(objects_data[1:], start=2):  # Пропускаем заголовок
-            if row and len(row) >= 2:
-                object_text = f"{row[0]} - {row[1]}"
-                if object_text == selected_text:
-                    # Обновляем сумму материалов
-                    current_materials = float(row[3] or 0) if len(row) > 3 else 0
-                    new_materials = current_materials + material_cost
-                    sheet.update_cell(i, 4, str(new_materials))
-                    
-                    # Записываем в историю материалов
-                    try:
-                        history_sheet = spreadsheet.worksheet("Материалы")
-                    except gspread.WorksheetNotFound:
-                        history_sheet = spreadsheet.add_worksheet(title="Материалы", rows=100, cols=5)
-                        history_sheet.append_row(["Адрес", "Название", "Материал", "Стоимость", "Дата"])
-                    
-                    history_sheet.append_row([
-                        row[0], row[1], 
-                        context.user_data['material_name'], 
-                        material_cost, 
-                        context.user_data.get('current_date', 'Неизвестно')
-                    ])
-                    
-                    return True, f"✅ Материал успешно добавлен! Общая сумма: {new_materials:,.2f} руб."
+        for obj in objects:
+            object_text = f"{obj['address']} - {obj['name']}"
+            if object_text == selected_text:
+                # Обновляем сумму материалов в объекте
+                obj['materials_total'] = obj.get('materials_total', 0) + material_cost
+                
+                # Добавляем запись в историю материалов
+                new_material = {
+                    'address': obj['address'],
+                    'name': obj['name'],
+                    'material_name': context.user_data['material_name'],
+                    'cost': material_cost,
+                    'date': context.user_data.get('current_date', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                }
+                materials.append(new_material)
+                
+                # Сохраняем обновленные данные
+                save_objects(objects)
+                save_materials(materials)
+                
+                return True, f"✅ Материал успешно добавлен! Общая сумма: {obj['materials_total']:,.2f} руб."
         
         return False, "❌ Объект не найден"
             
@@ -557,9 +511,9 @@ def confirm_material(update: Update, context: CallbackContext):
     
     if text == "✅ Подтвердить":
         # Сохраняем текущую дату для записи
-        context.user_data['current_date'] = update.message.date.strftime("%Y-%m-%d %H:%M")
+        context.user_data['current_date'] = update.message.date.strftime("%Y-%m-%d %H:%M:%S")
         
-        success, message = save_material_to_sheets(context)
+        success, message = save_material_to_json(context)
         
         update.message.reply_text(
             f"{message}\n"
@@ -607,15 +561,9 @@ def edit_material(update: Update, context: CallbackContext):
 # Отчет по объектам
 def show_report(update: Update, context: CallbackContext):
     try:
-        client = init_google_sheets()
-        if not client:
-            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
-            return SELECTING_ACTION
-            
-        sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
-        objects_data = sheet.get_all_values()
+        objects = load_objects()
         
-        if len(objects_data) <= 1:  # Только заголовок
+        if not objects:
             update.message.reply_text("❌ Нет данных об объектах")
             return SELECTING_ACTION
         
@@ -623,22 +571,21 @@ def show_report(update: Update, context: CallbackContext):
         total_salary = 0
         total_materials = 0
         
-        for row in objects_data[1:]:  # Пропускаем заголовок
-            if row and row[0]:  # Если адрес не пустой
-                address = row[0]
-                name = row[1] if len(row) > 1 else "Нет названия"
-                salary = float(row[2] or 0) if len(row) > 2 else 0
-                materials = float(row[3] or 0) if len(row) > 3 else 0
-                total_cost = salary + materials
-                
-                report += f"🏗️ {address}\n"
-                report += f"   Название: {name}\n"
-                report += f"   Зарплата: {salary:,.2f} руб.\n"
-                report += f"   Материалы: {materials:,.2f} руб.\n"
-                report += f"   ИТОГО: {total_cost:,.2f} руб.\n\n"
-                
-                total_salary += salary
-                total_materials += materials
+        for obj in objects:
+            address = obj['address']
+            name = obj['name']
+            salary = obj.get('salary_total', 0)
+            materials = obj.get('materials_total', 0)
+            total_cost = salary + materials
+            
+            report += f"🏗️ {address}\n"
+            report += f"   Название: {name}\n"
+            report += f"   Зарплата: {salary:,.2f} руб.\n"
+            report += f"   Материалы: {materials:,.2f} руб.\n"
+            report += f"   ИТОГО: {total_cost:,.2f} руб.\n\n"
+            
+            total_salary += salary
+            total_materials += materials
         
         report += f"📈 ОБЩИЕ СУММЫ:\n"
         report += f"Зарплаты: {total_salary:,.2f} руб.\n"
@@ -673,6 +620,9 @@ def main():
     if not BOT_TOKEN:
         print("Ошибка: BOT_TOKEN не найден!")
         return
+    
+    # Инициализируем данные
+    init_data()
     
     # Создаем updater и dispatcher
     updater = Updater(BOT_TOKEN, use_context=True)
@@ -711,6 +661,11 @@ def main():
     
     # Запуск бота
     print("Бот запущен...")
+    print("Данные сохраняются в JSON файлы:")
+    print(f"- Объекты: {OBJECTS_FILE}")
+    print(f"- Зарплаты: {SALARIES_FILE}")
+    print(f"- Материалы: {MATERIALS_FILE}")
+    
     updater.start_polling()
     updater.idle()
 
