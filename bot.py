@@ -49,7 +49,7 @@ class Config:
         self.GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
         self.GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
         
-        # ИЗМЕНЕНО: Сохраняем БД в постоянной директории
+        # Сохраняем БД в постоянной директории
         self.DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'materials.db')
         
         # Создаем директорию если не существует
@@ -307,7 +307,7 @@ def get_all_users_stats() -> Dict:
         health_monitor.record_error()
         return {'total_users': 0, 'total_materials': 0, 'delivered_materials': 0, 'delivering_soon': 0}
 
-def add_material_to_db(user_id: int, material_type: str, location: str, order_date: str, delivery_date: str, quantity: int, cost: float, salary: float = 0) -> bool:
+def add_material_to_db(user_id: int, material_type: str, location: str, order_date: str, delivery_date: str, quantity: int, cost: float) -> bool:
     """Добавление материала в БД с улучшенной обработкой ошибок"""
     try:
         logging.info(f"Попытка добавления материала для user_id: {user_id}")
@@ -315,9 +315,9 @@ def add_material_to_db(user_id: int, material_type: str, location: str, order_da
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute('''INSERT INTO materials 
-                          (user_id, material_type, location, order_date, delivery_date, quantity, cost, salary) 
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                          (user_id, material_type, location, order_date, delivery_date, quantity, cost, salary))
+                          (user_id, material_type, location, order_date, delivery_date, quantity, cost) 
+                          VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                          (user_id, material_type, location, order_date, delivery_date, quantity, cost))
             
             # Проверяем, что запись действительно добавлена
             material_id = cur.lastrowid
@@ -402,12 +402,12 @@ def delete_material_from_db(material_id: int, user_id: int) -> bool:
         return False
 
 def init_db():
-    """Синхронная инициализация базы данных"""
+    """Синхронная инициализация базы данных БЕЗ ПОЛЯ SALARY"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             
-            # Создаем таблицу если не существует
+            # Создаем таблицу если не существует БЕЗ ПОЛЯ SALARY
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS materials (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -418,7 +418,6 @@ def init_db():
                     delivery_date DATE,
                     quantity INTEGER,
                     cost REAL,
-                    salary REAL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -429,7 +428,7 @@ def init_db():
             cur.execute('''CREATE INDEX IF NOT EXISTS idx_delivery_date ON materials(delivery_date)''')
             cur.execute('''CREATE INDEX IF NOT EXISTS idx_user_delivery ON materials(user_id, delivery_date)''')
             
-            logging.info("База данных успешно инициализирована")
+            logging.info("База данных успешно инициализирована (без поля salary)")
                 
     except Exception as e:
         logging.error(f"Критическая ошибка инициализации БД: {e}")
@@ -444,7 +443,7 @@ def init_db():
         raise
 
 def check_and_update_schema():
-    """Проверка и обновление схема базы данных"""
+    """Проверка и обновление схема базы данных БЕЗ SALARY"""
     try:
         with get_db_connection() as conn:
             # Проверяем существование колонок
@@ -452,10 +451,7 @@ def check_and_update_schema():
             cur.execute("PRAGMA table_info(materials)")
             columns = [row[1] for row in cur.fetchall()]
             
-            # Добавляем недостающие колонки
-            if 'salary' not in columns:
-                cur.execute("ALTER TABLE materials ADD COLUMN salary REAL DEFAULT 0")
-                logging.info("Добавлена колонка salary")
+            # УДАЛЕНО: Добавление поля salary
             
             if 'created_at' not in columns:
                 cur.execute("ALTER TABLE materials ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
@@ -552,7 +548,7 @@ class EnhancedCacheManager:
         return stats
     
     def _calculate_user_stats(self, materials: List[Dict]) -> Dict:
-        """Расчет статистики пользователя"""
+        """Расчет статистики пользователя БЕЗ ЗАРПЛАТЫ"""
         today = datetime.now().date()
         stats = {
             'total': len(materials),
@@ -560,7 +556,6 @@ class EnhancedCacheManager:
             'delivering_soon': 0,
             'upcoming': 0,
             'total_cost': 0,
-            'total_salary': 0,
             'total_quantity': 0
         }
         
@@ -569,7 +564,6 @@ class EnhancedCacheManager:
             days_until = (delivery_date - today).days
             
             stats['total_cost'] += m.get('cost', 0)
-            stats['total_salary'] += m.get('salary', 0)
             stats['total_quantity'] += m.get('quantity', 0)
             
             if days_until <= 0:
@@ -581,11 +575,9 @@ class EnhancedCacheManager:
         
         if stats['total'] > 0:
             stats['avg_cost'] = stats['total_cost'] / stats['total']
-            stats['avg_salary'] = stats['total_salary'] / stats['total']
             stats['avg_quantity'] = stats['total_quantity'] / stats['total']
         else:
             stats['avg_cost'] = 0
-            stats['avg_salary'] = 0
             stats['avg_quantity'] = 0
             
         return stats
@@ -760,11 +752,10 @@ setup_logging()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def get_main_keyboard():
-    """Обновленная клавиатура главного меню"""
+    """Обновленная клавиатура главного меню БЕЗ ЗАРПЛАТЫ"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="📋 Мои материалы")
     builder.button(text="✨ Добавить материал")
-    builder.button(text="💰 Учет зарплаты")
     builder.button(text="⚙️ Управление материалами")
     builder.button(text="📊 Статистика")
     builder.button(text="📤 Импорт/Экспорт")
@@ -813,49 +804,6 @@ def get_management_keyboard():
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
-def get_salary_keyboard():
-    """Клавиатура учета зарплаты"""
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="💰 Добавить зарплату")
-    builder.button(text="📊 Статистика зарплат")
-    builder.button(text="✏️ Редактировать зарплату")
-    builder.button(text="🔙 Назад")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
-def get_import_export_keyboard():
-    """Клавиатура импорта/экспорта"""
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📤 Экспорт в Excel")
-    builder.button(text="📥 Импорт из Excel")
-    builder.button(text="📋 Шаблон Excel")
-    builder.button(text="☁️ Синхронизация с Google Sheets")
-    builder.button(text="🔙 Назад")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
-def get_sync_keyboard():
-    """Клавиатура синхронизации"""
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🔄 Синхронизировать с Google Sheets")
-    builder.button(text="🔄 Двусторонняя синхронизация")
-    builder.button(text="⚙️ Настройки синхронизации")
-    builder.button(text="📊 Статус синхронизации")
-    builder.button(text="🔙 Назад")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
-def get_sync_settings_keyboard():
-    """Клавиатура настроек синхронизации"""
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📝 Указать ID таблицы")
-    builder.button(text="🔄 Автосинхронизация ВКЛ")
-    builder.button(text="⏸️ Автосинхронизация ВЫКЛ")
-    builder.button(text="🗑️ Отключить синхронизацию")
-    builder.button(text="🔙 Назад")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
 def get_back_keyboard():
     """Клавиатура с кнопкой Назад"""
     builder = ReplyKeyboardBuilder()
@@ -869,7 +817,7 @@ def get_cancel_keyboard():
     return builder.as_markup(resize_keyboard=True)
 
 def get_edit_keyboard():
-    """Клавиатура для редактирования"""
+    """Клавиатура для редактирования БЕЗ ЗАРПЛАТЫ"""
     builder = ReplyKeyboardBuilder()
     builder.button(text="🏗️ Тип материала")
     builder.button(text="📍 Местоположение")
@@ -877,7 +825,6 @@ def get_edit_keyboard():
     builder.button(text="🚚 Дата доставки")
     builder.button(text="📦 Количество")
     builder.button(text="💵 Стоимость")
-    builder.button(text="💰 Зарплата")
     builder.button(text="🔙 Назад")
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
@@ -1064,17 +1011,7 @@ def validate_cost(cost: str) -> tuple[bool, str, float]:
     except ValueError:
         return False, "Стоимость должна быть числом", 0
 
-def validate_salary(salary: str) -> tuple[bool, str, float]:
-    """Валидация зарплаты"""
-    try:
-        salary_val = float(salary)
-        if salary_val < 0:
-            return False, "Зарплата не может быть отрицательной", 0
-        if salary_val > 10000000:  # Максимальная зарплата
-            return False, "Зарплата слишком большая", 0
-        return True, "OK", salary_val
-    except ValueError:
-        return False, "Зарплата должна быть числом", 0
+# УДАЛЕНО: validate_salary функция
 
 # ========== УЛУЧШЕННАЯ ВАЛИДАЦИЯ ДАТ ==========
 def try_auto_correct_date(date_str: str) -> Optional[datetime.date]:
@@ -1394,7 +1331,6 @@ class MaterialStates(StatesGroup):
     waiting_delivery_date = State()
     waiting_quantity = State()
     waiting_cost = State()
-    waiting_salary = State()
     waiting_confirmation = State()
 
 class EditMaterialStates(StatesGroup):
@@ -1407,10 +1343,7 @@ class DeleteMaterialStates(StatesGroup):
     waiting_material_selection = State()
     waiting_confirmation = State()
 
-class SalaryStates(StatesGroup):
-    waiting_material_selection = State()
-    waiting_salary_amount = State()
-    waiting_confirmation = State()
+# УДАЛЕНО: SalaryStates класс
 
 class ImportExportStates(StatesGroup):
     waiting_excel_file = State()
@@ -1485,7 +1418,7 @@ class GoogleSheetsSync:
             return False
     
     def sync_to_sheets(self, user_id: int, user_materials: List[Dict]) -> tuple[bool, str]:
-        """Синхронизация данных с Google Sheets с полной очисткой"""
+        """Синхронизация данных с Google Sheets с полной очисткой БЕЗ ЗАРПЛАТЫ"""
         try:
             if not self.is_configured():
                 return False, "Синхронизация не настроена"
@@ -1513,10 +1446,10 @@ class GoogleSheetsSync:
             except gspread.exceptions.WorksheetNotFound:
                 worksheet = sheet.add_worksheet(title=worksheet_name, rows=100, cols=12)
             
-            # Заголовки
+            # Заголовки БЕЗ ЗАРПЛАТЫ
             headers = ['ID', 'Тип материала', 'Местоположение', 'Дата заказа', 
                       'Дата доставки', 'Количество', 'Стоимость за ед.', 'Общая стоимость',
-                      'Зарплата', 'Статус', 'Осталось дней', 'Прогресс доставки']
+                      'Статус', 'Осталось дней', 'Прогресс доставки']
             worksheet.append_row(headers)
             
             # Подготавливаем данные
@@ -1546,7 +1479,6 @@ class GoogleSheetsSync:
                     m['quantity'],
                     m['cost'],
                     total_cost,
-                    m.get('salary', 0),
                     status,
                     days_until,
                     f"{progress:.1f}%"
@@ -1560,7 +1492,7 @@ class GoogleSheetsSync:
             # Форматируем таблицу
             try:
                 # Заголовки жирным
-                worksheet.format('A1:L1', {'textFormat': {'bold': True}})
+                worksheet.format('A1:K1', {'textFormat': {'bold': True}})
                 
                 # Авто-ширина колонок
                 sheet.batch_update({
@@ -1571,7 +1503,7 @@ class GoogleSheetsSync:
                                     "sheetId": worksheet.id,
                                     "dimension": "COLUMNS",
                                     "startIndex": 0,
-                                    "endIndex": 12
+                                    "endIndex": 11
                                 }
                             }
                         }
@@ -1592,7 +1524,7 @@ class GoogleSheetsSync:
             return False, f"Ошибка синхронизации: {str(e)}"
     
     def sync_from_sheets(self, user_id: int) -> tuple[bool, str]:
-        """Синхронизация данных ИЗ Google Sheets в бота"""
+        """Синхронизация данных ИЗ Google Sheets в бота БЕЗ ЗАРПЛАТЫ"""
         try:
             if not self.is_configured():
                 return False, "Синхронизация не настроена"
@@ -1640,7 +1572,6 @@ class GoogleSheetsSync:
                 delivery_date_str = row.get('Дата доставки', '')
                 quantity = row.get('Количество', 0)
                 cost = row.get('Стоимость за ед.', 0)
-                salary = row.get('Зарплата', 0)
                 
                 # Пропускаем некорректные данные
                 if not all([material_type, location, order_date_str, delivery_date_str, quantity, cost]):
@@ -1660,8 +1591,7 @@ class GoogleSheetsSync:
                             order_date=order_date.strftime('%Y-%m-%d'),
                             delivery_date=delivery_date.strftime('%Y-%m-%d'),
                             quantity=quantity,
-                            cost=cost,
-                            salary=salary
+                            cost=cost
                         )
                         if success:
                             updated_count += 1
@@ -1674,8 +1604,7 @@ class GoogleSheetsSync:
                             order_date=order_date.strftime('%Y-%m-%d'),
                             delivery_date=delivery_date.strftime('%Y-%m-%d'),
                             quantity=quantity,
-                            cost=cost,
-                            salary=salary
+                            cost=cost
                         )
                         if success:
                             added_count += 1
@@ -1998,7 +1927,6 @@ async def process_details_material(callback_query: types.CallbackQuery):
             f"📦 <b>Количество:</b> {material_data['quantity']}\n"
             f"💵 <b>Стоимость за ед.:</b> {material_data['cost']:.2f} руб.\n"
             f"💰 <b>Общая стоимость:</b> {total_cost:.2f} руб.\n"
-            f"💸 <b>Зарплата:</b> {material_data.get('salary', 0):.2f} руб.\n"
             f"📊 <b>Прогресс:</b> {format_material_status_with_progress(material_data)}"
         )
         
@@ -2007,6 +1935,552 @@ async def process_details_material(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка при обработке details: {e}")
         await callback_query.answer("❌ Произошла ошибка", show_alert=True)
+
+# ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    """Обработчик команды /start с rate limiting"""
+    if not check_access(message.from_user.id):
+        await message.answer(
+            "❌ <b>ДОСТУП ЗАПРЕЩЕН</b>\n\n"
+            "Этот бот доступен только для администраторов ООО «ИКС ГЕОСТРОЙ».",
+            parse_mode='HTML'
+        )
+        return
+    
+    health_monitor.record_message(message.from_user.id)
+    
+    # Всегда очищаем состояние при старте
+    await state.clear()
+    
+    # Проверяем статус автосинхронизации
+    sync_status = ""
+    if google_sync.auto_sync and google_sync.is_configured():
+        sync_status = "\n\n🔄 <b>Автосинхронизация активна</b>\nДанные обновляются каждые 300 секунд"
+    
+    await message.answer(
+        "🏗️ <b>ООО ИКС ГЕОСТРОЙ</b>\n"
+        "📦 <b>Учет строительных материалов</b> 🤖\n\n"
+        "📊 <i>Комплексная система учета строительных материалов</i>\n\n"
+        "🎯 <b>Основные возможности:</b>\n"
+        "• 📋 Просмотр всех материалов\n"
+        "• ✨ Добавление новых материалов\n"
+        "• ⏳ Контроль сроков доставки\n"
+        "• ⚙️ Полное управление базой\n"
+        "• 📊 Детальная статистика\n"
+        "• 📤 Импорт/Экспорт Excel\n"
+        "• ☁️ Синхронизация с Google Sheets\n"
+        "• 🔔 Автоматические напоминания\n"
+        "• ⚡ <b>Синхронизация в реальном времени (300 сек)</b>"
+        f"{sync_status}\n\n"
+        "🏗️ <i>Официальная система учета ООО «ИКС ГЕОСТРОЙ»</i>",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📋 Мои материалы")
+async def cmd_show_materials(message: types.Message):
+    """Показать все материалы пользователя"""
+    health_monitor.record_message(message.from_user.id)
+    
+    user_id = message.from_user.id
+    materials = get_user_materials(user_id)
+    
+    if not materials:
+        await message.answer(
+            "📭 <b>У вас пока нет материалов</b>\n\n"
+            "Добавьте первый материал через меню '✨ Добавить материал'",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    # Сортируем материалы по дате доставки
+    materials.sort(key=lambda x: x['delivery_date'])
+    
+    # Создаем сообщение с материалами
+    response = "📦 <b>ВАШИ МАТЕРИАЛЫ:</b>\n\n"
+    
+    today = datetime.now().date()
+    delivered_count = 0
+    delivering_soon_count = 0
+    
+    for i, material in enumerate(materials, 1):
+        delivery_date = datetime.strptime(str(material['delivery_date']), '%Y-%m-%d').date()
+        days_until = (delivery_date - today).days
+        icon, status = get_status_icon_and_text(days_until)
+        total_cost = material['quantity'] * material['cost']
+        
+        response += (
+            f"{icon} <b>#{material['id']}</b> - {material['material_type']}\n"
+            f"📍 <b>Местоположение:</b> {material['location']}\n"
+            f"📅 <b>Доставка:</b> {format_date_nice(delivery_date)} ({days_until} дней)\n"
+            f"📦 <b>Количество:</b> {material['quantity']}\n"
+            f"💰 <b>Стоимость:</b> {total_cost:.2f} руб.\n"
+            f"📊 <b>Статус:</b> {status}\n"
+        )
+        
+        # Добавляем прогресс-бар для материалов в процессе доставки
+        if days_until > 0:
+            order_date = datetime.strptime(str(material['order_date']), '%Y-%m-%d').date()
+            progress_text = format_material_status_with_progress(material)
+            response += f"⏳ <b>Прогресс:</b> {progress_text}\n"
+        
+        response += "─" * 30 + "\n"
+        
+        # Считаем статистику
+        if days_until <= 0:
+            delivered_count += 1
+        elif days_until <= 7:
+            delivering_soon_count += 1
+    
+    # Добавляем инфографику
+    infographic = create_delivery_infographic(materials)
+    response += f"\n{infographic}"
+    
+    await message.answer(response, parse_mode='HTML')
+
+@dp.message(F.text == "✨ Добавить материал")
+async def cmd_add_material(message: types.Message, state: FSMContext):
+    """Начало добавления материала"""
+    health_monitor.record_message(message.from_user.id)
+    
+    await message.answer(
+        "🏗️ <b>ДОБАВЛЕНИЕ МАТЕРИАЛА</b>\n\n"
+        "Выберите тип материала:",
+        reply_markup=get_material_type_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(MaterialStates.waiting_material_type)
+
+@dp.message(MaterialStates.waiting_material_type)
+async def process_material_type(message: types.Message, state: FSMContext):
+    """Обработка типа материала"""
+    if message.text == "🔙 Назад":
+        await state.clear()
+        await message.answer("🔙 Возврат в главное меню", reply_markup=get_main_keyboard())
+        return
+    
+    material_type = message.text
+    
+    # Если выбрана ручная опция
+    if material_type == "✏️ Другой тип материала":
+        await message.answer(
+            "🏗️ <b>Введите тип материала:</b>",
+            reply_markup=get_back_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    # Проверяем валидность типа материала
+    is_valid, error_msg = validate_material_type(material_type)
+    if not is_valid:
+        await message.answer(f"❌ {error_msg}\n\nВыберите тип материала:")
+        return
+    
+    await state.update_data(material_type=material_type)
+    await message.answer(
+        "📍 <b>Введите местоположение:</b>\n\n"
+        "Пример: Склад №1, Участок №2, Объект 'Северный'",
+        reply_markup=get_back_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(MaterialStates.waiting_location)
+
+@dp.message(MaterialStates.waiting_location)
+async def process_location(message: types.Message, state: FSMContext):
+    """Обработка местоположения"""
+    if message.text == "🔙 Назад":
+        await message.answer("Выберите тип материала:", reply_markup=get_material_type_keyboard())
+        await state.set_state(MaterialStates.waiting_material_type)
+        return
+    
+    location = message.text
+    
+    # Проверяем валидность местоположения
+    is_valid, error_msg = validate_location(location)
+    if not is_valid:
+        await message.answer(f"❌ {error_msg}\n\nВведите местоположение:")
+        return
+    
+    await state.update_data(location=location)
+    await message.answer(
+        "📅 <b>Введите дату заказа:</b>\n\n"
+        "Формат: ДД.ММ.ГГГГ или ДД.ММ\n"
+        "Пример: 15.12.2023 или 15.12",
+        reply_markup=get_back_keyboard(),
+        parse_mode='HTML'
+    )
+    await state.set_state(MaterialStates.waiting_order_date)
+
+@dp.message(MaterialStates.waiting_order_date)
+async def process_order_date(message: types.Message, state: FSMContext):
+    """Обработка даты заказа"""
+    if message.text == "🔙 Назад":
+        await message.answer(
+            "📍 Введите местоположение:",
+            reply_markup=get_back_keyboard()
+        )
+        await state.set_state(MaterialStates.waiting_location)
+        return
+    
+    try:
+        order_date = enhanced_validate_date(message.text)
+        await state.update_data(order_date=order_date.strftime('%Y-%m-%d'))
+        await message.answer(
+            "🚚 <b>Введите дату доставки:</b>\n\n"
+            "Формат: ДД.ММ.ГГГГ или ДД.ММ\n"
+            "Пример: 20.12.2023 или 20.12",
+            reply_markup=get_back_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.set_state(MaterialStates.waiting_delivery_date)
+    except ValueError as e:
+        await message.answer(f"❌ {str(e)}\n\nВведите дату заказа:")
+
+@dp.message(MaterialStates.waiting_delivery_date)
+async def process_delivery_date(message: types.Message, state: FSMContext):
+    """Обработка даты доставки"""
+    if message.text == "🔙 Назад":
+        await message.answer(
+            "📅 Введите дату заказа:",
+            reply_markup=get_back_keyboard()
+        )
+        await state.set_state(MaterialStates.waiting_order_date)
+        return
+    
+    try:
+        delivery_date = enhanced_validate_date(message.text)
+        
+        # Проверяем, что дата доставки не раньше даты заказа
+        data = await state.get_data()
+        order_date = datetime.strptime(data['order_date'], '%Y-%m-%d').date()
+        
+        if delivery_date < order_date:
+            await message.answer(
+                "❌ <b>Дата доставки не может быть раньше даты заказа!</b>\n\n"
+                f"Дата заказа: {format_date_nice(order_date)}\n"
+                f"Введите корректную дату доставки:",
+                parse_mode='HTML'
+            )
+            return
+        
+        await state.update_data(delivery_date=delivery_date.strftime('%Y-%m-%d'))
+        await message.answer(
+            "📦 <b>Введите количество:</b>",
+            reply_markup=get_back_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.set_state(MaterialStates.waiting_quantity)
+    except ValueError as e:
+        await message.answer(f"❌ {str(e)}\n\nВведите дату доставки:")
+
+@dp.message(MaterialStates.waiting_quantity)
+async def process_quantity(message: types.Message, state: FSMContext):
+    """Обработка количества"""
+    if message.text == "🔙 Назад":
+        await message.answer(
+            "🚚 Введите дату доставки:",
+            reply_markup=get_back_keyboard()
+        )
+        await state.set_state(MaterialStates.waiting_delivery_date)
+        return
+    
+    try:
+        is_valid, error_msg, quantity = validate_quantity(message.text)
+        if not is_valid:
+            await message.answer(f"❌ {error_msg}\n\nВведите количество:")
+            return
+        
+        await state.update_data(quantity=quantity)
+        await message.answer(
+            "💵 <b>Введите стоимость за единицу (в рублях):</b>",
+            reply_markup=get_back_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.set_state(MaterialStates.waiting_cost)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при обработке количества: {str(e)}")
+
+@dp.message(MaterialStates.waiting_cost)
+async def process_cost(message: types.Message, state: FSMContext):
+    """Обработка стоимости материала (последний шаг перед подтверждением)"""
+    if message.text == "🔙 Назад":
+        await message.answer("Введите количество:", reply_markup=get_back_keyboard())
+        await state.set_state(MaterialStates.waiting_quantity)
+        return
+    
+    try:
+        is_valid, error_msg, cost = validate_cost(message.text)
+        if not is_valid:
+            await message.answer(f"❌ {error_msg}\n\nВведите стоимость за единицу:")
+            return
+        
+        await state.update_data(cost=cost)
+        data = await state.get_data()
+        
+        # Форматируем данные для подтверждения БЕЗ ЗАРПЛАТЫ
+        order_date = datetime.strptime(str(data['order_date']), '%Y-%m-%d').date()
+        delivery_date = datetime.strptime(str(data['delivery_date']), '%Y-%m-%d').date()
+        days_until = (delivery_date - datetime.now().date()).days
+        icon, status = get_status_icon_and_text(days_until)
+        total_cost = data['quantity'] * cost
+        
+        confirmation_text = (
+            f"✅ <b>ПОДТВЕРЖДЕНИЕ ДАННЫХ</b>\n\n"
+            f"{icon} <b>Статус:</b> {status}\n"
+            f"🏗️ <b>Тип материала:</b> {data['material_type']}\n"
+            f"📍 <b>Местоположение:</b> {data['location']}\n"
+            f"📅 <b>Дата заказа:</b> {format_date_nice(order_date)}\n"
+            f"🚚 <b>Дата доставки:</b> {format_date_nice(delivery_date)}\n"
+            f"📦 <b>Количество:</b> {data['quantity']}\n"
+            f"💵 <b>Стоимость за ед.:</b> {cost:.2f} руб.\n"
+            f"💰 <b>Общая стоимость:</b> {total_cost:.2f} руб.\n\n"
+            f"<b>Всё верно?</b>"
+        )
+        
+        await message.answer(
+            confirmation_text,
+            reply_markup=get_confirmation_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.set_state(MaterialStates.waiting_confirmation)
+        
+    except Exception as e:
+        logging.error(f"Ошибка при обработке стоимости: {e}")
+        await message.answer("❌ Ошибка при обработке стоимости. Введите стоимость за единицу:")
+
+@dp.message(MaterialStates.waiting_confirmation)
+async def process_confirmation(message: types.Message, state: FSMContext):
+    """Обработка подтверждения добавления материала"""
+    if message.text == "✅ Да, всё верно":
+        data = await state.get_data()
+        user_id = message.from_user.id
+        
+        # Добавляем материал в БД
+        success = add_material_to_db(
+            user_id=user_id,
+            material_type=data['material_type'],
+            location=data['location'],
+            order_date=data['order_date'],
+            delivery_date=data['delivery_date'],
+            quantity=data['quantity'],
+            cost=data['cost']
+        )
+        
+        if success:
+            await message.answer(
+                "✅ <b>МАТЕРИАЛ УСПЕШНО ДОБАВЛЕН!</b>\n\n"
+                f"🏗️ <b>Тип:</b> {data['material_type']}\n"
+                f"📍 <b>Местоположение:</b> {data['location']}\n"
+                f"📦 <b>Количество:</b> {data['quantity']}\n"
+                f"💰 <b>Общая стоимость:</b> {data['quantity'] * data['cost']:.2f} руб.\n\n"
+                f"💫 Материал добавлен в вашу базу данных.",
+                reply_markup=get_main_keyboard(),
+                parse_mode='HTML'
+            )
+        else:
+            await message.answer(
+                "❌ <b>Ошибка при добавлении материала</b>\n\n"
+                "Пожалуйста, попробуйте еще раз.",
+                reply_markup=get_main_keyboard(),
+                parse_mode='HTML'
+            )
+        
+        await state.clear()
+        
+    elif message.text == "❌ Нет, изменить":
+        await message.answer(
+            "🔄 <b>Начнем заново</b>\n\n"
+            "Выберите тип материала:",
+            reply_markup=get_material_type_keyboard(),
+            parse_mode='HTML'
+        )
+        await state.set_state(MaterialStates.waiting_material_type)
+    else:
+        await message.answer(
+            "Пожалуйста, подтвердите добавление материала:",
+            reply_markup=get_confirmation_keyboard()
+        )
+
+@dp.message(F.text == "⚙️ Управление материалами")
+async def cmd_management(message: types.Message):
+    """Меню управления материалами"""
+    health_monitor.record_message(message.from_user.id)
+    
+    await message.answer(
+        "⚙️ <b>УПРАВЛЕНИЕ МАТЕРИАЛАМИ</b>\n\n"
+        "Выберите действие:",
+        reply_markup=get_management_keyboard(),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📊 Статистика")
+async def cmd_statistics(message: types.Message):
+    """Показать статистику"""
+    health_monitor.record_message(message.from_user.id)
+    
+    user_id = message.from_user.id
+    stats = cache_manager.get_user_stats(user_id)
+    all_stats = get_all_users_stats()
+    
+    stats_text = (
+        f"📊 <b>СТАТИСТИКА МАТЕРИАЛОВ</b>\n\n"
+        f"👤 <b>Ваша статистика:</b>\n"
+        f"• 📦 Всего материалов: {stats['total']}\n"
+        f"• 🟢 Доставлено: {stats['delivered']}\n"
+        f"• 🟡 Скоро доставка: {stats['delivering_soon']}\n"
+        f"• 🔵 Будущие: {stats['upcoming']}\n"
+        f"• 💰 Общая стоимость: {stats['total_cost']:.2f} руб.\n"
+        f"• 📦 Общее количество: {stats['total_quantity']}\n"
+        f"• 💵 Средняя стоимость: {stats['avg_cost']:.2f} руб.\n"
+        f"• 📦 Среднее количество: {stats['avg_quantity']:.1f}\n\n"
+        f"🏢 <b>Общая статистика системы:</b>\n"
+        f"• 👥 Пользователей: {all_stats['total_users']}\n"
+        f"• 📦 Всего материалов: {all_stats['total_materials']}\n"
+        f"• 🟢 Доставлено: {all_stats['delivered_materials']}\n"
+        f"• 🟡 Скоро доставка: {all_stats['delivering_soon']}"
+    )
+    
+    await message.answer(stats_text, parse_mode='HTML')
+
+@dp.message(F.text == "📤 Импорт/Экспорт")
+async def cmd_import_export(message: types.Message):
+    """Меню импорта/экспорта"""
+    health_monitor.record_message(message.from_user.id)
+    
+    keyboard = ReplyKeyboardBuilder()
+    keyboard.button(text="📤 Экспорт в Excel")
+    keyboard.button(text="📋 Шаблон Excel")
+    keyboard.button(text="☁️ Синхронизация с Google Sheets")
+    keyboard.button(text="🔙 Назад")
+    keyboard.adjust(2)
+    
+    await message.answer(
+        "📤 <b>ИМПОРТ/ЭКСПОРТ ДАННЫХ</b>\n\n"
+        "Выберите действие:",
+        reply_markup=keyboard.as_markup(resize_keyboard=True),
+        parse_mode='HTML'
+    )
+
+@dp.message(F.text == "📤 Экспорт в Excel")
+async def cmd_export_excel(message: types.Message):
+    """Экспорт данных в Excel"""
+    health_monitor.record_message(message.from_user.id)
+    
+    user_id = message.from_user.id
+    materials = get_user_materials(user_id)
+    
+    if not materials:
+        await message.answer(
+            "❌ <b>Нет данных для экспорта</b>\n\n"
+            "Сначала добавьте материалы через меню '✨ Добавить материал'",
+            reply_markup=get_main_keyboard(),
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        excel_file = export_to_excel(user_id)
+        await message.answer_document(
+            types.BufferedInputFile(
+                excel_file.getvalue(),
+                filename=f"materials_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            ),
+            caption="📊 <b>ЭКСПОРТ МАТЕРИАЛОВ В EXCEL</b>\n\n"
+                   f"📦 Материалов: {len(materials)}\n"
+                   f"📅 Дата экспорта: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logging.error(f"Ошибка при экспорте в Excel: {e}")
+        await message.answer(
+            "❌ <b>Ошибка при экспорте данных</b>\n\n"
+            "Пожалуйста, попробуйте позже.",
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "☁️ Синхронизация с Google Sheets")
+async def cmd_google_sheets(message: types.Message):
+    """Меню синхронизации с Google Sheets"""
+    health_monitor.record_message(message.from_user.id)
+    
+    keyboard = ReplyKeyboardBuilder()
+    keyboard.button(text="🔄 Синхронизировать с Google Sheets")
+    
+    if google_sync.is_configured():
+        status = "🟢 Настроена" if google_sync.sheet_id else "🔴 Не настроена"
+        auto_status = "ВКЛ" if google_sync.auto_sync else "ВЫКЛ"
+        
+        await message.answer(
+            f"☁️ <b>СИНХРОНИЗАЦИЯ С GOOGLE SHEETS</b>\n\n"
+            f"📊 <b>Статус:</b> {status}\n"
+            f"🔄 <b>Автосинхронизация:</b> {auto_status}\n"
+            f"📋 <b>ID таблицы:</b> {google_sync.sheet_id or 'Не указан'}\n\n"
+            f"💫 <i>Двусторонняя синхронизация работает каждые 300 секунд</i>",
+            reply_markup=keyboard.as_markup(resize_keyboard=True),
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            "❌ <b>Синхронизация с Google Sheets не настроена</b>\n\n"
+            "Для настройки необходимо:\n"
+            "1. Указать GOOGLE_SHEETS_CREDENTIALS в .env файле\n"
+            "2. Указать GOOGLE_SHEET_ID в .env файле\n"
+            "3. Перезапустить бота",
+            reply_markup=keyboard.as_markup(resize_keyboard=True),
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "🔄 Синхронизировать с Google Sheets")
+async def cmd_sync_sheets(message: types.Message):
+    """Ручная синхронизация с Google Sheets"""
+    health_monitor.record_message(message.from_user.id)
+    
+    if not google_sync.is_configured():
+        await message.answer(
+            "❌ <b>Синхронизация не настроена</b>\n\n"
+            "Проверьте настройки Google Sheets в конфигурации.",
+            parse_mode='HTML'
+        )
+        return
+    
+    user_id = message.from_user.id
+    materials = get_user_materials(user_id)
+    
+    if not materials:
+        await message.answer(
+            "❌ <b>Нет данных для синхронизации</b>\n\n"
+            "Сначала добавьте материалы.",
+            parse_mode='HTML'
+        )
+        return
+    
+    await message.answer("🔄 <b>Начинаю синхронизацию...</b>", parse_mode='HTML')
+    
+    success, message_text = safe_sync_to_sheets(user_id, materials)
+    
+    if success:
+        await message.answer(
+            f"✅ <b>СИНХРОНИЗАЦИЯ УСПЕШНА!</b>\n\n{message_text}",
+            parse_mode='HTML'
+        )
+    else:
+        await message.answer(
+            f"❌ <b>ОШИБКА СИНХРОНИЗАЦИИ</b>\n\n{message_text}",
+            parse_mode='HTML'
+        )
+
+@dp.message(F.text == "🔙 Назад")
+async def cmd_back(message: types.Message, state: FSMContext):
+    """Обработчик кнопки Назад"""
+    health_monitor.record_message(message.from_user.id)
+    await state.clear()
+    await message.answer(
+        "🔙 <b>Возврат в главное меню</b>",
+        reply_markup=get_main_keyboard(),
+        parse_mode='HTML'
+    )
 
 # ========== ОБРАБОТЧИКИ УПРАВЛЕНИЯ МАТЕРИАЛАМИ ==========
 
@@ -2073,8 +2547,7 @@ async def process_edit_material_selection(message: types.Message, state: FSMCont
         f"• Дата доставки: {format_date_nice(datetime.strptime(str(material_data['delivery_date']), '%Y-%m-%d'))}\n"
         f"• Количество: {material_data['quantity']}\n"
         f"• Стоимость за ед.: {material_data['cost']:.2f} руб.\n"
-        f"• Общая стоимость: {total_cost:.2f} руб.\n"
-        f"• Зарплата: {material_data.get('salary', 0):.2f} руб.\n\n"
+        f"• Общая стоимость: {total_cost:.2f} руб.\n\n"
         f"<b>Выберите поле для редактирования:</b>",
         reply_markup=get_edit_keyboard(),
         parse_mode='HTML'
@@ -2096,8 +2569,7 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
         "📅 Дата заказа": "order_date",
         "🚚 Дата доставки": "delivery_date",
         "📦 Количество": "quantity",
-        "💵 Стоимость": "cost",
-        "💰 Зарплата": "salary"
+        "💵 Стоимость": "cost"
     }
     
     if message.text not in field_mapping:
@@ -2124,8 +2596,7 @@ async def process_edit_field_selection(message: types.Message, state: FSMContext
         "order_date": f"📅 <b>Введите новую дату заказа:</b>\n\nТекущее значение: <i>{current_value}</i>\nФормат: ДД.ММ.ГГГГ или ДД.ММ",
         "delivery_date": f"🚚 <b>Введите новую дату доставки:</b>\n\nТекущее значение: <i>{current_value}</i>\nФормат: ДД.ММ.ГГГГ или ДД.ММ",
         "quantity": f"📦 <b>Введите новое количество:</b>\n\nТекущее значение: <i>{current_value}</i>",
-        "cost": f"💵 <b>Введите новую стоимость за единицу:</b>\n\nТекущее значение: <i>{current_value} руб.</i>",
-        "salary": f"💰 <b>Введите новую зарплату:</b>\n\nТекущее значение: <i>{current_value} руб.</i>"
+        "cost": f"💵 <b>Введите новую стоимость за единицу:</b>\n\nТекущее значение: <i>{current_value} руб.</i>"
     }
     
     await message.answer(
@@ -2154,8 +2625,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
             f"• Дата доставки: {format_date_nice(datetime.strptime(str(material_data['delivery_date']), '%Y-%m-%d'))}\n"
             f"• Количество: {material_data['quantity']}\n"
             f"• Стоимость за ед.: {material_data['cost']:.2f} руб.\n"
-            f"• Общая стоимость: {total_cost:.2f} руб.\n"
-            f"• Зарплата: {material_data.get('salary', 0):.2f} руб.\n\n"
+            f"• Общая стоимость: {total_cost:.2f} руб.\n\n"
             f"<b>Выберите поле для редактирования:</b>",
             reply_markup=get_edit_keyboard(),
             parse_mode='HTML'
@@ -2201,13 +2671,6 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 await message.answer(f"❌ {error_msg}\n\nВведите новое значение:")
                 return
             new_value = cost
-            
-        elif field_key == "salary":
-            is_valid, error_msg, salary = validate_salary(message.text)
-            if not is_valid:
-                await message.answer(f"❌ {error_msg}\n\nВведите новое значение:")
-                return
-            new_value = salary
         
         # Обновляем поле в БД
         success = update_material_in_db(material_id, user_id, **{field_key: new_value})
@@ -2219,8 +2682,7 @@ async def process_edit_new_value(message: types.Message, state: FSMContext):
                 "order_date": "дата заказа", 
                 "delivery_date": "дата доставки",
                 "quantity": "количество",
-                "cost": "стоимость",
-                "salary": "зарплата"
+                "cost": "стоимость"
             }
             
             await message.answer(
@@ -2313,7 +2775,6 @@ async def process_delete_material_selection(message: types.Message, state: FSMCo
         f"📍 Место: {material_data['location']}\n"
         f"📦 Количество: {material_data['quantity']}\n"
         f"💵 Стоимость: {total_cost:.2f} руб.\n"
-        f"💰 Зарплата: {material_data.get('salary', 0):.2f} руб.\n"
         f"📊 Статус: {status} ({days_until} дней)\n\n"
         f"<b>Вы уверены, что хотите удалить этот материал?</b>\n"
         f"<i>Это действие нельзя отменить!</i>",
@@ -2365,268 +2826,38 @@ async def process_delete_confirmation(message: types.Message, state: FSMContext)
             reply_markup=get_confirmation_keyboard()
         )
 
-# ========== ОБРАБОТЧИКИ ДЛЯ УЧЕТА ЗАРПЛАТЫ ==========
-
-@dp.message(F.text == "💰 Учет зарплаты")
-async def cmd_salary_management(message: types.Message):
-    """Меню учета зарплаты"""
+@dp.message(F.text == "🔄 Двусторонняя синхронизация")
+async def cmd_bidirectional_sync(message: types.Message):
+    """Двусторонняя синхронизация с Google Sheets"""
     health_monitor.record_message(message.from_user.id)
     
-    await message.answer(
-        "💰 <b>УЧЕТ ЗАРПЛАТЫ</b>\n\n"
-        "Управление заработной платой сотрудников:",
-        reply_markup=get_salary_keyboard(),
-        parse_mode='HTML'
-    )
-
-@dp.message(F.text == "💰 Добавить зарплату")
-async def cmd_add_salary(message: types.Message, state: FSMContext):
-    """Добавление зарплаты к материалу"""
-    health_monitor.record_message(message.from_user.id)
-    
-    materials = get_user_materials(message.from_user.id)
-    if not materials:
+    if not google_sync.is_configured():
         await message.answer(
-            "❌ <b>Нет материалов для добавления зарплаты</b>\n\n"
-            "Сначала добавьте материалы через меню '✨ Добавить материал'",
-            reply_markup=get_salary_keyboard(),
+            "❌ <b>Синхронизация не настроена</b>\n\n"
+            "Проверьте настройки Google Sheets в конфигурации.",
             parse_mode='HTML'
         )
         return
     
-    await show_materials_for_selection(message, materials, "добавления зарплаты")
-    await state.set_state(SalaryStates.waiting_material_selection)
-
-@dp.message(SalaryStates.waiting_material_selection)
-async def process_salary_material_selection(message: types.Message, state: FSMContext):
-    """Обработка выбора материала для добавления зарплаты"""
-    if message.text == "🔙 Назад":
-        await state.clear()
-        await cmd_salary_management(message)
-        return
-    
-    # Парсим ID материала из текста
-    match = re.search(r'#(\d+)', message.text)
-    if not match:
-        await message.answer(
-            "❌ <b>Неверный формат выбора</b>\n\n"
-            "Пожалуйста, выберите материал из списка:",
-            reply_markup=get_materials_selection_keyboard(get_user_materials(message.from_user.id), "добавления зарплаты")
-        )
-        return
-    
-    material_id = int(match.group(1))
     user_id = message.from_user.id
     
-    # Проверяем существование материала
-    material_data = get_material_by_id(material_id, user_id)
-    if not material_data:
-        await message.answer(
-            "❌ <b>Материал не найден</b>\n\n"
-            "Пожалуйста, выберите материал из списка:",
-            reply_markup=get_materials_selection_keyboard(get_user_materials(user_id), "добавления зарплаты")
-        )
-        return
+    await message.answer("🔄 <b>Запуск двусторонней синхронизации...</b>", parse_mode='HTML')
     
-    # Сохраняем ID материала в состоянии
-    await state.update_data(selected_material_id=material_id, material_data=material_data)
-    
-    current_salary = material_data.get('salary', 0)
-    
-    await message.answer(
-        f"💰 <b>ДОБАВЛЕНИЕ ЗАРПЛАТЫ</b>\n\n"
-        f"🏗️ <b>Материал:</b> {material_data['material_type']}\n"
-        f"📍 <b>Местоположение:</b> {material_data['location']}\n"
-        f"📦 <b>Количество:</b> {material_data['quantity']}\n"
-        f"💵 <b>Текущая зарплата:</b> {current_salary:.2f} руб.\n\n"
-        f"<b>Введите сумму зарплаты (в рублях):</b>",
-        reply_markup=get_back_keyboard(),
-        parse_mode='HTML'
-    )
-    await state.set_state(SalaryStates.waiting_salary_amount)
-
-@dp.message(SalaryStates.waiting_salary_amount)
-async def process_salary_amount(message: types.Message, state: FSMContext):
-    """Обработка ввода суммы зарплаты"""
-    if message.text == "🔙 Назад":
-        materials = get_user_materials(message.from_user.id)
-        await show_materials_for_selection(message, materials, "добавления зарплаты")
-        await state.set_state(SalaryStates.waiting_material_selection)
-        return
-    
-    try:
-        is_valid, error_msg, salary = validate_salary(message.text)
-        if not is_valid:
-            await message.answer(f"❌ {error_msg}\n\nВведите сумму зарплаты:")
-            return
-        
-        data = await state.get_data()
-        material_id = data.get('selected_material_id')
-        user_id = message.from_user.id
-        material_data = data.get('material_data', {})
-        
-        # Обновляем зарплату в БД
-        success = update_material_in_db(material_id, user_id, salary=salary)
-        
-        if success:
-            await message.answer(
-                f"✅ <b>ЗАРПЛАТА ДОБАВЛЕНА!</b>\n\n"
-                f"🏗️ Материал: {material_data['material_type']}\n"
-                f"📍 Местоположение: {material_data['location']}\n"
-                f"💰 Сумма зарплаты: {salary:.2f} руб.\n\n"
-                f"💫 <i>Зарплата успешно привязана к материалу</i>",
-                reply_markup=get_salary_keyboard(),
-                parse_mode='HTML'
-            )
-        else:
-            await message.answer(
-                "❌ <b>Ошибка при добавлении зарплаты</b>",
-                reply_markup=get_salary_keyboard(),
-                parse_mode='HTML'
-            )
-        
-        await state.clear()
-        
-    except Exception as e:
-        logging.error(f"Ошибка при добавлении зарплаты: {e}")
-        await message.answer(
-            "❌ <b>Произошла ошибка при добавлении зарплаты</b>",
-            reply_markup=get_salary_keyboard(),
-            parse_mode='HTML'
-        )
-        await state.clear()
-
-@dp.message(F.text == "📊 Статистика зарплат")
-async def cmd_salary_stats(message: types.Message):
-    """Статистика по зарплатам"""
-    health_monitor.record_message(message.from_user.id)
-    
-    user_id = message.from_user.id
+    # Синхронизация ИЗ бота В таблицу
     materials = get_user_materials(user_id)
+    if materials:
+        success_to, message_to = google_sync.sync_to_sheets(user_id, materials)
+        if success_to:
+            await message.answer(f"✅ <b>Данные отправлены в таблицу:</b>\n{message_to}", parse_mode='HTML')
+        else:
+            await message.answer(f"❌ <b>Ошибка отправки в таблицу:</b>\n{message_to}", parse_mode='HTML')
     
-    if not materials:
-        await message.answer(
-            "📭 <b>У вас пока нет данных о зарплатах</b>\n\n"
-            "Добавьте материалы и зарплаты, чтобы увидеть статистику.",
-            reply_markup=get_salary_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Фильтруем материалы с зарплатой
-    materials_with_salary = [m for m in materials if m.get('salary', 0) > 0]
-    
-    if not materials_with_salary:
-        await message.answer(
-            "💰 <b>Нет данных о зарплатах</b>\n\n"
-            "Добавьте зарплаты к материалам через меню '💰 Добавить зарплату'",
-            reply_markup=get_salary_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    # Рассчитываем статистику
-    total_salary = sum(m.get('salary', 0) for m in materials_with_salary)
-    avg_salary = total_salary / len(materials_with_salary)
-    max_salary = max(m.get('salary', 0) for m in materials_with_salary)
-    min_salary = min(m.get('salary', 0) for m in materials_with_salary)
-    
-    # Статистика по типам материалов
-    salary_by_type = {}
-    for m in materials_with_salary:
-        material_type = m['material_type']
-        salary = m.get('salary', 0)
-        if material_type not in salary_by_type:
-            salary_by_type[material_type] = 0
-        salary_by_type[material_type] += salary
-    
-    # Формируем текст статистики
-    stats_text = f"""
-💰 <b>СТАТИСТИКА ЗАРПЛАТ</b>
-
-📊 <b>Общие показатели:</b>
-• Всего выплат: {len(materials_with_salary)}
-• Общая сумма: {total_salary:.2f} руб.
-• Средняя зарплата: {avg_salary:.2f} руб.
-• Максимальная: {max_salary:.2f} руб.
-• Минимальная: {min_salary:.2f} руб.
-
-📈 <b>Распределение по типам материалов:</b>
-"""
-    
-    for material_type, salary in sorted(salary_by_type.items(), key=lambda x: x[1], reverse=True):
-        percentage = (salary / total_salary) * 100
-        stats_text += f"• {material_type}: {salary:.2f} руб. ({percentage:.1f}%)\n"
-    
-    stats_text += f"\n💫 <i>Статистика обновляется в реальном времени</i>"
-    
-    await message.answer(stats_text, parse_mode='HTML')
-
-@dp.message(F.text == "✏️ Редактировать зарплату")
-async def cmd_edit_salary(message: types.Message, state: FSMContext):
-    """Редактирование зарплаты"""
-    health_monitor.record_message(message.from_user.id)
-    
-    materials = get_user_materials(message.from_user.id)
-    materials_with_salary = [m for m in materials if m.get('salary', 0) > 0]
-    
-    if not materials_with_salary:
-        await message.answer(
-            "❌ <b>Нет зарплат для редактирования</b>\n\n"
-            "Сначала добавьте зарплаты через меню '💰 Добавить зарплату'",
-            reply_markup=get_salary_keyboard(),
-            parse_mode='HTML'
-        )
-        return
-    
-    await show_materials_for_selection(message, materials_with_salary, "редактирования зарплаты")
-    await state.set_state(SalaryStates.waiting_material_selection)
-
-# ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    """Обработчик команды /start с rate limiting"""
-    if not check_access(message.from_user.id):
-        await message.answer(
-            "❌ <b>ДОСТУП ЗАПРЕЩЕН</b>\n\n"
-            "Этот бот доступен только для администраторов ООО «ИКС ГЕОСТРОЙ».",
-            parse_mode='HTML'
-        )
-        return
-    
-    health_monitor.record_message(message.from_user.id)
-    
-    # Всегда очищаем состояние при старте
-    await state.clear()
-    
-    # Проверяем статус автосинхронизации
-    sync_status = ""
-    if google_sync.auto_sync and google_sync.is_configured():
-        sync_status = "\n\n🔄 <b>Автосинхронизация активна</b>\nДанные обновляются каждые 300 секунд"
-    
-    await message.answer(
-        "🏗️ <b>ООО ИКС ГЕОСТРОЙ</b>\n"
-        "💰 <b>Учет материалов и зарплат</b> 🤖\n\n"
-        "📦 <i>Комплексная система учета строительных материалов и заработной платы</i>\n\n"
-        "📊 <b>Основные возможности:</b>\n"
-        "• 📋 Просмотр всех материалов и зарплат\n"
-        "• ✨ Добавление новых материалов\n"
-        "• 💰 Учет заработной платы\n"
-        "• ⏳ Контроль сроков доставки\n"
-        "• ⚙️ Полное управление базой\n"
-        "• 📊 Детальная статистика\n"
-        "• 📤 Импорт/Экспорт Excel\n"
-        "• ☁️ Синхронизация с Google Sheets\n"
-        "• 🔔 Автоматические напоминания\n"
-        "• ⚡ <b>Синхронизация в реальном времени (300 сек)</b>"
-        f"{sync_status}\n\n"
-        "🏗️ <i>Официальная система учета ООО «ИКС ГЕОСТРОЙ»</i>",
-        reply_markup=get_main_keyboard(),
-        parse_mode='HTML'
-    )
-
-# Остальной код остается аналогичным оригинальному, но с заменой "фильтры" на "материалы"
-# и добавлением функционала для учета зарплаты...
+    # Синхронизация ИЗ таблицы В бота
+    success_from, message_from = google_sync.sync_from_sheets(user_id)
+    if success_from:
+        await message.answer(f"✅ <b>Данные получены из таблицы:</b>\n{message_from}", parse_mode='HTML')
+    else:
+        await message.answer(f"❌ <b>Ошибка получения из таблицы:</b>\n{message_from}", parse_mode='HTML')
 
 # ========== ЗАПУСК ПРИЛОЖЕНИЯ ==========
 def check_dependencies():
@@ -2676,10 +2907,11 @@ async def enhanced_main():
         await notify_admin(
             "🚀 <b>БОТ ЗАПУЩЕН</b>\n\n"
             f"⏰ Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
-            f"🔧 Режим: Учет материалов и зарплат\n"
+            f"🔧 Режим: Учет строительных материалов\n"
             f"🔄 Интервал: 300 секунд\n"
             f"💾 База данных: сохранение при перезагрузке\n"
-            f"🔄 Двусторонняя синхронизация: активирована"
+            f"🔄 Двусторонняя синхронизация: активирована\n"
+            f"💰 Учет зарплаты: отключен"
         )
         
         # Расширенная диагностика
