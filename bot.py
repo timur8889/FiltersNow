@@ -4,10 +4,10 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters, 
                          ConversationHandler, CallbackContext)
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 import gspread
 from dotenv import load_dotenv
 
+# Загружаем переменные окружения ДО их использования
 load_dotenv()
 
 # Настройка логирования
@@ -20,18 +20,26 @@ logger = logging.getLogger(__name__)
 # Токен бота из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
+# Проверяем, что токен загружен
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN не найден в переменных окружения!")
+    exit(1)
+
 # Настройки Google Sheets
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = 'your_spreadsheet_id_here'  # Замените на ID вашей таблицы
 
 # Состояния для ConversationHandler
 SELECTING_ACTION, ADDING_OBJECT, ADDING_SALARY, ADDING_MATERIALS, ENTERING_ADDRESS, ENTERING_NAME, ENTERING_SALARY, ENTERING_MATERIAL_NAME, ENTERING_MATERIAL_COST = range(9)
 
 # Инициализация Google Sheets
 def init_google_sheets():
-    creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-    client = gspread.authorize(creds)
-    return client
+    try:
+        creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации Google Sheets: {e}")
+        return None
 
 # Команда /start
 def start(update: Update, context: CallbackContext):
@@ -70,10 +78,14 @@ def enter_name(update: Update, context: CallbackContext):
     
     try:
         client = init_google_sheets()
+        if not client:
+            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
+            return SELECTING_ACTION
         
         # Пытаемся открыть существующую таблицу или создать новую
         try:
-            sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
+            spreadsheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
+            sheet = spreadsheet.worksheet("Объекты")
         except gspread.SpreadsheetNotFound:
             # Создаем новую таблицу если не существует
             spreadsheet = client.create("Учет строительных объектов ООО ИКС ГЕОСТРОЙ")
@@ -112,6 +124,10 @@ def enter_name(update: Update, context: CallbackContext):
 def add_salary_start(update: Update, context: CallbackContext):
     try:
         client = init_google_sheets()
+        if not client:
+            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
+            return SELECTING_ACTION
+            
         sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
         objects_data = sheet.get_all_values()
         
@@ -167,6 +183,10 @@ def save_salary(update: Update, context: CallbackContext):
         salary_amount = float(update.message.text.replace(',', '.'))
         
         client = init_google_sheets()
+        if not client:
+            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
+            return SELECTING_ACTION
+            
         sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
         objects_data = sheet.get_all_values()
         
@@ -216,6 +236,10 @@ def save_salary(update: Update, context: CallbackContext):
 def add_materials_start(update: Update, context: CallbackContext):
     try:
         client = init_google_sheets()
+        if not client:
+            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
+            return SELECTING_ACTION
+            
         sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
         objects_data = sheet.get_all_values()
         
@@ -277,6 +301,10 @@ def save_material(update: Update, context: CallbackContext):
         material_cost = float(update.message.text.replace(',', '.'))
         
         client = init_google_sheets()
+        if not client:
+            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
+            return SELECTING_ACTION
+            
         sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
         objects_data = sheet.get_all_values()
         
@@ -330,6 +358,10 @@ def save_material(update: Update, context: CallbackContext):
 def show_report(update: Update, context: CallbackContext):
     try:
         client = init_google_sheets()
+        if not client:
+            update.message.reply_text("❌ Ошибка подключения к Google Sheets")
+            return SELECTING_ACTION
+            
         sheet = client.open("Учет строительных объектов ООО ИКС ГЕОСТРОЙ").worksheet("Объекты")
         objects_data = sheet.get_all_values()
         
@@ -386,6 +418,11 @@ def cancel(update: Update, context: CallbackContext):
     return SELECTING_ACTION
 
 def main():
+    # Проверяем токен
+    if not BOT_TOKEN:
+        print("Ошибка: BOT_TOKEN не найден!")
+        return
+    
     # Создаем updater и dispatcher
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
