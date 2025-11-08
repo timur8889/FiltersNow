@@ -65,12 +65,32 @@ def confirmation_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# Клавиатура редактирования полей
-def edit_fields_keyboard(fields):
-    keyboard = []
-    for field in fields:
-        keyboard.append([KeyboardButton(f"✏️ {field}")])
-    keyboard.append([KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")])
+# Клавиатура редактирования полей для объекта
+def edit_object_fields_keyboard():
+    keyboard = [
+        [KeyboardButton("✏️ Редактировать адрес")],
+        [KeyboardButton("✏️ Редактировать название")],
+        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# Клавиатура редактирования полей для зарплаты
+def edit_salary_fields_keyboard():
+    keyboard = [
+        [KeyboardButton("✏️ Редактировать объект")],
+        [KeyboardButton("✏️ Редактировать сумму")],
+        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# Клавиатура редактирования полей для материала
+def edit_material_fields_keyboard():
+    keyboard = [
+        [KeyboardButton("✏️ Редактировать объект")],
+        [KeyboardButton("✏️ Редактировать название материала")],
+        [KeyboardButton("✏️ Редактировать стоимость")],
+        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+    ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # Команда /start
@@ -91,15 +111,30 @@ def add_object_start(update: Update, context: CallbackContext):
 
 # Шаг 2: название объекта
 def enter_address(update: Update, context: CallbackContext):
-    context.user_data['address'] = update.message.text
-    update.message.reply_text("Введите название объекта:")
-    return ENTERING_NAME
+    # Проверяем, не является ли это редактированием
+    if 'editing' in context.user_data and context.user_data['editing']:
+        context.user_data['address'] = update.message.text
+        # Возвращаем к подтверждению с обновленными данными
+        return show_object_confirmation(update, context)
+    else:
+        context.user_data['address'] = update.message.text
+        update.message.reply_text("Введите название объекта:")
+        return ENTERING_NAME
 
 # Подтверждение объекта
 def enter_name(update: Update, context: CallbackContext):
-    context.user_data['name'] = update.message.text
-    
-    # Показываем подтверждение
+    # Проверяем, не является ли это редактированием
+    if 'editing' in context.user_data and context.user_data['editing']:
+        context.user_data['name'] = update.message.text
+        # Возвращаем к подтверждению с обновленными данными
+        return show_object_confirmation(update, context)
+    else:
+        context.user_data['name'] = update.message.text
+        return show_object_confirmation(update, context)
+
+# Показать подтверждение объекта
+def show_object_confirmation(update: Update, context: CallbackContext):
+    context.user_data['editing'] = False  # Сбрасываем флаг редактирования
     update.message.reply_text(
         f"📋 ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ ОБЪЕКТА:\n\n"
         f"🏗️ Адрес: {context.user_data['address']}\n"
@@ -111,7 +146,9 @@ def enter_name(update: Update, context: CallbackContext):
 
 # Обработка подтверждения объекта
 def confirm_object(update: Update, context: CallbackContext):
-    if update.message.text == "✅ Подтвердить":
+    text = update.message.text
+    
+    if text == "✅ Подтвердить":
         try:
             client = init_google_sheets()
             if not client:
@@ -150,37 +187,45 @@ def confirm_object(update: Update, context: CallbackContext):
                 f"📝 Название: {context.user_data['name']}",
                 reply_markup=main_keyboard()
             )
+            context.user_data.clear()
         except Exception as e:
             logger.error(f"Ошибка при добавлении объекта: {e}")
             update.message.reply_text("❌ Ошибка при добавлении объекта")
         
         return SELECTING_ACTION
     
-    elif update.message.text == "✏️ Редактировать":
+    elif text == "✏️ Редактировать":
+        context.user_data['editing'] = True
         update.message.reply_text(
             "Выберите поле для редактирования:",
-            reply_markup=edit_fields_keyboard(["Адрес", "Название"])
+            reply_markup=edit_object_fields_keyboard()
         )
         return EDITING_OBJECT
     
-    elif update.message.text == "❌ Отменить":
+    elif text == "❌ Отменить":
         return cancel(update, context)
+    else:
+        update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
+        return CONFIRMING_OBJECT
 
 # Редактирование объекта
 def edit_object(update: Update, context: CallbackContext):
-    if update.message.text == "✏️ Адрес":
+    text = update.message.text
+    
+    if text == "✏️ Редактировать адрес":
         update.message.reply_text("Введите новый адрес объекта:")
-        context.user_data['editing_field'] = 'address'
         return ENTERING_ADDRESS
-    elif update.message.text == "✏️ Название":
+    elif text == "✏️ Редактировать название":
         update.message.reply_text("Введите новое название объекта:")
-        context.user_data['editing_field'] = 'name'
         return ENTERING_NAME
-    elif update.message.text == "✅ Подтвердить":
-        # Возвращаемся к подтверждению с обновленными данными
-        return enter_name(update, context)
-    elif update.message.text == "❌ Отменить":
+    elif text == "✅ Подтвердить":
+        # Возвращаемся к подтверждению с текущими данными
+        return show_object_confirmation(update, context)
+    elif text == "❌ Отменить":
         return cancel(update, context)
+    else:
+        update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
+        return EDITING_OBJECT
 
 # Добавление зарплаты - выбор объекта
 def add_salary_start(update: Update, context: CallbackContext):
@@ -246,23 +291,28 @@ def add_salary_amount(update: Update, context: CallbackContext):
         salary_amount = float(update.message.text.replace(',', '.'))
         context.user_data['salary_amount'] = salary_amount
         
-        # Показываем подтверждение
-        update.message.reply_text(
-            f"💰 ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ ЗАРПЛАТЫ:\n\n"
-            f"🏗️ Объект: {context.user_data['selected_object']}\n"
-            f"💵 Сумма: {salary_amount:,.2f} руб.\n\n"
-            f"Подтвердите добавление зарплаты:",
-            reply_markup=confirmation_keyboard()
-        )
-        return CONFIRMING_SALARY
+        return show_salary_confirmation(update, context)
         
     except ValueError:
         update.message.reply_text("❌ Пожалуйста, введите корректную сумму:")
         return ADDING_SALARY
 
+# Показать подтверждение зарплаты
+def show_salary_confirmation(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        f"💰 ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ ЗАРПЛАТЫ:\n\n"
+        f"🏗️ Объект: {context.user_data['selected_object']}\n"
+        f"💵 Сумма: {context.user_data['salary_amount']:,.2f} руб.\n\n"
+        f"Подтвердите добавление зарплаты:",
+        reply_markup=confirmation_keyboard()
+    )
+    return CONFIRMING_SALARY
+
 # Обработка подтверждения зарплаты
 def confirm_salary(update: Update, context: CallbackContext):
-    if update.message.text == "✅ Подтвердить":
+    text = update.message.text
+    
+    if text == "✅ Подтвердить":
         try:
             salary_amount = context.user_data['salary_amount']
             
@@ -305,6 +355,7 @@ def confirm_salary(update: Update, context: CallbackContext):
                             f"📈 Общая сумма зарплат на объекте: {new_salary:,.2f} руб.",
                             reply_markup=main_keyboard()
                         )
+                        context.user_data.clear()
                         break
             
         except Exception as e:
@@ -313,28 +364,36 @@ def confirm_salary(update: Update, context: CallbackContext):
         
         return SELECTING_ACTION
     
-    elif update.message.text == "✏️ Редактировать":
+    elif text == "✏️ Редактировать":
         update.message.reply_text(
             "Выберите поле для редактирования:",
-            reply_markup=edit_fields_keyboard(["Объект", "Сумма"])
+            reply_markup=edit_salary_fields_keyboard()
         )
         return EDITING_SALARY
     
-    elif update.message.text == "❌ Отменить":
+    elif text == "❌ Отменить":
         return cancel(update, context)
+    else:
+        update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
+        return CONFIRMING_SALARY
 
 # Редактирование зарплаты
 def edit_salary(update: Update, context: CallbackContext):
-    if update.message.text == "✏️ Объект":
+    text = update.message.text
+    
+    if text == "✏️ Редактировать объект":
         return add_salary_start(update, context)
-    elif update.message.text == "✏️ Сумма":
+    elif text == "✏️ Редактировать сумму":
         update.message.reply_text("Введите новую сумму зарплаты:")
         return ADDING_SALARY
-    elif update.message.text == "✅ Подтвердить":
+    elif text == "✅ Подтвердить":
         # Возвращаемся к подтверждению
-        return add_salary_amount(update, context)
-    elif update.message.text == "❌ Отменить":
+        return show_salary_confirmation(update, context)
+    elif text == "❌ Отменить":
         return cancel(update, context)
+    else:
+        update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
+        return EDITING_SALARY
 
 # Добавление материалов - выбор объекта
 def add_materials_start(update: Update, context: CallbackContext):
@@ -406,24 +465,29 @@ def add_material_cost(update: Update, context: CallbackContext):
         material_cost = float(update.message.text.replace(',', '.'))
         context.user_data['material_cost'] = material_cost
         
-        # Показываем подтверждение
-        update.message.reply_text(
-            f"🏗️ ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ МАТЕРИАЛА:\n\n"
-            f"📦 Объект: {context.user_data['selected_object']}\n"
-            f"🔧 Материал: {context.user_data['material_name']}\n"
-            f"💵 Стоимость: {material_cost:,.2f} руб.\n\n"
-            f"Подтвердите добавление материала:",
-            reply_markup=confirmation_keyboard()
-        )
-        return CONFIRMING_MATERIAL
+        return show_material_confirmation(update, context)
         
     except ValueError:
         update.message.reply_text("❌ Пожалуйста, введите корректную сумму:")
         return ADDING_MATERIALS
 
+# Показать подтверждение материала
+def show_material_confirmation(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        f"🏗️ ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ МАТЕРИАЛА:\n\n"
+        f"📦 Объект: {context.user_data['selected_object']}\n"
+        f"🔧 Материал: {context.user_data['material_name']}\n"
+        f"💵 Стоимость: {context.user_data['material_cost']:,.2f} руб.\n\n"
+        f"Подтвердите добавление материала:",
+        reply_markup=confirmation_keyboard()
+    )
+    return CONFIRMING_MATERIAL
+
 # Обработка подтверждения материала
 def confirm_material(update: Update, context: CallbackContext):
-    if update.message.text == "✅ Подтвердить":
+    text = update.message.text
+    
+    if text == "✅ Подтвердить":
         try:
             material_cost = context.user_data['material_cost']
             
@@ -470,6 +534,7 @@ def confirm_material(update: Update, context: CallbackContext):
                             f"📈 Общая сумма материалов на объекте: {new_materials:,.2f} руб.",
                             reply_markup=main_keyboard()
                         )
+                        context.user_data.clear()
                         break
             
         except Exception as e:
@@ -478,31 +543,39 @@ def confirm_material(update: Update, context: CallbackContext):
         
         return SELECTING_ACTION
     
-    elif update.message.text == "✏️ Редактировать":
+    elif text == "✏️ Редактировать":
         update.message.reply_text(
             "Выберите поле для редактирования:",
-            reply_markup=edit_fields_keyboard(["Объект", "Название материала", "Стоимость"])
+            reply_markup=edit_material_fields_keyboard()
         )
         return EDITING_MATERIAL
     
-    elif update.message.text == "❌ Отменить":
+    elif text == "❌ Отменить":
         return cancel(update, context)
+    else:
+        update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
+        return CONFIRMING_MATERIAL
 
 # Редактирование материала
 def edit_material(update: Update, context: CallbackContext):
-    if update.message.text == "✏️ Объект":
+    text = update.message.text
+    
+    if text == "✏️ Редактировать объект":
         return add_materials_start(update, context)
-    elif update.message.text == "✏️ Название материала":
+    elif text == "✏️ Редактировать название материала":
         update.message.reply_text("Введите новое название материала:")
         return ENTERING_MATERIAL_COST
-    elif update.message.text == "✏️ Стоимость":
+    elif text == "✏️ Редактировать стоимость":
         update.message.reply_text("Введите новую стоимость материала:")
         return ADDING_MATERIALS
-    elif update.message.text == "✅ Подтвердить":
+    elif text == "✅ Подтвердить":
         # Возвращаемся к подтверждению
-        return add_material_cost(update, context)
-    elif update.message.text == "❌ Отменить":
+        return show_material_confirmation(update, context)
+    elif text == "❌ Отменить":
         return cancel(update, context)
+    else:
+        update.message.reply_text("Пожалуйста, используйте кнопки для выбора действия:")
+        return EDITING_MATERIAL
 
 # Отчет по объектам
 def show_report(update: Update, context: CallbackContext):
